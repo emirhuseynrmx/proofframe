@@ -2,8 +2,13 @@
 
 ## 0.4.0-alpha.3
 
+- **Breaking:** the Rust API now returns a typed `ProofFrameError` (with `Arrow`, `Io`, `Regex`,
+  `Json`, `InvalidContract`, `MissingColumn`, `UnsupportedType`, `SchemaMismatch`, `DuplicateKey`,
+  `NoKeyColumns`, `CorruptData`, and `InvalidReceipt` variants) instead of `String`.
 - Extended canonical fingerprinting to nested list, large-list, fixed-size-list, struct, and map
   columns using recursive, domain-separated encodings so nested data no longer fails closed.
+- Added a pinned golden fingerprint test plus batch-invariance and data-sensitivity property tests
+  that lock the `pf-fp-v1` contract.
 - Documented the public Rust API: every exported type, field, and function now carries rustdoc,
   and the `receipt` module has a module-level overview.
 - Added a `documentation` link to crate metadata.

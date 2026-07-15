@@ -12,6 +12,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::ProofFrameError;
+
 /// Ed25519 signing keypair encoded as URL-safe base64.
 #[derive(Serialize)]
 pub struct Keypair {
@@ -54,23 +56,29 @@ pub struct Verification {
     pub schema_supported: bool,
 }
 
-fn canonical(value: &impl Serialize) -> Result<Vec<u8>, String> {
-    serde_json_canonicalizer::to_vec(value).map_err(|error| error.to_string())
+fn canonical(value: &impl Serialize) -> Result<Vec<u8>, ProofFrameError> {
+    serde_json_canonicalizer::to_vec(value)
+        .map_err(|error| ProofFrameError::InvalidReceipt(error.to_string()))
 }
 
-fn validate_i_json(value: &Value) -> Result<(), String> {
+fn validate_i_json(value: &Value) -> Result<(), ProofFrameError> {
     const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    let out_of_range = || {
+        ProofFrameError::InvalidReceipt(
+            "Receipt integers must be within the I-JSON safe range".to_string(),
+        )
+    };
     match value {
         Value::Number(number) => {
             if let Some(value) = number.as_i64() {
                 if value.unsigned_abs() > MAX_SAFE_INTEGER {
-                    return Err("Receipt integers must be within the I-JSON safe range".to_string());
+                    return Err(out_of_range());
                 }
             } else if number
                 .as_u64()
                 .is_some_and(|value| value > MAX_SAFE_INTEGER)
             {
-                return Err("Receipt integers must be within the I-JSON safe range".to_string());
+                return Err(out_of_range());
             }
         }
         Value::Array(values) => {
@@ -88,43 +96,48 @@ fn validate_i_json(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn decode_exact<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], String> {
+fn decode_exact<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], ProofFrameError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
-        .map_err(|error| format!("Invalid {label}: {error}"))?;
+        .map_err(|error| ProofFrameError::InvalidReceipt(format!("Invalid {label}: {error}")))?;
     bytes
         .try_into()
-        .map_err(|_| format!("Invalid {label} length"))
+        .map_err(|_| ProofFrameError::InvalidReceipt(format!("Invalid {label} length")))
 }
 
 /// Generate an Ed25519 [`Keypair`] and return it as a JSON string.
-pub fn generate_keypair_json() -> Result<String, String> {
+pub fn generate_keypair_json() -> Result<String, ProofFrameError> {
     let mut seed = [0_u8; 32];
-    getrandom::fill(&mut seed).map_err(|error| error.to_string())?;
+    getrandom::fill(&mut seed)
+        .map_err(|error| ProofFrameError::InvalidReceipt(error.to_string()))?;
     let signing = SigningKey::from_bytes(&seed);
     let output = Keypair {
         algorithm: "Ed25519",
         private_key: URL_SAFE_NO_PAD.encode(signing.to_bytes()),
         public_key: URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes()),
     };
-    serde_json::to_string(&output).map_err(|error| error.to_string())
+    Ok(serde_json::to_string(&output)?)
 }
 
 /// Sign a JSON report and return a canonical, Ed25519-signed receipt string.
 ///
 /// Integers outside the I-JSON safe range are rejected to keep JSON number
 /// canonicalization unambiguous.
-pub fn sign_json(report_json: &str, private_key: &str) -> Result<String, String> {
-    let report: Value = serde_json::from_str(report_json).map_err(|error| error.to_string())?;
+pub fn sign_json(report_json: &str, private_key: &str) -> Result<String, ProofFrameError> {
+    let report: Value = serde_json::from_str(report_json)?;
     validate_i_json(&report)?;
     let signing = SigningKey::from_bytes(&decode_exact(private_key, "private key")?);
     let report_hash = blake3::hash(&canonical(&report)?).to_hex().to_string();
     let issued_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
+        .map_err(|error| ProofFrameError::InvalidReceipt(error.to_string()))?
         .as_millis()
         .try_into()
-        .map_err(|_| "System timestamp is outside the supported range".to_string())?;
+        .map_err(|_| {
+            ProofFrameError::InvalidReceipt(
+                "System timestamp is outside the supported range".to_string(),
+            )
+        })?;
     let unsigned = UnsignedReceipt {
         schema: "proofframe.receipt.v1".to_string(),
         algorithm: "Ed25519".to_string(),
@@ -135,17 +148,15 @@ pub fn sign_json(report_json: &str, private_key: &str) -> Result<String, String>
         public_key: URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes()),
     };
     let signature = signing.sign(&canonical(&unsigned)?);
-    serde_json::to_string(&SignedReceipt {
+    Ok(serde_json::to_string(&SignedReceipt {
         unsigned,
         signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
-    })
-    .map_err(|error| error.to_string())
+    })?)
 }
 
 /// Verify a signed receipt's schema, report hash, and Ed25519 signature.
-pub fn verify_json(receipt_json: &str) -> Result<Verification, String> {
-    let receipt: SignedReceipt =
-        serde_json::from_str(receipt_json).map_err(|error| error.to_string())?;
+pub fn verify_json(receipt_json: &str) -> Result<Verification, ProofFrameError> {
+    let receipt: SignedReceipt = serde_json::from_str(receipt_json)?;
     validate_i_json(&receipt.unsigned.report)?;
     let schema_supported = receipt.unsigned.schema == "proofframe.receipt.v1"
         && receipt.unsigned.algorithm == "Ed25519";
@@ -155,7 +166,9 @@ pub fn verify_json(receipt_json: &str) -> Result<Verification, String> {
     let report_hash_matches = expected_hash == receipt.unsigned.report_hash;
     let public =
         VerifyingKey::from_bytes(&decode_exact(&receipt.unsigned.public_key, "public key")?)
-            .map_err(|error| format!("Invalid public key: {error}"))?;
+            .map_err(|error| {
+                ProofFrameError::InvalidReceipt(format!("Invalid public key: {error}"))
+            })?;
     let signature = Signature::from_bytes(&decode_exact(&receipt.signature, "signature")?);
     let signature_valid = public
         .verify_strict(&canonical(&receipt.unsigned)?, &signature)

@@ -6,8 +6,11 @@
 //! enough to publish as an alpha: `pf-fp-v1` canonical dataset fingerprints, disk-backed exact
 //! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
+mod error;
 mod pii;
 pub mod receipt;
+
+pub use error::ProofFrameError;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -343,7 +346,7 @@ fn update_schema_hash(hasher: &mut blake3::Hasher, name: &str, data_type: &str, 
     hasher.update(&[u8::from(nullable)]);
 }
 
-fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, String> {
+fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, ProofFrameError> {
     if array.is_null(row) {
         return Ok(vec![0]);
     }
@@ -440,15 +443,14 @@ fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, Strin
         return encode_child_sequence(27, &values.value(row));
     }
 
-    Err(format!(
-        "Unsupported Arrow type `{}` for canonical fingerprinting",
-        array.data_type()
+    Err(ProofFrameError::UnsupportedType(
+        array.data_type().to_string(),
     ))
 }
 
 /// Encode every element of a nested child array with a tag, an element count,
 /// and per-element length prefixes.
-fn encode_child_sequence(tag: u8, child: &dyn Array) -> Result<Vec<u8>, String> {
+fn encode_child_sequence(tag: u8, child: &dyn Array) -> Result<Vec<u8>, ProofFrameError> {
     let mut encoded = vec![tag];
     encoded.extend_from_slice(&(child.len() as u64).to_le_bytes());
     for index in 0..child.len() {
@@ -459,8 +461,8 @@ fn encode_child_sequence(tag: u8, child: &dyn Array) -> Result<Vec<u8>, String> 
     Ok(encoded)
 }
 
-fn value_for_rules(array: &dyn Array, row: usize) -> Result<String, String> {
-    array_value_to_string(array, row).map_err(|error| error.to_string())
+fn value_for_rules(array: &dyn Array, row: usize) -> Result<String, ProofFrameError> {
+    array_value_to_string(array, row).map_err(Into::into)
 }
 
 fn update_hash(
@@ -468,7 +470,7 @@ fn update_hash(
     column: usize,
     array: &dyn Array,
     row: usize,
-) -> Result<(), String> {
+) -> Result<(), ProofFrameError> {
     hasher.update(b"pf-cell-v1\0");
     hasher.update(&(column as u64).to_le_bytes());
     let encoded = canonical_value_bytes(array, row)?;
@@ -494,7 +496,7 @@ fn row_values_hash(values: &RowValues) -> String {
 fn inspect_batches<R>(
     reader: R,
     contract: Option<&Contract>,
-) -> Result<(Profile, ValidationOutcome), String>
+) -> Result<(Profile, ValidationOutcome), ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -525,7 +527,7 @@ where
             if let Some(pattern) = &rule.pattern {
                 patterns.insert(
                     name.clone(),
-                    Regex::new(pattern).map_err(|error| error.to_string())?,
+                    Regex::new(pattern)?,
                 );
             }
         }
@@ -540,7 +542,7 @@ where
     }
     hasher.update(b"pf-fp-body-v1\0");
     for maybe_batch in reader {
-        let batch = maybe_batch.map_err(|error| error.to_string())?;
+        let batch = maybe_batch?;
         for row in 0..batch.num_rows() {
             let global_row = rows + row as u64;
             for (column_index, array) in batch.columns().iter().enumerate() {
@@ -687,7 +689,7 @@ fn diff_key(
     batch: &RecordBatch,
     key_indexes: &[usize],
     row: usize,
-) -> Result<(Vec<u8>, String), String> {
+) -> Result<(Vec<u8>, String), ProofFrameError> {
     let mut canonical = Vec::new();
     let mut display = Vec::with_capacity(key_indexes.len());
     for index in key_indexes {
@@ -705,32 +707,31 @@ fn diff_key(
     Ok((canonical, display.join("\u{1f}")))
 }
 
-fn write_u64(writer: &mut BufWriter<File>, value: u64) -> Result<(), String> {
-    writer
-        .write_all(&value.to_le_bytes())
-        .map_err(|error| error.to_string())
+fn write_u64(writer: &mut BufWriter<File>, value: u64) -> Result<(), ProofFrameError> {
+    writer.write_all(&value.to_le_bytes()).map_err(Into::into)
 }
 
-fn read_u64(reader: &mut BufReader<File>) -> Result<Option<u64>, String> {
+fn read_u64(reader: &mut BufReader<File>) -> Result<Option<u64>, ProofFrameError> {
     let mut bytes = [0_u8; 8];
     match reader.read_exact(&mut bytes) {
         Ok(()) => Ok(Some(u64::from_le_bytes(bytes))),
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error.into()),
     }
 }
 
-fn write_bytes(writer: &mut BufWriter<File>, value: &[u8]) -> Result<(), String> {
+fn write_bytes(writer: &mut BufWriter<File>, value: &[u8]) -> Result<(), ProofFrameError> {
     write_u64(writer, value.len() as u64)?;
-    writer.write_all(value).map_err(|error| error.to_string())
+    writer.write_all(value).map_err(Into::into)
 }
 
-fn read_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>, String> {
-    let len = read_u64(reader)?.ok_or_else(|| "Truncated diff partition record".to_string())?;
+fn read_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>, ProofFrameError> {
+    let len = read_u64(reader)?
+        .ok_or_else(|| ProofFrameError::CorruptData("Truncated diff partition record".to_string()))?;
     let mut value = vec![0_u8; len as usize];
     reader
         .read_exact(&mut value)
-        .map_err(|error| error.to_string())?;
+        ?;
     Ok(value)
 }
 
@@ -738,7 +739,7 @@ fn write_row_record(
     writer: &mut BufWriter<File>,
     key: &[u8],
     entry: &RowEntry,
-) -> Result<(), String> {
+) -> Result<(), ProofFrameError> {
     write_bytes(writer, key)?;
     write_bytes(writer, entry.display_key.as_bytes())?;
     write_bytes(writer, entry.hash.as_bytes())?;
@@ -752,28 +753,30 @@ fn write_row_record(
     Ok(())
 }
 
-fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(Vec<u8>, RowEntry)>, String> {
+fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(Vec<u8>, RowEntry)>, ProofFrameError> {
     let Some(key_len) = read_u64(reader)? else {
         return Ok(None);
     };
     let mut key = vec![0_u8; key_len as usize];
     reader
         .read_exact(&mut key)
-        .map_err(|error| error.to_string())?;
-    let display_key = String::from_utf8(read_bytes(reader)?).map_err(|error| error.to_string())?;
-    let hash = String::from_utf8(read_bytes(reader)?).map_err(|error| error.to_string())?;
+        ?;
+    let display_key = String::from_utf8(read_bytes(reader)?)?;
+    let hash = String::from_utf8(read_bytes(reader)?)?;
     let value_count =
-        read_u64(reader)?.ok_or_else(|| "Truncated diff partition record".to_string())?;
+        read_u64(reader)?
+        .ok_or_else(|| ProofFrameError::CorruptData("Truncated diff partition record".to_string()))?;
     let mut values = Vec::with_capacity(value_count as usize);
     for _ in 0..value_count {
-        let len = read_u64(reader)?.ok_or_else(|| "Truncated diff value".to_string())?;
+        let len = read_u64(reader)?
+            .ok_or_else(|| ProofFrameError::CorruptData("Truncated diff value".to_string()))?;
         if len == u64::MAX {
             values.push(None);
         } else {
             let mut value = vec![0_u8; len as usize];
             reader
                 .read_exact(&mut value)
-                .map_err(|error| error.to_string())?;
+                ?;
             values.push(Some(value));
         }
     }
@@ -792,7 +795,7 @@ fn partition_rows<R>(
     keys: &[String],
     directory: &Path,
     prefix: &str,
-) -> Result<(Vec<ColumnSchema>, usize, Vec<PathBuf>), String>
+) -> Result<(Vec<ColumnSchema>, usize, Vec<PathBuf>), ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -802,7 +805,7 @@ where
         .map(|key| {
             schema
                 .index_of(key)
-                .map_err(|_| format!("Key column `{key}` is missing"))
+                .map_err(|_| ProofFrameError::MissingColumn(key.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let signature = schema_signature(&reader);
@@ -813,10 +816,10 @@ where
         .iter()
         .map(|path| File::create(path).map(BufWriter::new))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+        ?;
     let mut row_count = 0_usize;
     for maybe_batch in reader {
-        let batch: RecordBatch = maybe_batch.map_err(|error| error.to_string())?;
+        let batch: RecordBatch = maybe_batch?;
         for row in 0..batch.num_rows() {
             let (key, display_key) = diff_key(&batch, &key_indexes, row)?;
             let values = batch
@@ -845,7 +848,7 @@ where
         }
     }
     for writer in &mut writers {
-        writer.flush().map_err(|error| error.to_string())?;
+        writer.flush()?;
     }
     Ok((signature, row_count, paths))
 }
@@ -857,25 +860,23 @@ fn process_diff_partition(
     added_keys: &mut Vec<String>,
     removed_keys: &mut Vec<String>,
     changed: &mut Vec<ChangedRow>,
-) -> Result<(), String> {
+) -> Result<(), ProofFrameError> {
     let mut before_rows: HashMap<Vec<u8>, RowEntry> = HashMap::new();
     let mut before_reader =
-        BufReader::new(File::open(before_path).map_err(|error| error.to_string())?);
+        BufReader::new(File::open(before_path)?);
     while let Some((key, entry)) = read_row_record(&mut before_reader)? {
+        let display_key = entry.display_key.clone();
         if before_rows.insert(key, entry).is_some() {
-            return Err("Duplicate key detected; diff keys must be unique".to_string());
+            return Err(ProofFrameError::DuplicateKey(display_key));
         }
     }
 
     let mut seen_after: HashSet<Vec<u8>> = HashSet::new();
     let mut after_reader =
-        BufReader::new(File::open(after_path).map_err(|error| error.to_string())?);
+        BufReader::new(File::open(after_path)?);
     while let Some((key, entry)) = read_row_record(&mut after_reader)? {
         if !seen_after.insert(key.clone()) {
-            return Err(format!(
-                "Duplicate key `{}`; diff keys must be unique",
-                entry.display_key
-            ));
+            return Err(ProofFrameError::DuplicateKey(entry.display_key.clone()));
         }
         if let Some(before_entry) = before_rows.get(&key) {
             if before_entry.hash != entry.hash {
@@ -917,7 +918,7 @@ fn privacy_fingerprint(value: &str) -> String {
 fn collect_leakage_ids<R>(
     reader: R,
     keys: &[String],
-) -> Result<(Vec<String>, usize, HashSet<String>), String>
+) -> Result<(Vec<String>, usize, HashSet<String>), ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -934,14 +935,14 @@ where
             .map(|key| {
                 schema
                     .index_of(key)
-                    .map_err(|_| format!("Key column `{key}` is missing"))
+                    .map_err(|_| ProofFrameError::MissingColumn(key.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?
     };
     let mut row_count = 0_usize;
     let mut ids = HashSet::new();
     for maybe_batch in reader {
-        let batch = maybe_batch.map_err(|error| error.to_string())?;
+        let batch = maybe_batch?;
         for row in 0..batch.num_rows() {
             let mut hasher = blake3::Hasher::new();
             hasher.update(b"proofframe:leakage:v1\0");
@@ -956,7 +957,7 @@ where
     Ok((names, row_count, ids))
 }
 
-fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, String> {
+fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, ProofFrameError> {
     if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
         Ok(Some(values.value(row)))
     } else if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
@@ -967,7 +968,7 @@ fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, String> {
         Ok(Some(values.value(row) as f64))
     } else {
         Ok(array_value_to_string(array, row)
-            .map_err(|error| error.to_string())?
+            ?
             .parse::<f64>()
             .ok())
     }
@@ -1001,7 +1002,7 @@ fn check_unique(
     column: &str,
     row_offset: u64,
     validation: &mut ValidationState,
-) -> Result<(), String> {
+) -> Result<(), ProofFrameError> {
     match state {
         UniqueState::Int64(seen) => {
             let values = array
@@ -1068,7 +1069,7 @@ fn check_range(
     column: &str,
     row_offset: u64,
     validation: &mut ValidationState,
-) -> Result<(), String> {
+) -> Result<(), ProofFrameError> {
     if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
         for row in 0..values.len() {
             if values.is_valid(row) {
@@ -1118,7 +1119,7 @@ fn push_range_findings(
     }
 }
 
-fn validate_fast_batches<R>(reader: R, contract: &Contract) -> Result<FastValidationReport, String>
+fn validate_fast_batches<R>(reader: R, contract: &Contract) -> Result<FastValidationReport, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -1138,14 +1139,14 @@ where
         if let Some(pattern) = &rule.pattern {
             patterns.insert(
                 name.clone(),
-                Regex::new(pattern).map_err(|error| error.to_string())?,
+                Regex::new(pattern)?,
             );
         }
     }
 
     let mut rows = 0_u64;
     for maybe_batch in reader {
-        let batch = maybe_batch.map_err(|error| error.to_string())?;
+        let batch = maybe_batch?;
         for (column_index, field) in schema.fields().iter().enumerate() {
             let Some(rule) = contract.columns.get(field.name()) else {
                 continue;
@@ -1228,7 +1229,7 @@ where
 }
 
 /// Profile Arrow record batches and return typed Rust metadata.
-pub fn profile_reader<R>(reader: R) -> Result<Profile, String>
+pub fn profile_reader<R>(reader: R) -> Result<Profile, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -1236,7 +1237,7 @@ where
 }
 
 /// Validate Arrow record batches with the full profiling path.
-pub fn validate_reader<R>(reader: R, contract: &Contract) -> Result<ValidationReport, String>
+pub fn validate_reader<R>(reader: R, contract: &Contract) -> Result<ValidationReport, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -1254,7 +1255,7 @@ where
 pub fn validate_fast_reader<R>(
     reader: R,
     contract: &Contract,
-) -> Result<FastValidationReport, String>
+) -> Result<FastValidationReport, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -1262,21 +1263,23 @@ where
 }
 
 /// Compute an exact keyed diff between two Arrow readers.
-pub fn diff_readers<B, A>(before: B, after: A, keys: &[String]) -> Result<DiffReport, String>
+pub fn diff_readers<B, A>(before: B, after: A, keys: &[String]) -> Result<DiffReport, ProofFrameError>
 where
     B: RecordBatchReader,
     A: RecordBatchReader,
 {
     if keys.is_empty() {
-        return Err("At least one key column is required".to_string());
+        return Err(ProofFrameError::NoKeyColumns);
     }
-    let directory = TempDir::new().map_err(|error| error.to_string())?;
+    let directory = TempDir::new()?;
     let (before_schema, before_count, before_paths) =
         partition_rows(before, keys, directory.path(), "before")?;
     let (after_schema, after_count, after_paths) =
         partition_rows(after, keys, directory.path(), "after")?;
     if before_schema != after_schema {
-        return Err("Schemas differ; normalize columns before row-level diff".to_string());
+        return Err(ProofFrameError::SchemaMismatch(
+            "normalize columns before row-level diff".to_string(),
+        ));
     }
     let column_names = schema_names(&before_schema);
 
@@ -1310,18 +1313,18 @@ where
 }
 
 /// Scan Arrow record batches for high-signal PII patterns.
-pub fn scan_pii_reader<R>(reader: R, max_findings: usize) -> Result<PiiReport, String>
+pub fn scan_pii_reader<R>(reader: R, max_findings: usize) -> Result<PiiReport, ProofFrameError>
 where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
-    let detector = pii::Detector::new().map_err(|error| error.to_string())?;
+    let detector = pii::Detector::new()?;
     let mut findings = Vec::new();
     let mut counts = BTreeMap::new();
     let mut scanned_rows = 0_u64;
     let mut total_findings = 0_usize;
     for maybe_batch in reader {
-        let batch = maybe_batch.map_err(|error| error.to_string())?;
+        let batch = maybe_batch?;
         for row in 0..batch.num_rows() {
             for (column, array) in batch.columns().iter().enumerate() {
                 if array.is_null(row) {
@@ -1363,7 +1366,7 @@ pub fn detect_leakage_readers<TR, TE>(
     test: TE,
     keys: &[String],
     max_samples: usize,
-) -> Result<LeakageReport, String>
+) -> Result<LeakageReport, ProofFrameError>
 where
     TR: RecordBatchReader,
     TE: RecordBatchReader,
@@ -1371,9 +1374,9 @@ where
     let (train_names, train_rows, train_ids) = collect_leakage_ids(train, keys)?;
     let (test_names, test_rows, test_ids) = collect_leakage_ids(test, keys)?;
     if keys.is_empty() && train_names != test_names {
-        return Err(
-            "Schemas differ; full-row leakage detection requires identical columns".to_string(),
-        );
+        return Err(ProofFrameError::SchemaMismatch(
+            "full-row leakage detection requires identical columns".to_string(),
+        ));
     }
     let mut overlap = train_ids
         .intersection(&test_ids)
@@ -1417,7 +1420,8 @@ fn validate_arrow(
     source: PyArrowType<ArrowArrayStreamReader>,
     contract_json: &str,
 ) -> PyResult<String> {
-    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
+    let contract: Contract = serde_json::from_str(contract_json)
+        .map_err(|error| py_err(ProofFrameError::InvalidContract(error.to_string())))?;
     let report = validate_reader(source.0, &contract).map_err(py_err)?;
     serde_json::to_string(&report).map_err(py_err)
 }
@@ -1428,7 +1432,8 @@ fn validate_fast_arrow(
     source: PyArrowType<ArrowArrayStreamReader>,
     contract_json: &str,
 ) -> PyResult<String> {
-    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
+    let contract: Contract = serde_json::from_str(contract_json)
+        .map_err(|error| py_err(ProofFrameError::InvalidContract(error.to_string())))?;
     let report = validate_fast_batches(source.0, &contract).map_err(py_err)?;
     serde_json::to_string(&report).map_err(py_err)
 }
@@ -1608,6 +1613,89 @@ mod tests {
         assert!(first.fingerprint.starts_with("pf-fp-v1:"));
         assert_eq!(first.fingerprint, repeat.fingerprint);
         assert_ne!(first.fingerprint, different.fingerprint);
+    }
+
+    fn int_string_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1_i64, 2, 3])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("a"), None, Some("c")])) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Golden fingerprint. If the canonical encoding changes, this pin must be
+    /// updated together with a new `pf-fp` tag — a silent change is a bug.
+    #[test]
+    fn fingerprint_is_pinned() {
+        let fingerprint = profile_reader(reader_from_batch(int_string_batch()))
+            .unwrap()
+            .fingerprint;
+        assert_eq!(
+            fingerprint,
+            "pf-fp-v1:4dc74e666725f040dea7e788827d0411e59c19a72b55f2ce27f22ed9a00afb42",
+            "canonical fingerprint changed; update the pin and bump the tag if intentional"
+        );
+    }
+
+    #[test]
+    fn fingerprint_ignores_batch_boundaries() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let whole = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1_i64, 2, 3, 4])) as ArrayRef],
+        )
+        .unwrap();
+        let first = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1_i64, 2])) as ArrayRef],
+        )
+        .unwrap();
+        let second = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![3_i64, 4])) as ArrayRef],
+        )
+        .unwrap();
+
+        let single = profile_reader(reader_from_batch(whole)).unwrap().fingerprint;
+        let split = profile_reader(RecordBatchIterator::new(
+            vec![Ok(first), Ok(second)].into_iter(),
+            schema,
+        ))
+        .unwrap()
+        .fingerprint;
+        assert_eq!(single, split);
+    }
+
+    proptest! {
+        #[test]
+        fn fingerprint_tracks_data_changes(
+            left in prop::collection::vec(any::<i64>(), 1..20),
+            right in prop::collection::vec(any::<i64>(), 1..20),
+        ) {
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+            let fingerprint = |data: &[i64]| {
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(Int64Array::from(data.to_vec())) as ArrayRef],
+                )
+                .unwrap();
+                profile_reader(reader_from_batch(batch)).unwrap().fingerprint
+            };
+            let left_fp = fingerprint(&left);
+            let right_fp = fingerprint(&right);
+            if left == right {
+                prop_assert_eq!(left_fp, right_fp);
+            } else {
+                prop_assert_ne!(left_fp, right_fp);
+            }
+        }
     }
 }
 
