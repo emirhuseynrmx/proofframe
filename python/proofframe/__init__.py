@@ -4,6 +4,7 @@ from ._proofframe import __version__
 from .api import (
     detect_leakage,
     diff,
+    fingerprint,
     generate_keypair,
     profile,
     scan_pii,
@@ -16,6 +17,7 @@ __all__ = [
     "__version__",
     "detect_leakage",
     "diff",
+    "fingerprint",
     "generate_keypair",
     "profile",
     "scan_pii",

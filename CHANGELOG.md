@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0-alpha.4
+
+- Added standalone `fingerprint_reader` / `pf.fingerprint(data)` so callers can compute only the
+  canonical `pf-fp-v1` hash without profile, min/max, or exact distinct state.
+- Added `profile(..., distinct="none"|"exact")`; exact distinct remains the default for backward
+  compatibility, while large datasets can opt out of exact cardinality work.
+- Reworked validation hot paths to avoid string rendering for clean numeric and unique checks.
+  Finding messages render values only when a violation needs user-facing evidence.
+- Expanded typed validation and unique checks for signed integers, unsigned integers, floats, UTF-8,
+  and timestamp arrays. Float uniqueness uses `to_bits()` semantics; nulls are ignored for unique.
+- Removed string-parse numeric min/max fallback from validation; unsupported numeric-like types such
+  as decimal are not coerced through display text.
+- Added a rule-by-rule benchmark harness covering required/not-null, min/max, unique, full contract,
+  fingerprint-only, and exact-distinct profile cases with raw timings, rows/sec, peak RSS, rule
+  metadata, Arrow schema, and package versions.
+- Recorded the historical 7.6M-row Windows baseline: validation 8.82s, Arrow validation 8.66s, full
+  profile 47.47s.
+- Removed the `roaring` dependency from unique validation state.
+
 ## 0.4.0-alpha.3
 
 - **Breaking:** the Rust API now returns a typed `ProofFrameError` (with `Arrow`, `Io`, `Regex`,

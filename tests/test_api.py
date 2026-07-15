@@ -45,6 +45,18 @@ def test_fingerprint_is_invariant_to_batch_segmentation():
     assert proofframe.profile(source)["fingerprint"] == proofframe.profile(segmented)[
         "fingerprint"
     ]
+    assert proofframe.fingerprint(source) == proofframe.profile(source)["fingerprint"]
+    assert proofframe.fingerprint(source) == proofframe.fingerprint(segmented)
+
+
+def test_profile_can_skip_exact_distinct_counts():
+    report = proofframe.profile(users(), distinct="none")
+
+    assert report["fingerprint"] == proofframe.fingerprint(users())
+    assert [column["distinct_count"] for column in report["columns"]] == [None, None, None]
+
+    with pytest.raises(ValueError, match="distinct"):
+        proofframe.profile(users(), distinct="approximate")
 
 
 def test_contract_reports_row_level_evidence():

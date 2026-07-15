@@ -37,7 +37,6 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
-use roaring::RoaringTreemap;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
@@ -69,21 +68,54 @@ pub struct ColumnProfile {
     pub null_count: u64,
     /// Number of non-null values observed in the column.
     pub non_null_count: u64,
-    /// Count of distinct canonical values seen in the column.
-    pub distinct_count: usize,
+    /// Count of distinct canonical values seen in the column, when exact distinct is enabled.
+    pub distinct_count: Option<usize>,
     /// Minimum numeric value, when the column parses as a number.
     pub min: Option<f64>,
     /// Maximum numeric value, when the column parses as a number.
     pub max: Option<f64>,
 }
 
-#[derive(Default)]
 struct ColumnState {
     null_count: u64,
     non_null_count: u64,
-    distinct: HashSet<Vec<u8>>,
+    distinct: Option<HashSet<Vec<u8>>>,
     min: Option<f64>,
     max: Option<f64>,
+}
+
+impl ColumnState {
+    fn new(distinct_mode: DistinctMode) -> Self {
+        Self {
+            null_count: 0,
+            non_null_count: 0,
+            distinct: match distinct_mode {
+                DistinctMode::None => None,
+                DistinctMode::Exact => Some(HashSet::new()),
+            },
+            min: None,
+            max: None,
+        }
+    }
+}
+
+/// Exact distinct counting can dominate large profiles, so callers can opt out.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DistinctMode {
+    None,
+    Exact,
+}
+
+impl DistinctMode {
+    pub fn from_name(value: &str) -> Result<Self, ProofFrameError> {
+        match value {
+            "none" => Ok(Self::None),
+            "exact" => Ok(Self::Exact),
+            other => Err(ProofFrameError::InvalidContract(format!(
+                "Unsupported distinct mode `{other}`; expected `none` or `exact`"
+            ))),
+        }
+    }
 }
 
 /// Deterministic dataset profile with a canonical content fingerprint.
@@ -217,8 +249,10 @@ impl ValidationState {
 }
 
 enum UniqueState {
-    Int64(RoaringTreemap),
-    UInt64(RoaringTreemap),
+    SignedInt(HashSet<i64, RandomState>),
+    UnsignedInt(HashSet<u64, RandomState>),
+    Timestamp(HashSet<i64, RandomState>),
+    Float32(HashSet<u32, RandomState>),
     Float64(HashSet<u64, RandomState>),
     Utf8(HashSet<String, RandomState>),
     Generic(HashSet<Vec<u8>, RandomState>),
@@ -226,10 +260,26 @@ enum UniqueState {
 
 impl UniqueState {
     fn for_array(array: &dyn Array) -> Self {
-        if array.as_any().is::<Int64Array>() {
-            Self::Int64(RoaringTreemap::new())
-        } else if array.as_any().is::<UInt64Array>() {
-            Self::UInt64(RoaringTreemap::new())
+        if array.as_any().is::<Int8Array>()
+            || array.as_any().is::<Int16Array>()
+            || array.as_any().is::<Int32Array>()
+            || array.as_any().is::<Int64Array>()
+        {
+            Self::SignedInt(HashSet::with_hasher(RandomState::new()))
+        } else if array.as_any().is::<UInt8Array>()
+            || array.as_any().is::<UInt16Array>()
+            || array.as_any().is::<UInt32Array>()
+            || array.as_any().is::<UInt64Array>()
+        {
+            Self::UnsignedInt(HashSet::with_hasher(RandomState::new()))
+        } else if array.as_any().is::<TimestampSecondArray>()
+            || array.as_any().is::<TimestampMillisecondArray>()
+            || array.as_any().is::<TimestampMicrosecondArray>()
+            || array.as_any().is::<TimestampNanosecondArray>()
+        {
+            Self::Timestamp(HashSet::with_hasher(RandomState::new()))
+        } else if array.as_any().is::<Float32Array>() {
+            Self::Float32(HashSet::with_hasher(RandomState::new()))
         } else if array.as_any().is::<Float64Array>() {
             Self::Float64(HashSet::with_hasher(RandomState::new()))
         } else if array.as_any().is::<StringArray>() {
@@ -496,6 +546,7 @@ fn row_values_hash(values: &RowValues) -> String {
 fn inspect_batches<R>(
     reader: R,
     contract: Option<&Contract>,
+    distinct_mode: DistinctMode,
 ) -> Result<(Profile, ValidationOutcome), ProofFrameError>
 where
     R: RecordBatchReader,
@@ -504,7 +555,7 @@ where
     let mut states = schema
         .fields()
         .iter()
-        .map(|_| ColumnState::default())
+        .map(|_| ColumnState::new(distinct_mode))
         .collect::<Vec<_>>();
     let mut seen_unique: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
     let mut patterns: HashMap<String, Regex> = HashMap::new();
@@ -564,20 +615,22 @@ where
                 state.non_null_count += 1;
                 update_hash(&mut hasher, column_index, array.as_ref(), row)?;
                 let value_key = canonical_value_bytes(array.as_ref(), row)?;
-                state.distinct.insert(value_key.clone());
+                if let Some(distinct) = &mut state.distinct {
+                    distinct.insert(value_key.clone());
+                }
                 if let Some(number) = numeric_value(array.as_ref(), row)? {
                     state.min = Some(state.min.map_or(number, |current| current.min(number)));
                     state.max = Some(state.max.map_or(number, |current| current.max(number)));
                 }
 
                 if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
-                    let value = value_for_rules(array.as_ref(), row)?;
                     if rule.unique
                         && !seen_unique
                             .get_mut(field.name())
                             .expect("unique set initialized")
                             .insert(value_key)
                     {
+                        let value = value_for_rules(array.as_ref(), row)?;
                         validation.record(Finding {
                             rule: "unique",
                             column: field.name().clone(),
@@ -585,8 +638,14 @@ where
                             message: format!("Duplicate value `{value}`"),
                         });
                     }
+                    let numeric = if rule.min.is_some() || rule.max.is_some() {
+                        numeric_value(array.as_ref(), row)?
+                    } else {
+                        None
+                    };
                     if let Some(min) = rule.min {
-                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number < min) {
+                        if numeric.is_some_and(|number| number < min) {
+                            let value = value_for_rules(array.as_ref(), row)?;
                             validation.record(Finding {
                                 rule: "min",
                                 column: field.name().clone(),
@@ -596,7 +655,8 @@ where
                         }
                     }
                     if let Some(max) = rule.max {
-                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number > max) {
+                        if numeric.is_some_and(|number| number > max) {
+                            let value = value_for_rules(array.as_ref(), row)?;
                             validation.record(Finding {
                                 rule: "max",
                                 column: field.name().clone(),
@@ -605,27 +665,30 @@ where
                             });
                         }
                     }
-                    if let Some(regex) = patterns.get(field.name()) {
-                        if !regex.is_match(&value) {
-                            validation.record(Finding {
-                                rule: "pattern",
-                                column: field.name().clone(),
-                                row: Some(global_row),
-                                message: format!(
-                                    "Value `{value}` does not match `{}`",
-                                    regex.as_str()
-                                ),
-                            });
+                    if patterns.contains_key(field.name()) || rule.allowed.is_some() {
+                        let value = value_for_rules(array.as_ref(), row)?;
+                        if let Some(regex) = patterns.get(field.name()) {
+                            if !regex.is_match(&value) {
+                                validation.record(Finding {
+                                    rule: "pattern",
+                                    column: field.name().clone(),
+                                    row: Some(global_row),
+                                    message: format!(
+                                        "Value `{value}` does not match `{}`",
+                                        regex.as_str()
+                                    ),
+                                });
+                            }
                         }
-                    }
-                    if let Some(allowed) = &rule.allowed {
-                        if !allowed.contains(&value) {
-                            validation.record(Finding {
-                                rule: "allowed",
-                                column: field.name().clone(),
-                                row: Some(global_row),
-                                message: format!("Value `{value}` is not in the allowlist"),
-                            });
+                        if let Some(allowed) = &rule.allowed {
+                            if !allowed.contains(&value) {
+                                validation.record(Finding {
+                                    rule: "allowed",
+                                    column: field.name().clone(),
+                                    row: Some(global_row),
+                                    message: format!("Value `{value}` is not in the allowlist"),
+                                });
+                            }
                         }
                     }
                 }
@@ -643,7 +706,7 @@ where
             data_type: field.data_type().to_string(),
             null_count: state.null_count,
             non_null_count: state.non_null_count,
-            distinct_count: state.distinct.len(),
+            distinct_count: state.distinct.as_ref().map(HashSet::len),
             min: state.min,
             max: state.max,
         })
@@ -953,12 +1016,32 @@ fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, ProofFram
         Ok(Some(values.value(row)))
     } else if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
         Ok(Some(f64::from(values.value(row))))
+    } else if let Some(values) = array.as_any().downcast_ref::<Int8Array>() {
+        Ok(Some(f64::from(values.value(row))))
+    } else if let Some(values) = array.as_any().downcast_ref::<Int16Array>() {
+        Ok(Some(f64::from(values.value(row))))
+    } else if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        Ok(Some(f64::from(values.value(row))))
     } else if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
         Ok(Some(values.value(row) as f64))
+    } else if let Some(values) = array.as_any().downcast_ref::<UInt8Array>() {
+        Ok(Some(f64::from(values.value(row))))
+    } else if let Some(values) = array.as_any().downcast_ref::<UInt16Array>() {
+        Ok(Some(f64::from(values.value(row))))
+    } else if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
+        Ok(Some(f64::from(values.value(row))))
     } else if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
         Ok(Some(values.value(row) as f64))
+    } else if let Some(values) = array.as_any().downcast_ref::<TimestampSecondArray>() {
+        Ok(Some(values.value(row) as f64))
+    } else if let Some(values) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        Ok(Some(values.value(row) as f64))
+    } else if let Some(values) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        Ok(Some(values.value(row) as f64))
+    } else if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+        Ok(Some(values.value(row) as f64))
     } else {
-        Ok(array_value_to_string(array, row)?.parse::<f64>().ok())
+        Ok(None)
     }
 }
 
@@ -992,25 +1075,22 @@ fn check_unique(
     validation: &mut ValidationState,
 ) -> Result<(), ProofFrameError> {
     match state {
-        UniqueState::Int64(seen) => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .expect("type fixed from schema");
-            for row in 0..values.len() {
-                if values.is_valid(row) && !seen.insert((values.value(row) as u64) ^ (1_u64 << 63))
-                {
-                    push_duplicate(validation, column, row_offset + row as u64);
-                }
-            }
+        UniqueState::SignedInt(seen) => {
+            check_unique_signed(array, seen, column, row_offset, validation)
         }
-        UniqueState::UInt64(seen) => {
+        UniqueState::UnsignedInt(seen) => {
+            check_unique_unsigned(array, seen, column, row_offset, validation)
+        }
+        UniqueState::Timestamp(seen) => {
+            check_unique_timestamp(array, seen, column, row_offset, validation)
+        }
+        UniqueState::Float32(seen) => {
             let values = array
                 .as_any()
-                .downcast_ref::<UInt64Array>()
+                .downcast_ref::<Float32Array>()
                 .expect("type fixed from schema");
             for row in 0..values.len() {
-                if values.is_valid(row) && !seen.insert(values.value(row)) {
+                if values.is_valid(row) && !seen.insert(values.value(row).to_bits()) {
                     push_duplicate(validation, column, row_offset + row as u64);
                 }
             }
@@ -1051,6 +1131,84 @@ fn check_unique(
     Ok(())
 }
 
+fn check_unique_signed(
+    array: &dyn Array,
+    seen: &mut HashSet<i64, RandomState>,
+    column: &str,
+    row_offset: u64,
+    validation: &mut ValidationState,
+) {
+    macro_rules! check {
+        ($ty:ty) => {
+            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
+                for row in 0..values.len() {
+                    if values.is_valid(row) && !seen.insert(values.value(row) as i64) {
+                        push_duplicate(validation, column, row_offset + row as u64);
+                    }
+                }
+                return;
+            }
+        };
+    }
+    check!(Int8Array);
+    check!(Int16Array);
+    check!(Int32Array);
+    check!(Int64Array);
+    unreachable!("type fixed from schema");
+}
+
+fn check_unique_unsigned(
+    array: &dyn Array,
+    seen: &mut HashSet<u64, RandomState>,
+    column: &str,
+    row_offset: u64,
+    validation: &mut ValidationState,
+) {
+    macro_rules! check {
+        ($ty:ty) => {
+            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
+                for row in 0..values.len() {
+                    if values.is_valid(row) && !seen.insert(values.value(row) as u64) {
+                        push_duplicate(validation, column, row_offset + row as u64);
+                    }
+                }
+                return;
+            }
+        };
+    }
+    check!(UInt8Array);
+    check!(UInt16Array);
+    check!(UInt32Array);
+    check!(UInt64Array);
+    unreachable!("type fixed from schema");
+}
+
+fn check_unique_timestamp(
+    array: &dyn Array,
+    seen: &mut HashSet<i64, RandomState>,
+    column: &str,
+    row_offset: u64,
+    validation: &mut ValidationState,
+) {
+    macro_rules! check {
+        ($ty:ty) => {
+            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
+                for row in 0..values.len() {
+                    if values.is_valid(row) && !seen.insert(values.value(row)) {
+                        push_duplicate(validation, column, row_offset + row as u64);
+                    }
+                }
+                return;
+            }
+        };
+    }
+    check!(TimestampSecondArray);
+    check!(TimestampMillisecondArray);
+    check!(TimestampMicrosecondArray);
+    check!(TimestampNanosecondArray);
+    unreachable!("type fixed from schema");
+}
+
 fn check_range(
     array: &dyn Array,
     rule: &ColumnContract,
@@ -1058,24 +1216,44 @@ fn check_range(
     row_offset: u64,
     validation: &mut ValidationState,
 ) -> Result<(), ProofFrameError> {
-    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-        for row in 0..values.len() {
-            if values.is_valid(row) {
-                push_range_findings(
-                    values.value(row),
-                    rule,
-                    column,
-                    row_offset + row as u64,
-                    validation,
-                );
-            }
-        }
-    } else {
-        for row in 0..array.len() {
-            if array.is_valid(row) {
-                if let Some(value) = numeric_value(array, row)? {
-                    push_range_findings(value, rule, column, row_offset + row as u64, validation);
+    macro_rules! check_native {
+        ($ty:ty, $convert:expr) => {
+            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
+                for row in 0..values.len() {
+                    if values.is_valid(row) {
+                        let number = $convert(values.value(row));
+                        push_range_findings(
+                            number,
+                            rule,
+                            column,
+                            row_offset + row as u64,
+                            validation,
+                        );
+                    }
                 }
+                return Ok(());
+            }
+        };
+    }
+    check_native!(Float64Array, |value: f64| value);
+    check_native!(Float32Array, |value: f32| f64::from(value));
+    check_native!(Int8Array, |value: i8| f64::from(value));
+    check_native!(Int16Array, |value: i16| f64::from(value));
+    check_native!(Int32Array, |value: i32| f64::from(value));
+    check_native!(Int64Array, |value: i64| value as f64);
+    check_native!(UInt8Array, |value: u8| f64::from(value));
+    check_native!(UInt16Array, |value: u16| f64::from(value));
+    check_native!(UInt32Array, |value: u32| f64::from(value));
+    check_native!(UInt64Array, |value: u64| value as f64);
+    check_native!(TimestampSecondArray, |value: i64| value as f64);
+    check_native!(TimestampMillisecondArray, |value: i64| value as f64);
+    check_native!(TimestampMicrosecondArray, |value: i64| value as f64);
+    check_native!(TimestampNanosecondArray, |value: i64| value as f64);
+
+    for row in 0..array.len() {
+        if array.is_valid(row) {
+            if let Some(value) = numeric_value(array, row)? {
+                push_range_findings(value, rule, column, row_offset + row as u64, validation);
             }
         }
     }
@@ -1221,7 +1399,51 @@ pub fn profile_reader<R>(reader: R) -> Result<Profile, ProofFrameError>
 where
     R: RecordBatchReader,
 {
-    inspect_batches(reader, None).map(|(profile, _)| profile)
+    profile_reader_with_distinct(reader, DistinctMode::Exact)
+}
+
+/// Profile Arrow record batches with configurable exact distinct counting.
+pub fn profile_reader_with_distinct<R>(
+    reader: R,
+    distinct_mode: DistinctMode,
+) -> Result<Profile, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    inspect_batches(reader, None, distinct_mode).map(|(profile, _)| profile)
+}
+
+fn fingerprint_batches<R>(reader: R) -> Result<(u64, String), ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    let schema = reader.schema();
+    let mut rows = 0_u64;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pf-fp-v1\0");
+    for field in schema.fields() {
+        let data_type = field.data_type().to_string();
+        update_schema_hash(&mut hasher, field.name(), &data_type, field.is_nullable());
+    }
+    hasher.update(b"pf-fp-body-v1\0");
+    for maybe_batch in reader {
+        let batch = maybe_batch?;
+        for row in 0..batch.num_rows() {
+            for (column_index, array) in batch.columns().iter().enumerate() {
+                update_hash(&mut hasher, column_index, array.as_ref(), row)?;
+            }
+        }
+        rows += batch.num_rows() as u64;
+    }
+    Ok((rows, format!("pf-fp-v1:{}", hasher.finalize().to_hex())))
+}
+
+/// Return only the canonical dataset fingerprint, without profiling or exact distinct state.
+pub fn fingerprint_reader<R>(reader: R) -> Result<String, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    fingerprint_batches(reader).map(|(_, fingerprint)| fingerprint)
 }
 
 /// Validate Arrow record batches with the full profiling path.
@@ -1232,7 +1454,7 @@ pub fn validate_reader<R>(
 where
     R: RecordBatchReader,
 {
-    let (profile, outcome) = inspect_batches(reader, Some(contract))?;
+    let (profile, outcome) = inspect_batches(reader, Some(contract), DistinctMode::Exact)?;
     Ok(ValidationReport {
         valid: outcome.violation_count == 0,
         violation_count: outcome.violation_count,
@@ -1404,9 +1626,17 @@ where
 
 #[cfg(feature = "python")]
 #[pyfunction]
-fn profile_arrow(source: PyArrowType<ArrowArrayStreamReader>) -> PyResult<String> {
-    let profile = profile_reader(source.0).map_err(py_err)?;
+#[pyo3(signature = (source, distinct="exact"))]
+fn profile_arrow(source: PyArrowType<ArrowArrayStreamReader>, distinct: &str) -> PyResult<String> {
+    let distinct_mode = DistinctMode::from_name(distinct).map_err(py_err)?;
+    let profile = profile_reader_with_distinct(source.0, distinct_mode).map_err(py_err)?;
     serde_json::to_string(&profile).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn fingerprint_arrow(source: PyArrowType<ArrowArrayStreamReader>) -> PyResult<String> {
+    fingerprint_reader(source.0).map_err(py_err)
 }
 
 #[cfg(feature = "python")]
@@ -1558,7 +1788,8 @@ mod tests {
             };
 
             let (_, full_outcome) =
-                inspect_batches(reader_from_batch(batch.clone()), Some(&contract)).unwrap();
+                inspect_batches(reader_from_batch(batch.clone()), Some(&contract), DistinctMode::Exact)
+                    .unwrap();
             let fast_report = validate_fast_batches(reader_from_batch(batch), &contract).unwrap();
 
             prop_assert_eq!(
@@ -1670,6 +1901,53 @@ mod tests {
         assert_eq!(single, split);
     }
 
+    #[test]
+    fn typed_unique_semantics_are_explicit() {
+        let timestamp_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "ts",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+                false,
+            )])),
+            vec![Arc::new(TimestampMicrosecondArray::from(vec![10_i64, 11, 10])) as ArrayRef],
+        )
+        .unwrap();
+        let contract = Contract {
+            columns: HashMap::from([(
+                "ts".to_string(),
+                ColumnContract {
+                    unique: true,
+                    ..ColumnContract::default()
+                },
+            )]),
+            max_findings: 100,
+        };
+        let report = validate_fast_reader(reader_from_batch(timestamp_batch), &contract).unwrap();
+        assert!(!report.valid);
+        assert_eq!(report.findings[0].row, Some(2));
+
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        let floats = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)])),
+            vec![Arc::new(Float64Array::from(vec![-0.0, 0.0, nan_a, nan_b, nan_a])) as ArrayRef],
+        )
+        .unwrap();
+        let contract = Contract {
+            columns: HashMap::from([(
+                "v".to_string(),
+                ColumnContract {
+                    unique: true,
+                    ..ColumnContract::default()
+                },
+            )]),
+            max_findings: 100,
+        };
+        let report = validate_fast_reader(reader_from_batch(floats), &contract).unwrap();
+        assert_eq!(report.violation_count, 1);
+        assert_eq!(report.findings[0].row, Some(4));
+    }
+
     proptest! {
         #[test]
         fn fingerprint_tracks_data_changes(
@@ -1700,6 +1978,7 @@ mod tests {
 #[pymodule]
 fn _proofframe(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_fast_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;

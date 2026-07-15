@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "proofframe"
-version = "0.4.0a3"
+version = "0.4.0a4"
 description = "Rust-native data contracts, canonical fingerprints, and proof receipts for DataFrames."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ dependencies = ["pyarrow>=15"]
 pandas = ["pandas>=2"]
 polars = ["polars>=1"]
 dev = ["maturin>=1.11", "pytest>=8", "pytest-cov>=7", "ruff>=0.15", "twine>=6", "pandas>=2"]
-benchmark = ["pandas>=2", "pandera>=0.26", "great-expectations>=1.8"]
+benchmark = ["pandas>=2", "pandera>=0.26", "great-expectations>=1.8", "psutil>=6"]
 
 [project.scripts]
 proofframe = "proofframe.cli:main"

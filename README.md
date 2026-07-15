@@ -41,15 +41,15 @@ It accepts PyArrow tables and streams directly through the Arrow C Stream interf
 Polars DataFrames use the same Arrow-native path. The validation engine processes record batches in
 one pass without converting rows into Python objects.
 
-> Alpha software: `0.4.0a3` adds nested list/struct/map fingerprinting and a typed `ProofFrameError`
-> API on top of canonical proof fingerprints, disk-backed exact diffs, privacy-preserving PII
-> findings, train/test leakage checks, and signed proof receipts. The receipt schema and detector
+> Alpha software: `0.4.0a4` adds a standalone fingerprint API, optional exact distinct profiling,
+> typed Arrow validation hot paths, lazy finding rendering, rule-by-rule benchmarks, and the
+> canonical proof/diff/receipt foundations from earlier 0.4 alphas. The receipt schema and detector
 > taxonomy may still change before 0.4 stable.
 
 ## The 30-second demo
 
 ```bash
-pip install proofframe==0.4.0a3
+pip install proofframe==0.4.0a4
 ```
 
 ```python
@@ -86,8 +86,10 @@ work, use `pf.validate(users, contract, include_profile=False)`.
 
 ```python
 snapshot = pf.profile(users)
+fingerprint = pf.fingerprint(users)
 
 print(snapshot["fingerprint"])
+assert snapshot["fingerprint"] == fingerprint
 print(snapshot["rows"])
 print(snapshot["columns"])
 ```
@@ -97,6 +99,11 @@ and distinguishes nulls, column positions, schema fields, type tags, and value b
 input uses ProofFrame's canonical byte encoding rather than Arrow's display formatting, so upgrading
 Arrow cannot silently change fingerprints through prettier string rendering. Store the fingerprint
 in CI metadata to prove exactly which data was checked.
+
+For large datasets where exact cardinality is not needed, use
+`pf.profile(data, distinct="none")`. The standalone `pf.fingerprint(data)` path computes only the
+schema, null/value boundaries, ordered canonical data, and BLAKE3 hash without profile or distinct
+state.
 
 ## Row-level diff
 

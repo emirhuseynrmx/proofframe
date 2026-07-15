@@ -11,6 +11,7 @@ import pyarrow as pa
 from ._proofframe import (
     detect_leakage_arrow,
     diff_arrow,
+    fingerprint_arrow,
     generate_signing_keypair,
     profile_arrow,
     scan_pii_arrow,
@@ -40,9 +41,16 @@ def _as_reader(data: Any) -> pa.RecordBatchReader:
     )
 
 
-def profile(data: Any) -> dict[str, Any]:
+def profile(data: Any, *, distinct: str = "exact") -> dict[str, Any]:
     """Return a deterministic profile and BLAKE3 fingerprint for tabular data."""
-    return json.loads(profile_arrow(_as_reader(data)))
+    if distinct not in {"none", "exact"}:
+        raise ValueError("distinct must be 'none' or 'exact'")
+    return json.loads(profile_arrow(_as_reader(data), distinct))
+
+
+def fingerprint(data: Any) -> str:
+    """Return only the canonical dataset fingerprint without profile or distinct state."""
+    return fingerprint_arrow(_as_reader(data))
 
 
 def validate(

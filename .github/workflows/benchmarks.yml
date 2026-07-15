@@ -1,0 +1,32 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Rows to generate"
+        required: false
+        default: "1000000"
+      repeats:
+        description: "Measured repeats"
+        required: false
+        default: "5"
+
+jobs:
+  rule-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+      - run: python -m pip install ".[dev,benchmark]"
+      - run: maturin develop
+      - run: python benchmarks/rule_matrix.py --rows "${{ inputs.rows }}" --repeats "${{ inputs.repeats }}" --output benchmarks/results/latest-rule-matrix.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proof-benchmark-results
+          path: benchmarks/results/latest-rule-matrix.json

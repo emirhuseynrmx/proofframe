@@ -29,7 +29,7 @@ The default crates.io build is a normal Rust library. It does not require PyO3, 
 ## Install
 
 ```bash
-cargo add proofframe@0.4.0-alpha.3
+cargo add proofframe@0.4.0-alpha.4
 ```
 
 ## Quick use
@@ -76,18 +76,31 @@ The core functions accept Arrow readers and return typed Rust structs:
 
 ```toml
 [dependencies]
-proofframe = "0.4.0-alpha.3"
+proofframe = "0.4.0-alpha.4"
 ```
 
 The default feature set is intentionally empty. Enable `python` only when building the Python
 extension path:
 
 ```toml
-proofframe = { version = "0.4.0-alpha.3", features = ["python"] }
+proofframe = { version = "0.4.0-alpha.4", features = ["python"] }
 ```
 
 The PyPI package enables `python` plus `pyo3/extension-module` through maturin. Plain Rust tests and
 `cargo package` should not need Python linker symbols, including on macOS.
+
+## Validation semantics
+
+- Null values are ignored by `unique`; combine `unique` with `not_null` when nulls must be rejected.
+- Float uniqueness uses IEEE bit semantics via `to_bits()`: `-0.0` and `0.0` are distinct, and NaN
+  payload differences are distinct.
+- Timestamp uniqueness and min/max use the native integer value in the declared Arrow time unit;
+  different timestamp units or timezones are different schema types and are not normalized together.
+- Integer min/max and uniqueness use native Arrow integer values, not display strings.
+- Decimal values are fingerprinted canonically, but validation min/max does not coerce decimals
+  through display text; add an explicit decimal rule in a future contract schema if needed.
+- Duplicate findings render only the offending duplicate value when user-facing evidence is emitted;
+  clean rows are not stringified for numeric hot paths.
 
 ## Why ProofFrame
 
@@ -103,7 +116,7 @@ that can be stored in CI, data contracts, and release artifacts.
 Python users should install the wheel from PyPI:
 
 ```bash
-pip install proofframe==0.4.0a3
+pip install proofframe==0.4.0a4
 ```
 
 The Python README and CLI documentation live in the repository `README.md`.
