@@ -525,10 +525,7 @@ where
                 seen_unique.insert(name.clone(), HashSet::new());
             }
             if let Some(pattern) = &rule.pattern {
-                patterns.insert(
-                    name.clone(),
-                    Regex::new(pattern)?,
-                );
+                patterns.insert(name.clone(), Regex::new(pattern)?);
             }
         }
     }
@@ -726,12 +723,11 @@ fn write_bytes(writer: &mut BufWriter<File>, value: &[u8]) -> Result<(), ProofFr
 }
 
 fn read_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>, ProofFrameError> {
-    let len = read_u64(reader)?
-        .ok_or_else(|| ProofFrameError::CorruptData("Truncated diff partition record".to_string()))?;
+    let len = read_u64(reader)?.ok_or_else(|| {
+        ProofFrameError::CorruptData("Truncated diff partition record".to_string())
+    })?;
     let mut value = vec![0_u8; len as usize];
-    reader
-        .read_exact(&mut value)
-        ?;
+    reader.read_exact(&mut value)?;
     Ok(value)
 }
 
@@ -753,19 +749,19 @@ fn write_row_record(
     Ok(())
 }
 
-fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(Vec<u8>, RowEntry)>, ProofFrameError> {
+fn read_row_record(
+    reader: &mut BufReader<File>,
+) -> Result<Option<(Vec<u8>, RowEntry)>, ProofFrameError> {
     let Some(key_len) = read_u64(reader)? else {
         return Ok(None);
     };
     let mut key = vec![0_u8; key_len as usize];
-    reader
-        .read_exact(&mut key)
-        ?;
+    reader.read_exact(&mut key)?;
     let display_key = String::from_utf8(read_bytes(reader)?)?;
     let hash = String::from_utf8(read_bytes(reader)?)?;
-    let value_count =
-        read_u64(reader)?
-        .ok_or_else(|| ProofFrameError::CorruptData("Truncated diff partition record".to_string()))?;
+    let value_count = read_u64(reader)?.ok_or_else(|| {
+        ProofFrameError::CorruptData("Truncated diff partition record".to_string())
+    })?;
     let mut values = Vec::with_capacity(value_count as usize);
     for _ in 0..value_count {
         let len = read_u64(reader)?
@@ -774,9 +770,7 @@ fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(Vec<u8>, RowE
             values.push(None);
         } else {
             let mut value = vec![0_u8; len as usize];
-            reader
-                .read_exact(&mut value)
-                ?;
+            reader.read_exact(&mut value)?;
             values.push(Some(value));
         }
     }
@@ -815,8 +809,7 @@ where
     let mut writers = paths
         .iter()
         .map(|path| File::create(path).map(BufWriter::new))
-        .collect::<Result<Vec<_>, _>>()
-        ?;
+        .collect::<Result<Vec<_>, _>>()?;
     let mut row_count = 0_usize;
     for maybe_batch in reader {
         let batch: RecordBatch = maybe_batch?;
@@ -862,8 +855,7 @@ fn process_diff_partition(
     changed: &mut Vec<ChangedRow>,
 ) -> Result<(), ProofFrameError> {
     let mut before_rows: HashMap<Vec<u8>, RowEntry> = HashMap::new();
-    let mut before_reader =
-        BufReader::new(File::open(before_path)?);
+    let mut before_reader = BufReader::new(File::open(before_path)?);
     while let Some((key, entry)) = read_row_record(&mut before_reader)? {
         let display_key = entry.display_key.clone();
         if before_rows.insert(key, entry).is_some() {
@@ -872,8 +864,7 @@ fn process_diff_partition(
     }
 
     let mut seen_after: HashSet<Vec<u8>> = HashSet::new();
-    let mut after_reader =
-        BufReader::new(File::open(after_path)?);
+    let mut after_reader = BufReader::new(File::open(after_path)?);
     while let Some((key, entry)) = read_row_record(&mut after_reader)? {
         if !seen_after.insert(key.clone()) {
             return Err(ProofFrameError::DuplicateKey(entry.display_key.clone()));
@@ -967,10 +958,7 @@ fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, ProofFram
     } else if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
         Ok(Some(values.value(row) as f64))
     } else {
-        Ok(array_value_to_string(array, row)
-            ?
-            .parse::<f64>()
-            .ok())
+        Ok(array_value_to_string(array, row)?.parse::<f64>().ok())
     }
 }
 
@@ -1119,7 +1107,10 @@ fn push_range_findings(
     }
 }
 
-fn validate_fast_batches<R>(reader: R, contract: &Contract) -> Result<FastValidationReport, ProofFrameError>
+fn validate_fast_batches<R>(
+    reader: R,
+    contract: &Contract,
+) -> Result<FastValidationReport, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -1137,10 +1128,7 @@ where
             });
         }
         if let Some(pattern) = &rule.pattern {
-            patterns.insert(
-                name.clone(),
-                Regex::new(pattern)?,
-            );
+            patterns.insert(name.clone(), Regex::new(pattern)?);
         }
     }
 
@@ -1237,7 +1225,10 @@ where
 }
 
 /// Validate Arrow record batches with the full profiling path.
-pub fn validate_reader<R>(reader: R, contract: &Contract) -> Result<ValidationReport, ProofFrameError>
+pub fn validate_reader<R>(
+    reader: R,
+    contract: &Contract,
+) -> Result<ValidationReport, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -1263,7 +1254,11 @@ where
 }
 
 /// Compute an exact keyed diff between two Arrow readers.
-pub fn diff_readers<B, A>(before: B, after: A, keys: &[String]) -> Result<DiffReport, ProofFrameError>
+pub fn diff_readers<B, A>(
+    before: B,
+    after: A,
+    keys: &[String],
+) -> Result<DiffReport, ProofFrameError>
 where
     B: RecordBatchReader,
     A: RecordBatchReader,
@@ -1663,7 +1658,9 @@ mod tests {
         )
         .unwrap();
 
-        let single = profile_reader(reader_from_batch(whole)).unwrap().fingerprint;
+        let single = profile_reader(reader_from_batch(whole))
+            .unwrap()
+            .fingerprint;
         let split = profile_reader(RecordBatchIterator::new(
             vec![Ok(first), Ok(second)].into_iter(),
             schema,
