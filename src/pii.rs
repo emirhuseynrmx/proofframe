@@ -28,7 +28,7 @@ impl Detector {
         })
     }
 
-    pub(crate) fn classify(&self, value: &str) -> Option<Match> {
+    pub(crate) fn classify_cell(&self, value: &str, numeric_column: bool) -> Option<Match> {
         let trimmed = value.trim();
         if self.email.is_match(trimmed) {
             return Some(Match {
@@ -54,7 +54,7 @@ impl Detector {
             if (13..=19).contains(&digits.len()) && luhn_valid(&digits) {
                 return Some(Match {
                     kind: "payment_card",
-                    confidence: "high",
+                    confidence: digit_only_confidence(trimmed, numeric_column, "high"),
                 });
             }
         }
@@ -63,11 +63,24 @@ impl Detector {
             if (8..=15).contains(&digit_count) {
                 return Some(Match {
                     kind: "phone",
-                    confidence: "medium",
+                    confidence: digit_only_confidence(trimmed, numeric_column, "medium"),
                 });
             }
         }
         None
+    }
+}
+
+fn digit_only_confidence(
+    value: &str,
+    numeric_column: bool,
+    default_confidence: &'static str,
+) -> &'static str {
+    let digit_only = value.chars().all(|character| character.is_ascii_digit());
+    if numeric_column && digit_only {
+        "low"
+    } else {
+        default_confidence
     }
 }
 
@@ -126,15 +139,24 @@ mod tests {
     fn identifies_high_confidence_examples() {
         let detector = Detector::new().unwrap();
         assert_eq!(
-            detector.classify("person@example.com").unwrap().kind,
+            detector
+                .classify_cell("person@example.com", false)
+                .unwrap()
+                .kind,
             "email"
         );
         assert_eq!(
-            detector.classify("4111 1111 1111 1111").unwrap().kind,
+            detector
+                .classify_cell("4111 1111 1111 1111", false)
+                .unwrap()
+                .kind,
             "payment_card"
         );
         assert_eq!(
-            detector.classify("GB82WEST12345698765432").unwrap().kind,
+            detector
+                .classify_cell("GB82WEST12345698765432", false)
+                .unwrap()
+                .kind,
             "iban"
         );
     }

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod pii;
 mod receipt;
 
@@ -5,7 +7,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ahash::RandomState;
 use arrow::array::{
-    Array, Float32Array, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array,
+    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::pyarrow::PyArrowType;
@@ -19,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_FINDINGS: usize = 100;
 
-type RowValues = Vec<Option<String>>;
+type RowValues = Vec<Option<Vec<u8>>>;
 type RowMap = HashMap<String, RowValues>;
 type CollectedRows = (Vec<String>, RowMap);
 
@@ -38,7 +44,7 @@ struct ColumnProfile {
 struct ColumnState {
     null_count: u64,
     non_null_count: u64,
-    distinct: HashSet<String>,
+    distinct: HashSet<Vec<u8>>,
     min: Option<f64>,
     max: Option<f64>,
 }
@@ -104,7 +110,7 @@ enum UniqueState {
     UInt64(RoaringTreemap),
     Float64(HashSet<u64, RandomState>),
     Utf8(HashSet<String, RandomState>),
-    Generic(HashSet<String, RandomState>),
+    Generic(HashSet<Vec<u8>, RandomState>),
 }
 
 impl UniqueState {
@@ -179,17 +185,109 @@ fn py_err(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
-fn update_hash(hasher: &mut blake3::Hasher, column: usize, value: Option<&str>) {
-    hasher.update(&(column as u64).to_le_bytes());
-    match value {
-        Some(value) => {
-            hasher.update(&(value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
-        }
-        None => {
-            hasher.update(&u64::MAX.to_le_bytes());
-        }
+fn update_len_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn update_schema_hash(hasher: &mut blake3::Hasher, name: &str, data_type: &str, nullable: bool) {
+    hasher.update(b"pf-schema-field-v1\0");
+    update_len_prefixed(hasher, name.as_bytes());
+    update_len_prefixed(hasher, data_type.as_bytes());
+    hasher.update(&[u8::from(nullable)]);
+}
+
+fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, String> {
+    if array.is_null(row) {
+        return Ok(vec![0]);
     }
+
+    macro_rules! primitive_bytes {
+        ($array_ty:ty, $tag:literal) => {
+            if let Some(values) = array.as_any().downcast_ref::<$array_ty>() {
+                let mut encoded = Vec::with_capacity(1 + 16);
+                encoded.push($tag);
+                encoded.extend_from_slice(&values.value(row).to_le_bytes());
+                return Ok(encoded);
+            }
+        };
+    }
+
+    primitive_bytes!(Int8Array, 1);
+    primitive_bytes!(Int16Array, 2);
+    primitive_bytes!(Int32Array, 3);
+    primitive_bytes!(Int64Array, 4);
+    primitive_bytes!(UInt8Array, 5);
+    primitive_bytes!(UInt16Array, 6);
+    primitive_bytes!(UInt32Array, 7);
+    primitive_bytes!(UInt64Array, 8);
+    primitive_bytes!(Float32Array, 9);
+    primitive_bytes!(Float64Array, 10);
+    primitive_bytes!(Date32Array, 11);
+    primitive_bytes!(Date64Array, 12);
+    primitive_bytes!(TimestampSecondArray, 13);
+    primitive_bytes!(TimestampMillisecondArray, 14);
+    primitive_bytes!(TimestampMicrosecondArray, 15);
+    primitive_bytes!(TimestampNanosecondArray, 16);
+    primitive_bytes!(Decimal128Array, 17);
+
+    if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
+        return Ok(vec![18, u8::from(values.value(row))]);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+        let value = values.value(row).as_bytes();
+        let mut encoded = Vec::with_capacity(9 + value.len());
+        encoded.push(19);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
+        return Ok(encoded);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+        let value = values.value(row).as_bytes();
+        let mut encoded = Vec::with_capacity(9 + value.len());
+        encoded.push(20);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
+        return Ok(encoded);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+        let value = values.value(row);
+        let mut encoded = Vec::with_capacity(9 + value.len());
+        encoded.push(21);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
+        return Ok(encoded);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        let value = values.value(row);
+        let mut encoded = Vec::with_capacity(9 + value.len());
+        encoded.push(22);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
+        return Ok(encoded);
+    }
+
+    Err(format!(
+        "Unsupported Arrow type `{}` for canonical fingerprinting",
+        array.data_type()
+    ))
+}
+
+fn value_for_rules(array: &dyn Array, row: usize) -> Result<String, String> {
+    array_value_to_string(array, row).map_err(|error| error.to_string())
+}
+
+fn update_hash(
+    hasher: &mut blake3::Hasher,
+    column: usize,
+    array: &dyn Array,
+    row: usize,
+) -> Result<(), String> {
+    hasher.update(b"pf-cell-v1\0");
+    hasher.update(&(column as u64).to_le_bytes());
+    let encoded = canonical_value_bytes(array, row)?;
+    update_len_prefixed(hasher, &encoded);
+    Ok(())
 }
 
 fn inspect_batches(
@@ -203,7 +301,7 @@ fn inspect_batches(
         .map(|_| ColumnState::default())
         .collect::<Vec<_>>();
     let mut findings = Vec::new();
-    let mut seen_unique: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut seen_unique: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
     let mut patterns: HashMap<String, Regex> = HashMap::new();
     let max_findings = contract.map_or(DEFAULT_MAX_FINDINGS, |value| value.max_findings);
 
@@ -231,14 +329,12 @@ fn inspect_batches(
 
     let mut rows = 0_u64;
     let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pf-fp-v1\0");
     for field in schema.fields() {
-        hasher.update(&(field.name().len() as u64).to_le_bytes());
-        hasher.update(field.name().as_bytes());
         let data_type = field.data_type().to_string();
-        hasher.update(&(data_type.len() as u64).to_le_bytes());
-        hasher.update(data_type.as_bytes());
-        hasher.update(&[u8::from(field.is_nullable())]);
+        update_schema_hash(&mut hasher, field.name(), &data_type, field.is_nullable());
     }
+    hasher.update(b"pf-fp-body-v1\0");
     for maybe_batch in reader {
         let batch = maybe_batch.map_err(|error| error.to_string())?;
         for row in 0..batch.num_rows() {
@@ -248,7 +344,7 @@ fn inspect_batches(
                 let state = &mut states[column_index];
                 if array.is_null(row) {
                     state.null_count += 1;
-                    update_hash(&mut hasher, column_index, None);
+                    update_hash(&mut hasher, column_index, array.as_ref(), row)?;
                     if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
                         if rule.not_null && findings.len() < max_findings {
                             findings.push(Finding {
@@ -263,21 +359,21 @@ fn inspect_batches(
                 }
 
                 state.non_null_count += 1;
-                let value = array_value_to_string(array.as_ref(), row)
-                    .map_err(|error| error.to_string())?;
-                update_hash(&mut hasher, column_index, Some(&value));
-                state.distinct.insert(value.clone());
-                if let Ok(number) = value.parse::<f64>() {
+                update_hash(&mut hasher, column_index, array.as_ref(), row)?;
+                let value_key = canonical_value_bytes(array.as_ref(), row)?;
+                state.distinct.insert(value_key.clone());
+                if let Some(number) = numeric_value(array.as_ref(), row)? {
                     state.min = Some(state.min.map_or(number, |current| current.min(number)));
                     state.max = Some(state.max.map_or(number, |current| current.max(number)));
                 }
 
                 if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
+                    let value = value_for_rules(array.as_ref(), row)?;
                     if rule.unique
                         && !seen_unique
                             .get_mut(field.name())
                             .expect("unique set initialized")
-                            .insert(value.clone())
+                            .insert(value_key)
                         && findings.len() < max_findings
                     {
                         findings.push(Finding {
@@ -288,7 +384,7 @@ fn inspect_batches(
                         });
                     }
                     if let Some(min) = rule.min {
-                        if value.parse::<f64>().is_ok_and(|number| number < min)
+                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number < min)
                             && findings.len() < max_findings
                         {
                             findings.push(Finding {
@@ -300,7 +396,7 @@ fn inspect_batches(
                         }
                     }
                     if let Some(max) = rule.max {
-                        if value.parse::<f64>().is_ok_and(|number| number > max)
+                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number > max)
                             && findings.len() < max_findings
                         {
                             findings.push(Finding {
@@ -358,7 +454,7 @@ fn inspect_batches(
         Profile {
             rows,
             columns,
-            fingerprint: hasher.finalize().to_hex().to_string(),
+            fingerprint: format!("pf-fp-v1:{}", hasher.finalize().to_hex()),
         },
         findings,
     ))
@@ -390,7 +486,7 @@ fn collect_rows(reader: ArrowArrayStreamReader, keys: &[String]) -> Result<Colle
                     if array.is_null(row) {
                         "<null>".to_string()
                     } else {
-                        array_value_to_string(array.as_ref(), row).unwrap_or_default()
+                        value_for_rules(array.as_ref(), row).unwrap_or_default()
                     }
                 })
                 .collect::<Vec<_>>()
@@ -400,12 +496,12 @@ fn collect_rows(reader: ArrowArrayStreamReader, keys: &[String]) -> Result<Colle
                 .iter()
                 .map(|array| {
                     if array.is_null(row) {
-                        None
+                        Ok(None)
                     } else {
-                        array_value_to_string(array.as_ref(), row).ok()
+                        canonical_value_bytes(array.as_ref(), row).map(Some)
                     }
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             if rows.insert(key.clone(), values).is_some() {
                 return Err(format!("Duplicate key `{key}`; diff keys must be unique"));
             }
@@ -451,13 +547,7 @@ fn collect_leakage_ids(
             hasher.update(b"proofframe:leakage:v1\0");
             for index in &indexes {
                 let array = batch.column(*index);
-                if array.is_null(row) {
-                    update_hash(&mut hasher, *index, None);
-                } else {
-                    let value = array_value_to_string(array.as_ref(), row)
-                        .map_err(|error| error.to_string())?;
-                    update_hash(&mut hasher, *index, Some(&value));
-                }
+                update_hash(&mut hasher, *index, array.as_ref(), row)?;
             }
             ids.insert(hasher.finalize().to_hex().to_string());
             row_count += 1;
@@ -481,6 +571,19 @@ fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, String> {
             .parse::<f64>()
             .ok())
     }
+}
+
+fn is_numeric_array(array: &dyn Array) -> bool {
+    array.as_any().is::<Int8Array>()
+        || array.as_any().is::<Int16Array>()
+        || array.as_any().is::<Int32Array>()
+        || array.as_any().is::<Int64Array>()
+        || array.as_any().is::<UInt8Array>()
+        || array.as_any().is::<UInt16Array>()
+        || array.as_any().is::<UInt32Array>()
+        || array.as_any().is::<UInt64Array>()
+        || array.as_any().is::<Float32Array>()
+        || array.as_any().is::<Float64Array>()
 }
 
 fn push_duplicate(findings: &mut Vec<Finding>, column: &str, row: u64, max_findings: usize) {
@@ -551,8 +654,7 @@ fn check_unique(
         UniqueState::Generic(seen) => {
             for row in 0..array.len() {
                 if array.is_valid(row) {
-                    let value =
-                        array_value_to_string(array, row).map_err(|error| error.to_string())?;
+                    let value = canonical_value_bytes(array, row)?;
                     if !seen.insert(value) {
                         push_duplicate(findings, column, row_offset + row as u64, max_findings);
                     }
@@ -706,8 +808,7 @@ fn validate_fast_batches(
                     if array.is_null(row) || findings.len() >= contract.max_findings {
                         continue;
                     }
-                    let value = array_value_to_string(array.as_ref(), row)
-                        .map_err(|error| error.to_string())?;
+                    let value = value_for_rules(array.as_ref(), row)?;
                     if patterns
                         .get(field.name())
                         .is_some_and(|pattern| !pattern.is_match(&value))
@@ -858,8 +959,10 @@ fn scan_pii_arrow(
                 if array.is_null(row) {
                     continue;
                 }
-                let value = array_value_to_string(array.as_ref(), row).map_err(py_err)?;
-                if let Some(classification) = detector.classify(&value) {
+                let value = value_for_rules(array.as_ref(), row).map_err(py_err)?;
+                if let Some(classification) =
+                    detector.classify_cell(&value, is_numeric_array(array.as_ref()))
+                {
                     total_findings += 1;
                     *counts.entry(classification.kind).or_insert(0) += 1;
                     if findings.len() < max_findings {

@@ -63,8 +63,11 @@ print(snapshot["rows"])
 print(snapshot["columns"])
 ```
 
-The fingerprint is deterministic for the ordered Arrow data and distinguishes nulls, column
-positions, and value boundaries. Store it in CI metadata to prove exactly which data was checked.
+The fingerprint is emitted as `pf-fp-v1:<blake3>`. It is deterministic for the ordered Arrow data
+and distinguishes nulls, column positions, schema fields, type tags, and value boundaries. The hash
+input uses ProofFrame's canonical byte encoding rather than Arrow's display formatting, so upgrading
+Arrow cannot silently change fingerprints through prettier string rendering. Store the fingerprint
+in CI metadata to prove exactly which data was checked.
 
 ## Row-level diff
 
@@ -80,7 +83,8 @@ assert change["changed"] == [{"key": "2", "columns": ["plan"]}]
 ```
 
 Composite keys work too: `keys=["tenant_id", "user_id"]`. Duplicate keys fail loudly instead of
-silently producing a misleading diff.
+silently producing a misleading diff. The current diff implementation materializes both keyed
+datasets in memory; use it for CI-sized snapshots today and partition large tables before diffing.
 
 ## PII and leakage checks
 
@@ -95,7 +99,9 @@ full-row overlap and expose only hashed sample identifiers.
 
 The built-in detector recognizes email, IPv4, phone, payment-card (Luhn), and IBAN patterns. It is a
 high-signal scanner, not a legal-compliance guarantee; structured identifiers and locale-specific
-formats should be covered by explicit contracts too.
+formats should be covered by explicit contracts too. Bare digit matches from numeric columns are
+downgraded to low confidence so Luhn-valid order IDs are not reported as high-confidence payment
+cards without context.
 
 ## Signed proof receipts
 
@@ -164,12 +170,13 @@ Pandas / Polars / PyArrow / Arrow C Stream
 The Rust core currently provides:
 
 - single-pass profiling and validation;
-- BLAKE3 dataset fingerprints;
+- versioned canonical BLAKE3 dataset fingerprints;
 - null, distinct, numeric min/max profiles;
 - required, not-null, unique, numeric range, regex, and allowlist rules;
 - key-based added/removed/changed row detection;
 - bounded evidence reports;
 - Python 3.10+ ABI-stable wheels through PyO3/maturin.
+- `#![forbid(unsafe_code)]` in the ProofFrame crate.
 
 ## Development
 

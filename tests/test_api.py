@@ -16,6 +16,7 @@ def test_profile_is_deterministic():
     first = proofframe.profile(users())
     second = proofframe.profile(users())
     assert first["rows"] == 3
+    assert first["fingerprint"].startswith("pf-fp-v1:")
     assert first["fingerprint"] == second["fingerprint"]
     assert first["columns"][0]["distinct_count"] == 3
     assert (
@@ -30,6 +31,19 @@ def test_profile_is_deterministic():
             )
         )["fingerprint"]
     )
+
+
+def test_fingerprint_is_invariant_to_batch_segmentation():
+    source = pa.table({"id": [1, 2, 3, 4], "flag": [True, False, True, False]})
+    batches = [
+        pa.record_batch([pa.array([1, 2]), pa.array([True, False])], names=["id", "flag"]),
+        pa.record_batch([pa.array([3, 4]), pa.array([True, False])], names=["id", "flag"]),
+    ]
+    segmented = pa.Table.from_batches(batches, schema=source.schema)
+
+    assert proofframe.profile(source)["fingerprint"] == proofframe.profile(segmented)[
+        "fingerprint"
+    ]
 
 
 def test_contract_reports_row_level_evidence():
@@ -86,6 +100,14 @@ def test_pii_findings_are_redacted():
     assert raw_email not in json.dumps(report)
 
 
+def test_numeric_pii_matches_are_low_confidence_without_context():
+    # Luhn-valid order IDs should not be elevated to a high-confidence card leak by type alone.
+    report = proofframe.scan_pii(pa.table({"order_id": [4111111111111111]}))
+    assert report["detected"] is True
+    assert report["findings"][0]["kind"] == "payment_card"
+    assert report["findings"][0]["confidence"] == "low"
+
+
 def test_leakage_reports_only_hashed_samples():
     train = pa.table({"id": [1, 2, 3], "feature": ["a", "b", "c"]})
     test = pa.table({"id": [3, 4], "feature": ["x", "d"]})
@@ -93,6 +115,23 @@ def test_leakage_reports_only_hashed_samples():
     assert report["overlap_count"] == 1
     assert report["mode"] == "key"
     assert report["sample_fingerprints"][0] != "3"
+
+
+def test_full_and_fast_validation_agree_on_edge_numeric_values():
+    source = pa.table({"id": [2**53 + 1, 2**53 + 2], "score": [-0.0, 0.0]})
+    contract = {
+        "columns": {
+            "id": {"unique": True, "min": 2**53},
+            "score": {"unique": True, "min": -0.0, "max": 0.0},
+        }
+    }
+    full = proofframe.validate(source, contract, include_profile=True)
+    fast = proofframe.validate(source, contract, include_profile=False)
+
+    assert full["valid"] == fast["valid"]
+    assert [(item["rule"], item["column"], item["row"]) for item in full["findings"]] == [
+        (item["rule"], item["column"], item["row"]) for item in fast["findings"]
+    ]
 
 
 def test_fast_unique_handles_signed_and_large_integer_domains():
