@@ -46,6 +46,21 @@ def test_contract_reports_row_level_evidence():
     assert report["valid"] is False
     assert {finding["rule"] for finding in report["findings"]} == {"unique", "not_null", "max"}
 
+    fast = proofframe.validate(
+        pa.table({"id": [1, 1], "email": ["ok@example.com", None], "score": [1.2, 0.5]}),
+        {
+            "columns": {
+                "id": {"required": True, "unique": True},
+                "email": {"not_null": True, "pattern": r"^[^@]+@[^@]+$"},
+                "score": {"min": 0, "max": 1},
+            }
+        },
+        include_profile=False,
+    )
+    assert fast["mode"] == "rules_only"
+    assert fast["rows"] == 2
+    assert {finding["rule"] for finding in fast["findings"]} == {"unique", "not_null", "max"}
+
 
 def test_diff_reports_changed_columns():
     before = users()
@@ -78,6 +93,24 @@ def test_leakage_reports_only_hashed_samples():
     assert report["overlap_count"] == 1
     assert report["mode"] == "key"
     assert report["sample_fingerprints"][0] != "3"
+
+
+def test_fast_unique_handles_signed_and_large_integer_domains():
+    values = [-(2**63), -1, 0, 2**63 - 1, -(2**63)]
+    report = proofframe.validate(
+        pa.table({"id": values}),
+        {"columns": {"id": {"unique": True}}},
+        include_profile=False,
+    )
+    assert report["valid"] is False
+    assert report["findings"] == [
+        {
+            "rule": "unique",
+            "column": "id",
+            "row": 4,
+            "message": "Duplicate value detected",
+        }
+    ]
 
 
 def test_signed_receipt_detects_tampering():

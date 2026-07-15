@@ -1,5 +1,8 @@
 # ProofFrame
 
+[![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/emirhuseynrmx/proofframe/graph/badge.svg)](https://codecov.io/gh/emirhuseynrmx/proofframe)
+
 **Ruff for data. Git-style evidence for DataFrames.**
 
 ProofFrame is a Rust-native Python library for answering three questions before bad data ships:
@@ -46,6 +49,9 @@ for finding in report["findings"]:
 
 ProofFrame reports the duplicate ID, null email, malformed email, and out-of-range score with their
 row numbers. The same pass returns a content fingerprint and per-column profile.
+
+For a rules-only pipeline gate that keeps bounded row evidence but skips profile and fingerprint
+work, use `pf.validate(users, contract, include_profile=False)`.
 
 ## Dataset fingerprints
 
@@ -181,6 +187,10 @@ Run the local throughput harness:
 python benchmarks/profile.py --rows 1000000
 ```
 
+The Python API and CLI coverage gate is 85%; the current local branch-and-line result is 98.23%.
+Rust correctness is gated separately by unit tests, Proptest, and Clippy on the declared Rust 1.85
+MSRV so Python coverage cannot hide a native-core failure.
+
 Run the same-rule comparative benchmark:
 
 ```bash
@@ -190,8 +200,17 @@ python benchmarks/compare_frameworks.py --rows 1000000 --repeats 5
 
 The script runs the same non-null, uniqueness, and range predicates in ProofFrame, Pandera, and
 Great Expectations; excludes setup/import time; and records raw samples plus exact package versions.
-ProofFrame currently also computes its full profile and fingerprint during validation, so the result
-measures the public APIs as shipped rather than isolated predicate kernels. See `docs/testing.md`.
+It uses ProofFrame's `include_profile=False` rules-only path because the other frameworks are not
+asked to compute a BLAKE3 dataset fingerprint or exact per-column profile. See `docs/testing.md`.
+
+### Local 0.4 alpha same-rule benchmark
+
+On the development machine (Windows 11, Python 3.12), 1,000,000 valid rows, one warmup, and seven
+measured repetitions produced these medians: ProofFrame **0.0162 s** (61.65M rows/s), Pandera
+**0.0340 s** (29.43M rows/s), and Great Expectations **0.1365 s** (7.33M rows/s). In this specific
+run ProofFrame was 2.09x faster than Pandera and 8.41x faster than Great Expectations. Raw samples
+and exact versions are committed in `benchmarks/results/windows-1m-fast.json`; this is a reproducible
+machine-local result, not a universal performance guarantee.
 
 The benchmark prints measured rows/second for the current machine; this README intentionally makes
 no unverified performance claim.

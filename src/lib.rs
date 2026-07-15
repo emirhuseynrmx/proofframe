@@ -3,7 +3,10 @@ mod receipt;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use arrow::array::{Array, RecordBatch};
+use ahash::RandomState;
+use arrow::array::{
+    Array, Float32Array, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array,
+};
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::pyarrow::PyArrowType;
 use arrow::record_batch::RecordBatchReader;
@@ -11,6 +14,7 @@ use arrow::util::display::array_value_to_string;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use regex::Regex;
+use roaring::RoaringTreemap;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_FINDINGS: usize = 100;
@@ -85,6 +89,38 @@ struct ValidationReport {
     valid: bool,
     findings: Vec<Finding>,
     profile: Profile,
+}
+
+#[derive(Debug, Serialize)]
+struct FastValidationReport {
+    valid: bool,
+    findings: Vec<Finding>,
+    rows: u64,
+    mode: &'static str,
+}
+
+enum UniqueState {
+    Int64(RoaringTreemap),
+    UInt64(RoaringTreemap),
+    Float64(HashSet<u64, RandomState>),
+    Utf8(HashSet<String, RandomState>),
+    Generic(HashSet<String, RandomState>),
+}
+
+impl UniqueState {
+    fn for_array(array: &dyn Array) -> Self {
+        if array.as_any().is::<Int64Array>() {
+            Self::Int64(RoaringTreemap::new())
+        } else if array.as_any().is::<UInt64Array>() {
+            Self::UInt64(RoaringTreemap::new())
+        } else if array.as_any().is::<Float64Array>() {
+            Self::Float64(HashSet::with_hasher(RandomState::new()))
+        } else if array.as_any().is::<StringArray>() {
+            Self::Utf8(HashSet::with_hasher(RandomState::new()))
+        } else {
+            Self::Generic(HashSet::with_hasher(RandomState::new()))
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -213,16 +249,15 @@ fn inspect_batches(
                 if array.is_null(row) {
                     state.null_count += 1;
                     update_hash(&mut hasher, column_index, None);
-                    if let Some(rule) = contract.and_then(|value| value.columns.get(field.name()))
-                        && rule.not_null
-                        && findings.len() < max_findings
-                    {
-                        findings.push(Finding {
-                            rule: "not_null",
-                            column: field.name().clone(),
-                            row: Some(global_row),
-                            message: "Null value is not allowed".to_string(),
-                        });
+                    if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
+                        if rule.not_null && findings.len() < max_findings {
+                            findings.push(Finding {
+                                rule: "not_null",
+                                column: field.name().clone(),
+                                row: Some(global_row),
+                                message: "Null value is not allowed".to_string(),
+                            });
+                        }
                     }
                     continue;
                 }
@@ -252,49 +287,52 @@ fn inspect_batches(
                             message: format!("Duplicate value `{value}`"),
                         });
                     }
-                    if let Some(min) = rule.min
-                        && value.parse::<f64>().is_ok_and(|number| number < min)
-                        && findings.len() < max_findings
-                    {
-                        findings.push(Finding {
-                            rule: "min",
-                            column: field.name().clone(),
-                            row: Some(global_row),
-                            message: format!("Value `{value}` is below {min}"),
-                        });
+                    if let Some(min) = rule.min {
+                        if value.parse::<f64>().is_ok_and(|number| number < min)
+                            && findings.len() < max_findings
+                        {
+                            findings.push(Finding {
+                                rule: "min",
+                                column: field.name().clone(),
+                                row: Some(global_row),
+                                message: format!("Value `{value}` is below {min}"),
+                            });
+                        }
                     }
-                    if let Some(max) = rule.max
-                        && value.parse::<f64>().is_ok_and(|number| number > max)
-                        && findings.len() < max_findings
-                    {
-                        findings.push(Finding {
-                            rule: "max",
-                            column: field.name().clone(),
-                            row: Some(global_row),
-                            message: format!("Value `{value}` is above {max}"),
-                        });
+                    if let Some(max) = rule.max {
+                        if value.parse::<f64>().is_ok_and(|number| number > max)
+                            && findings.len() < max_findings
+                        {
+                            findings.push(Finding {
+                                rule: "max",
+                                column: field.name().clone(),
+                                row: Some(global_row),
+                                message: format!("Value `{value}` is above {max}"),
+                            });
+                        }
                     }
-                    if let Some(regex) = patterns.get(field.name())
-                        && !regex.is_match(&value)
-                        && findings.len() < max_findings
-                    {
-                        findings.push(Finding {
-                            rule: "pattern",
-                            column: field.name().clone(),
-                            row: Some(global_row),
-                            message: format!("Value `{value}` does not match `{}`", regex.as_str()),
-                        });
+                    if let Some(regex) = patterns.get(field.name()) {
+                        if !regex.is_match(&value) && findings.len() < max_findings {
+                            findings.push(Finding {
+                                rule: "pattern",
+                                column: field.name().clone(),
+                                row: Some(global_row),
+                                message: format!(
+                                    "Value `{value}` does not match `{}`",
+                                    regex.as_str()
+                                ),
+                            });
+                        }
                     }
-                    if let Some(allowed) = &rule.allowed
-                        && !allowed.contains(&value)
-                        && findings.len() < max_findings
-                    {
-                        findings.push(Finding {
-                            rule: "allowed",
-                            column: field.name().clone(),
-                            row: Some(global_row),
-                            message: format!("Value `{value}` is not in the allowlist"),
-                        });
+                    if let Some(allowed) = &rule.allowed {
+                        if !allowed.contains(&value) && findings.len() < max_findings {
+                            findings.push(Finding {
+                                rule: "allowed",
+                                column: field.name().clone(),
+                                row: Some(global_row),
+                                message: format!("Value `{value}` is not in the allowlist"),
+                            });
+                        }
                     }
                 }
             }
@@ -428,6 +466,285 @@ fn collect_leakage_ids(
     Ok((names, row_count, ids))
 }
 
+fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, String> {
+    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
+        Ok(Some(values.value(row)))
+    } else if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
+        Ok(Some(f64::from(values.value(row))))
+    } else if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        Ok(Some(values.value(row) as f64))
+    } else if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
+        Ok(Some(values.value(row) as f64))
+    } else {
+        Ok(array_value_to_string(array, row)
+            .map_err(|error| error.to_string())?
+            .parse::<f64>()
+            .ok())
+    }
+}
+
+fn push_duplicate(findings: &mut Vec<Finding>, column: &str, row: u64, max_findings: usize) {
+    if findings.len() < max_findings {
+        findings.push(Finding {
+            rule: "unique",
+            column: column.to_string(),
+            row: Some(row),
+            message: "Duplicate value detected".to_string(),
+        });
+    }
+}
+
+fn check_unique(
+    state: &mut UniqueState,
+    array: &dyn Array,
+    column: &str,
+    row_offset: u64,
+    findings: &mut Vec<Finding>,
+    max_findings: usize,
+) -> Result<(), String> {
+    match state {
+        UniqueState::Int64(seen) => {
+            let values = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("type fixed from schema");
+            for row in 0..values.len() {
+                if values.is_valid(row) && !seen.insert((values.value(row) as u64) ^ (1_u64 << 63))
+                {
+                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                }
+            }
+        }
+        UniqueState::UInt64(seen) => {
+            let values = array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("type fixed from schema");
+            for row in 0..values.len() {
+                if values.is_valid(row) && !seen.insert(values.value(row)) {
+                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                }
+            }
+        }
+        UniqueState::Float64(seen) => {
+            let values = array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("type fixed from schema");
+            for row in 0..values.len() {
+                if values.is_valid(row) && !seen.insert(values.value(row).to_bits()) {
+                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                }
+            }
+        }
+        UniqueState::Utf8(seen) => {
+            let values = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("type fixed from schema");
+            for row in 0..values.len() {
+                if values.is_valid(row) && !seen.insert(values.value(row).to_owned()) {
+                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                }
+            }
+        }
+        UniqueState::Generic(seen) => {
+            for row in 0..array.len() {
+                if array.is_valid(row) {
+                    let value =
+                        array_value_to_string(array, row).map_err(|error| error.to_string())?;
+                    if !seen.insert(value) {
+                        push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_range(
+    array: &dyn Array,
+    rule: &ColumnContract,
+    column: &str,
+    row_offset: u64,
+    findings: &mut Vec<Finding>,
+    max_findings: usize,
+) -> Result<(), String> {
+    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
+        for row in 0..values.len() {
+            if values.is_valid(row) {
+                push_range_findings(
+                    values.value(row),
+                    rule,
+                    column,
+                    row_offset + row as u64,
+                    findings,
+                    max_findings,
+                );
+            }
+        }
+    } else {
+        for row in 0..array.len() {
+            if array.is_valid(row) {
+                if let Some(value) = numeric_value(array, row)? {
+                    push_range_findings(
+                        value,
+                        rule,
+                        column,
+                        row_offset + row as u64,
+                        findings,
+                        max_findings,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_range_findings(
+    number: f64,
+    rule: &ColumnContract,
+    column: &str,
+    row: u64,
+    findings: &mut Vec<Finding>,
+    max_findings: usize,
+) {
+    if rule.min.is_some_and(|minimum| number < minimum) && findings.len() < max_findings {
+        findings.push(Finding {
+            rule: "min",
+            column: column.to_string(),
+            row: Some(row),
+            message: format!("Value is below {}", rule.min.unwrap()),
+        });
+    }
+    if rule.max.is_some_and(|maximum| number > maximum) && findings.len() < max_findings {
+        findings.push(Finding {
+            rule: "max",
+            column: column.to_string(),
+            row: Some(row),
+            message: format!("Value is above {}", rule.max.unwrap()),
+        });
+    }
+}
+
+fn validate_fast_batches(
+    reader: ArrowArrayStreamReader,
+    contract: &Contract,
+) -> Result<FastValidationReport, String> {
+    let schema = reader.schema();
+    let mut findings = Vec::new();
+    let mut patterns = HashMap::new();
+    let mut unique_states: HashMap<String, UniqueState> = HashMap::new();
+    for (name, rule) in &contract.columns {
+        if rule.required && schema.index_of(name).is_err() {
+            findings.push(Finding {
+                rule: "required",
+                column: name.clone(),
+                row: None,
+                message: format!("Required column `{name}` is missing"),
+            });
+        }
+        if let Some(pattern) = &rule.pattern {
+            patterns.insert(
+                name.clone(),
+                Regex::new(pattern).map_err(|error| error.to_string())?,
+            );
+        }
+    }
+
+    let mut rows = 0_u64;
+    for maybe_batch in reader {
+        let batch = maybe_batch.map_err(|error| error.to_string())?;
+        for (column_index, field) in schema.fields().iter().enumerate() {
+            let Some(rule) = contract.columns.get(field.name()) else {
+                continue;
+            };
+            let array = batch.column(column_index);
+            if rule.unique {
+                unique_states
+                    .entry(field.name().clone())
+                    .or_insert_with(|| UniqueState::for_array(array.as_ref()));
+            }
+            if rule.not_null && array.null_count() > 0 {
+                for row in 0..batch.num_rows() {
+                    if array.is_null(row) && findings.len() < contract.max_findings {
+                        findings.push(Finding {
+                            rule: "not_null",
+                            column: field.name().clone(),
+                            row: Some(rows + row as u64),
+                            message: "Null value is not allowed".to_string(),
+                        });
+                    }
+                }
+            }
+            if rule.unique {
+                check_unique(
+                    unique_states
+                        .get_mut(field.name())
+                        .expect("unique state initialized"),
+                    array.as_ref(),
+                    field.name(),
+                    rows,
+                    &mut findings,
+                    contract.max_findings,
+                )?;
+            }
+            if rule.min.is_some() || rule.max.is_some() {
+                check_range(
+                    array.as_ref(),
+                    rule,
+                    field.name(),
+                    rows,
+                    &mut findings,
+                    contract.max_findings,
+                )?;
+            }
+            if rule.pattern.is_some() || rule.allowed.is_some() {
+                for row in 0..batch.num_rows() {
+                    if array.is_null(row) || findings.len() >= contract.max_findings {
+                        continue;
+                    }
+                    let value = array_value_to_string(array.as_ref(), row)
+                        .map_err(|error| error.to_string())?;
+                    if patterns
+                        .get(field.name())
+                        .is_some_and(|pattern| !pattern.is_match(&value))
+                    {
+                        findings.push(Finding {
+                            rule: "pattern",
+                            column: field.name().clone(),
+                            row: Some(rows + row as u64),
+                            message: "Value does not match the required pattern".to_string(),
+                        });
+                    }
+                    if rule
+                        .allowed
+                        .as_ref()
+                        .is_some_and(|allowed| !allowed.contains(&value))
+                        && findings.len() < contract.max_findings
+                    {
+                        findings.push(Finding {
+                            rule: "allowed",
+                            column: field.name().clone(),
+                            row: Some(rows + row as u64),
+                            message: "Value is not in the allowlist".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        rows += batch.num_rows() as u64;
+    }
+    Ok(FastValidationReport {
+        valid: findings.is_empty(),
+        findings,
+        rows,
+        mode: "rules_only",
+    })
+}
+
 #[pyfunction]
 fn profile_arrow(source: PyArrowType<ArrowArrayStreamReader>) -> PyResult<String> {
     let (profile, _) = inspect_batches(source.0, None).map_err(py_err)?;
@@ -447,6 +764,16 @@ fn validate_arrow(
         profile,
     })
     .map_err(py_err)
+}
+
+#[pyfunction]
+fn validate_fast_arrow(
+    source: PyArrowType<ArrowArrayStreamReader>,
+    contract_json: &str,
+) -> PyResult<String> {
+    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
+    let report = validate_fast_batches(source.0, &contract).map_err(py_err)?;
+    serde_json::to_string(&report).map_err(py_err)
 }
 
 #[pyfunction]
@@ -478,20 +805,20 @@ fn diff_arrow(
         .collect::<Vec<_>>();
     let mut changed = Vec::new();
     for (key, before_values) in &before_rows {
-        if let Some(after_values) = after_rows.get(key)
-            && before_values != after_values
-        {
-            let columns = before_values
-                .iter()
-                .zip(after_values)
-                .zip(&before_names)
-                .filter(|((before, after), _)| before != after)
-                .map(|(_, name)| name.clone())
-                .collect();
-            changed.push(ChangedRow {
-                key: key.clone(),
-                columns,
-            });
+        if let Some(after_values) = after_rows.get(key) {
+            if before_values != after_values {
+                let columns = before_values
+                    .iter()
+                    .zip(after_values)
+                    .zip(&before_names)
+                    .filter(|((before, after), _)| before != after)
+                    .map(|(_, name)| name.clone())
+                    .collect();
+                changed.push(ChangedRow {
+                    key: key.clone(),
+                    columns,
+                });
+            }
         }
     }
     added_keys.sort();
@@ -626,6 +953,7 @@ fn verify_proof_receipt(receipt_json: &str) -> PyResult<String> {
 fn _proofframe(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_fast_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(scan_pii_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(detect_leakage_arrow, module)?)?;

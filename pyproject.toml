@@ -23,7 +23,7 @@ dependencies = ["pyarrow>=15"]
 [project.optional-dependencies]
 pandas = ["pandas>=2"]
 polars = ["polars>=1"]
-dev = ["maturin>=1.11", "pytest>=8", "ruff>=0.15", "pandas>=2"]
+dev = ["maturin>=1.11", "pytest>=8", "pytest-cov>=7", "ruff>=0.15", "pandas>=2"]
 benchmark = ["pandas>=2", "pandera>=0.26", "great-expectations>=1.8"]
 
 [project.scripts]
@@ -40,6 +40,17 @@ features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["proofframe"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
 
 [tool.ruff]
 line-length = 100

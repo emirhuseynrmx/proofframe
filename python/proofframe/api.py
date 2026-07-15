@@ -16,6 +16,7 @@ from ._proofframe import (
     scan_pii_arrow,
     sign_proof_receipt,
     validate_arrow,
+    validate_fast_arrow,
     verify_proof_receipt,
 )
 
@@ -44,9 +45,12 @@ def profile(data: Any) -> dict[str, Any]:
     return json.loads(profile_arrow(_as_reader(data)))
 
 
-def validate(data: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate data against a declarative contract in one streaming pass."""
-    return json.loads(validate_arrow(_as_reader(data), json.dumps(contract, sort_keys=True)))
+def validate(
+    data: Any, contract: Mapping[str, Any], *, include_profile: bool = True
+) -> dict[str, Any]:
+    """Validate data in one pass, optionally skipping profile work for the fastest rule path."""
+    native = validate_arrow if include_profile else validate_fast_arrow
+    return json.loads(native(_as_reader(data), json.dumps(contract, sort_keys=True)))
 
 
 def diff(before: Any, after: Any, *, keys: str | Sequence[str]) -> dict[str, Any]:

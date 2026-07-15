@@ -7,6 +7,9 @@
 - Clippy with warnings denied, rustfmt, Ruff, and a three-OS CI matrix are release gates.
 - The comparative benchmark is standalone and records inputs, package versions, raw samples,
   median time, and throughput.
+- Rules-only validation uses typed Arrow buffers, exact Roaring bitmaps for 64-bit integer
+  uniqueness, and exact hash sets for floating-point/string uniqueness. It still returns bounded
+  row evidence; it skips only the separate profile and fingerprint products.
 
 ## Miri and Loom decision
 

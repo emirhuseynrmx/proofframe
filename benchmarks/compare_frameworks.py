@@ -89,7 +89,7 @@ def main() -> None:
     )
 
     def proof_run() -> object:
-        result = proofframe.validate(table, contract)
+        result = proofframe.validate(table, contract, include_profile=False)
         if not result["valid"]:
             raise RuntimeError("ProofFrame rejected valid benchmark data")
         return result
@@ -119,7 +119,7 @@ def main() -> None:
             "rules": ["id not null", "id unique", "0 <= score <= 1"],
             "warmups": args.warmups,
             "repeats": args.repeats,
-            "timing_scope": "validation only; imports, setup, and conversion excluded",
+            "timing_scope": "rules-only validation; imports, setup, and conversion excluded",
         },
         "environment": {
             "python": platform.python_version(),
