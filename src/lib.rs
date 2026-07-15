@@ -54,14 +54,22 @@ struct ColumnSchema {
     nullable: bool,
 }
 
+/// Per-column summary produced while profiling a dataset.
 #[derive(Debug, Serialize)]
 pub struct ColumnProfile {
+    /// Column name as declared in the Arrow schema.
     pub name: String,
+    /// Arrow data type rendered as a stable string.
     pub data_type: String,
+    /// Number of null values observed in the column.
     pub null_count: u64,
+    /// Number of non-null values observed in the column.
     pub non_null_count: u64,
+    /// Count of distinct canonical values seen in the column.
     pub distinct_count: usize,
+    /// Minimum numeric value, when the column parses as a number.
     pub min: Option<f64>,
+    /// Maximum numeric value, when the column parses as a number.
     pub max: Option<f64>,
 }
 
@@ -74,17 +82,24 @@ struct ColumnState {
     max: Option<f64>,
 }
 
+/// Deterministic dataset profile with a canonical content fingerprint.
 #[derive(Debug, Serialize)]
 pub struct Profile {
+    /// Total number of rows scanned across all record batches.
     pub rows: u64,
+    /// Per-column profiles in schema order.
     pub columns: Vec<ColumnProfile>,
+    /// `pf-fp-v1`-tagged BLAKE3 fingerprint of the ordered data.
     pub fingerprint: String,
 }
 
+/// Validation contract: per-column rules plus a bound on emitted findings.
 #[derive(Debug, Deserialize, Default)]
 pub struct Contract {
+    /// Column name to its rule set.
     #[serde(default)]
     pub columns: HashMap<String, ColumnContract>,
+    /// Maximum number of findings to retain; the true count is still reported.
     #[serde(default = "default_max_findings")]
     pub max_findings: usize,
 }
@@ -93,44 +108,70 @@ fn default_max_findings() -> usize {
     DEFAULT_MAX_FINDINGS
 }
 
+/// Rule set applied to a single column during validation.
 #[derive(Debug, Deserialize, Default)]
 pub struct ColumnContract {
+    /// Require the column to be present in the schema.
     #[serde(default)]
     pub required: bool,
+    /// Reject null values in the column.
     #[serde(default)]
     pub not_null: bool,
+    /// Reject duplicate values in the column.
     #[serde(default)]
     pub unique: bool,
+    /// Inclusive lower bound for numeric values.
     pub min: Option<f64>,
+    /// Inclusive upper bound for numeric values.
     pub max: Option<f64>,
+    /// Regular expression each value must match.
     pub pattern: Option<String>,
+    /// Allowlist the value must belong to.
     pub allowed: Option<HashSet<String>>,
 }
 
+/// A single rule violation with bounded, row-level evidence.
 #[derive(Debug, Serialize)]
 pub struct Finding {
+    /// Rule that produced the finding (for example `not_null` or `unique`).
     pub rule: &'static str,
+    /// Column the finding applies to.
     pub column: String,
+    /// Zero-based row index, or `None` for schema-level findings.
     pub row: Option<u64>,
+    /// Human-readable description of the violation.
     pub message: String,
 }
 
+/// Full validation result: findings plus the dataset profile and fingerprint.
 #[derive(Debug, Serialize)]
 pub struct ValidationReport {
+    /// `true` when no violations were found.
     pub valid: bool,
+    /// Total number of violations, even if `findings` was truncated.
     pub violation_count: u64,
+    /// `true` when `findings` was capped by the contract's `max_findings`.
     pub truncated: bool,
+    /// Bounded list of individual findings.
     pub findings: Vec<Finding>,
+    /// Dataset profile and canonical fingerprint from the same pass.
     pub profile: Profile,
 }
 
+/// Rules-only validation result that skips profiling and fingerprinting.
 #[derive(Debug, Serialize)]
 pub struct FastValidationReport {
+    /// `true` when no violations were found.
     pub valid: bool,
+    /// Total number of violations, even if `findings` was truncated.
     pub violation_count: u64,
+    /// `true` when `findings` was capped by the contract's `max_findings`.
     pub truncated: bool,
+    /// Bounded list of individual findings.
     pub findings: Vec<Finding>,
+    /// Total number of rows scanned.
     pub rows: u64,
+    /// Evaluation mode identifier (`rules_only`).
     pub mode: &'static str,
 }
 
@@ -195,55 +236,92 @@ impl UniqueState {
     }
 }
 
+/// A row present in both datasets whose values changed.
 #[derive(Debug, Serialize)]
 pub struct ChangedRow {
+    /// Human-readable business key of the changed row.
     pub key: String,
+    /// Names of the columns whose values differ.
     pub columns: Vec<String>,
 }
 
+/// Exact keyed diff between two datasets.
 #[derive(Debug, Serialize)]
 pub struct DiffReport {
+    /// Business key columns used to align rows.
     pub keys: Vec<String>,
+    /// Row count of the "before" dataset.
     pub before_rows: usize,
+    /// Row count of the "after" dataset.
     pub after_rows: usize,
+    /// Number of keys present only in "after".
     pub added_count: usize,
+    /// Number of keys present only in "before".
     pub removed_count: usize,
+    /// Number of keys present in both with differing values.
     pub changed_count: usize,
+    /// Sorted keys present only in "after".
     pub added_keys: Vec<String>,
+    /// Sorted keys present only in "before".
     pub removed_keys: Vec<String>,
+    /// Per-key column-level changes, sorted by key.
     pub changed: Vec<ChangedRow>,
 }
 
+/// A single PII detection that never carries the matched value.
 #[derive(Debug, Serialize)]
 pub struct PiiFinding {
+    /// Detected PII class (for example `email` or `payment_card`).
     pub kind: &'static str,
+    /// Detector confidence (`high` or `medium`).
     pub confidence: &'static str,
+    /// Column the value was found in.
     pub column: String,
+    /// Zero-based row index of the value.
     pub row: u64,
+    /// Domain-separated BLAKE3 fingerprint of the value, never the value itself.
     pub value_fingerprint: String,
 }
 
+/// Aggregated PII scan result with bounded per-cell findings.
 #[derive(Debug, Serialize)]
 pub struct PiiReport {
+    /// `true` when at least one PII value was detected.
     pub detected: bool,
+    /// Total number of rows scanned.
     pub scanned_rows: u64,
+    /// Total number of PII detections, even if `findings` was truncated.
     pub finding_count: usize,
+    /// Detection counts grouped by PII class.
     pub counts_by_kind: BTreeMap<&'static str, usize>,
+    /// `true` when `findings` was capped by `max_findings`.
     pub truncated: bool,
+    /// Bounded list of individual detections.
     pub findings: Vec<PiiFinding>,
 }
 
+/// Train/test overlap result that exposes only hashed sample identifiers.
 #[derive(Debug, Serialize)]
 pub struct LeakageReport {
+    /// `true` when any overlap was found between the two datasets.
     pub detected: bool,
+    /// Detection mode: `key` for keyed overlap or `full_row` for exact rows.
     pub mode: &'static str,
+    /// Key columns used for overlap, empty in full-row mode.
     pub keys: Vec<String>,
+    /// Number of rows in the train dataset.
     pub train_rows: usize,
+    /// Number of rows in the test dataset.
     pub test_rows: usize,
+    /// Number of overlapping identities.
     pub overlap_count: usize,
+    /// Overlap as a fraction of distinct train identities.
     pub train_overlap_rate: f64,
+    /// Overlap as a fraction of distinct test identities.
     pub test_overlap_rate: f64,
+    /// Sorted, bounded sample of hashed overlapping identifiers.
     pub sample_fingerprints: Vec<String>,
+    /// `true` when the sample list was capped by `max_samples`.
     pub truncated: bool,
 }
 

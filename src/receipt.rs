@@ -1,3 +1,9 @@
+//! Ed25519-signed proof receipts over canonical JSON reports.
+//!
+//! A receipt binds a report to an accountable signer using RFC 8785 JSON
+//! canonicalization and a BLAKE3 report hash. Verification is fail-closed:
+//! schema support, report hash, and signature must all hold.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -6,10 +12,14 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Ed25519 signing keypair encoded as URL-safe base64.
 #[derive(Serialize)]
 pub struct Keypair {
+    /// Signature algorithm identifier (`Ed25519`).
     pub algorithm: &'static str,
+    /// Base64 private signing key; store it in a secret manager.
     pub private_key: String,
+    /// Base64 public verifying key.
     pub public_key: String,
 }
 
@@ -31,11 +41,16 @@ struct SignedReceipt {
     signature: String,
 }
 
+/// Result of verifying a signed receipt; every field must hold for `valid`.
 #[derive(Serialize)]
 pub struct Verification {
+    /// `true` only when schema, report hash, and signature all pass.
     pub valid: bool,
+    /// `true` when the Ed25519 signature verifies against the public key.
     pub signature_valid: bool,
+    /// `true` when the recomputed report hash matches the receipt.
     pub report_hash_matches: bool,
+    /// `true` when the receipt schema and algorithm are supported.
     pub schema_supported: bool,
 }
 
@@ -82,6 +97,7 @@ fn decode_exact<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], S
         .map_err(|_| format!("Invalid {label} length"))
 }
 
+/// Generate an Ed25519 [`Keypair`] and return it as a JSON string.
 pub fn generate_keypair_json() -> Result<String, String> {
     let mut seed = [0_u8; 32];
     getrandom::fill(&mut seed).map_err(|error| error.to_string())?;
@@ -94,6 +110,10 @@ pub fn generate_keypair_json() -> Result<String, String> {
     serde_json::to_string(&output).map_err(|error| error.to_string())
 }
 
+/// Sign a JSON report and return a canonical, Ed25519-signed receipt string.
+///
+/// Integers outside the I-JSON safe range are rejected to keep JSON number
+/// canonicalization unambiguous.
 pub fn sign_json(report_json: &str, private_key: &str) -> Result<String, String> {
     let report: Value = serde_json::from_str(report_json).map_err(|error| error.to_string())?;
     validate_i_json(&report)?;
@@ -122,6 +142,7 @@ pub fn sign_json(report_json: &str, private_key: &str) -> Result<String, String>
     .map_err(|error| error.to_string())
 }
 
+/// Verify a signed receipt's schema, report hash, and Ed25519 signature.
 pub fn verify_json(receipt_json: &str) -> Result<Verification, String> {
     let receipt: SignedReceipt =
         serde_json::from_str(receipt_json).map_err(|error| error.to_string())?;

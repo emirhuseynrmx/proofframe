@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0-alpha.3
+
+- Documented the public Rust API: every exported type, field, and function now carries rustdoc,
+  and the `receipt` module has a module-level overview.
+- Added a `documentation` link to crate metadata.
+- Unpinned the `roaring` dependency and trimmed the published crate to Rust sources.
+
 ## 0.4.0-alpha.2
 
 - Added `pf-fp-v1` canonical proof fingerprints that do not depend on Arrow display formatting.
