@@ -41,7 +41,8 @@ It accepts PyArrow tables and streams directly through the Arrow C Stream interf
 Polars DataFrames use the same Arrow-native path. The validation engine processes record batches in
 one pass without converting rows into Python objects.
 
-> Alpha software: `0.4.0a4` adds a standalone fingerprint API, optional exact distinct profiling,
+> Alpha software: `0.4.0a5` adds portable manylinux/macOS/Windows wheel publishing on top of the
+> `0.4.0a4` standalone fingerprint API, optional exact distinct profiling,
 > typed Arrow validation hot paths, lazy finding rendering, rule-by-rule benchmarks, and the
 > canonical proof/diff/receipt foundations from earlier 0.4 alphas. The receipt schema and detector
 > taxonomy may still change before 0.4 stable.
@@ -49,7 +50,7 @@ one pass without converting rows into Python objects.
 ## The 30-second demo
 
 ```bash
-pip install proofframe==0.4.0a4
+pip install proofframe==0.4.0a5
 ```
 
 ```python

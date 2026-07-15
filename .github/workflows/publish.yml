@@ -3,6 +3,7 @@ name: Publish to PyPI
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,8 +32,8 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
-          manylinux: auto
+          args: --release --out dist --compatibility pypi
+          manylinux: "2014"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.platform.target }}
@@ -65,4 +66,6 @@ jobs:
           pattern: "*"
           path: dist
           merge-multiple: true
+      - name: Show distributions
+        run: ls -lah dist
       - uses: pypa/gh-action-pypi-publish@release/v1

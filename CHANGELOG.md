@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-alpha.5
+
+- Prepared PyPI Trusted Publishing for portable ABI3 wheels across Linux x86_64, Linux ARM64,
+  macOS universal2, and Windows.
+- Forced the publish and wheel workflows to build Linux artifacts with manylinux2014 / PyPI
+  compatibility so Python 3.10+ consumers can install wheels without compiling Rust locally.
+- Added manual `workflow_dispatch` support to the PyPI publish workflow.
+
 ## 0.4.0-alpha.4
 
 - Added standalone `fingerprint_reader` / `pf.fingerprint(data)` so callers can compute only the
