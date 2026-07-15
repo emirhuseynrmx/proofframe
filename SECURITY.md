@@ -18,6 +18,11 @@ decimal128, UTF-8 strings, binary values, date32/date64, and
 second/millisecond/microsecond/nanosecond timestamps. Unsupported types fail closed instead of
 producing a fingerprint with unstable formatting.
 
+Regex and allowlist contract rules intentionally evaluate Arrow's text rendering of the value
+because they are text rules. Those verdict messages are not used as proof-critical canonical bytes;
+fingerprints, uniqueness keys, leakage IDs, diff row hashes, and signed receipts use the canonical
+encodings above.
+
 ## Receipt invariant
 
 Signed proof receipts protect the canonical JSON report they contain. A valid receipt proves that
@@ -34,6 +39,6 @@ to low confidence because order IDs and account-like identifiers can pass Luhn b
 ## Operational limits
 
 `max_findings` bounds report size while profile/fingerprint scans still cover the full stream. Keyed
-diff currently materializes both keyed datasets in memory, so use normal input size limits for large
-tables or network-facing services. Regex patterns and contracts are trusted configuration in the
-0.4 alpha line.
+diff writes both sides into temporary hash partitions, then loads one partition at a time to preserve
+exact added, removed, and changed-column evidence without holding both full datasets in memory.
+Regex patterns and contracts are trusted configuration in the 0.4 alpha line.

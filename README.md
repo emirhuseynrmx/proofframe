@@ -83,8 +83,8 @@ assert change["changed"] == [{"key": "2", "columns": ["plan"]}]
 ```
 
 Composite keys work too: `keys=["tenant_id", "user_id"]`. Duplicate keys fail loudly instead of
-silently producing a misleading diff. The current diff implementation materializes both keyed
-datasets in memory; use it for CI-sized snapshots today and partition large tables before diffing.
+silently producing a misleading diff. The diff engine uses disk-backed hash partitions, so it keeps
+exact changed-column output without materializing both full datasets in memory.
 
 ## PII and leakage checks
 
@@ -234,7 +234,8 @@ hardware before drawing performance conclusions.
 
 - **0.4 stable:** validation-only fast path, extracted Miri-compatible core, fuzz targets, pinned
   cross-platform benchmarks, and a stabilized receipt schema.
-- **0.5:** reversible dataset patches and partition-aware Parquet diff.
+- **0.5:** reversible dataset patches, Parquet predicate pushdown, and configurable diff partition
+  tuning.
 - **1.0:** stable contract schema and cross-language Rust/Python compatibility.
 
 ## License

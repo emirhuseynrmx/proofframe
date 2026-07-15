@@ -4,6 +4,9 @@ mod pii;
 mod receipt;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 
 use ahash::RandomState;
 use arrow::array::{
@@ -22,12 +25,16 @@ use pyo3::prelude::*;
 use regex::Regex;
 use roaring::RoaringTreemap;
 use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
 
 const DEFAULT_MAX_FINDINGS: usize = 100;
+const DIFF_PARTITIONS: usize = 64;
 
 type RowValues = Vec<Option<Vec<u8>>>;
-type RowMap = HashMap<String, RowValues>;
-type CollectedRows = (Vec<String>, RowMap);
+struct RowEntry {
+    values: RowValues,
+    hash: String,
+}
 
 #[derive(Debug, Serialize)]
 struct ColumnProfile {
@@ -290,10 +297,28 @@ fn update_hash(
     Ok(())
 }
 
-fn inspect_batches(
-    reader: ArrowArrayStreamReader,
+fn row_values_hash(values: &RowValues) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pf-diff-row-v1\0");
+    for (column, value) in values.iter().enumerate() {
+        hasher.update(&(column as u64).to_le_bytes());
+        match value {
+            Some(bytes) => update_len_prefixed(&mut hasher, bytes),
+            None => {
+                hasher.update(&u64::MAX.to_le_bytes());
+            }
+        };
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn inspect_batches<R>(
+    reader: R,
     contract: Option<&Contract>,
-) -> Result<(Profile, Vec<Finding>), String> {
+) -> Result<(Profile, Vec<Finding>), String>
+where
+    R: RecordBatchReader,
+{
     let schema = reader.schema();
     let mut states = schema
         .fields()
@@ -460,7 +485,96 @@ fn inspect_batches(
     ))
 }
 
-fn collect_rows(reader: ArrowArrayStreamReader, keys: &[String]) -> Result<CollectedRows, String> {
+fn row_partition(key: &str) -> usize {
+    let digest = blake3::hash(key.as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    (u64::from_le_bytes(bytes) as usize) % DIFF_PARTITIONS
+}
+
+fn write_u64(writer: &mut BufWriter<File>, value: u64) -> Result<(), String> {
+    writer
+        .write_all(&value.to_le_bytes())
+        .map_err(|error| error.to_string())
+}
+
+fn read_u64(reader: &mut BufReader<File>) -> Result<Option<u64>, String> {
+    let mut bytes = [0_u8; 8];
+    match reader.read_exact(&mut bytes) {
+        Ok(()) => Ok(Some(u64::from_le_bytes(bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn write_bytes(writer: &mut BufWriter<File>, value: &[u8]) -> Result<(), String> {
+    write_u64(writer, value.len() as u64)?;
+    writer.write_all(value).map_err(|error| error.to_string())
+}
+
+fn read_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>, String> {
+    let len = read_u64(reader)?.ok_or_else(|| "Truncated diff partition record".to_string())?;
+    let mut value = vec![0_u8; len as usize];
+    reader
+        .read_exact(&mut value)
+        .map_err(|error| error.to_string())?;
+    Ok(value)
+}
+
+fn write_row_record(
+    writer: &mut BufWriter<File>,
+    key: &str,
+    entry: &RowEntry,
+) -> Result<(), String> {
+    write_bytes(writer, key.as_bytes())?;
+    write_bytes(writer, entry.hash.as_bytes())?;
+    write_u64(writer, entry.values.len() as u64)?;
+    for value in &entry.values {
+        match value {
+            Some(bytes) => write_bytes(writer, bytes)?,
+            None => write_u64(writer, u64::MAX)?,
+        }
+    }
+    Ok(())
+}
+
+fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(String, RowEntry)>, String> {
+    let Some(key_len) = read_u64(reader)? else {
+        return Ok(None);
+    };
+    let mut key = vec![0_u8; key_len as usize];
+    reader
+        .read_exact(&mut key)
+        .map_err(|error| error.to_string())?;
+    let hash = String::from_utf8(read_bytes(reader)?).map_err(|error| error.to_string())?;
+    let value_count =
+        read_u64(reader)?.ok_or_else(|| "Truncated diff partition record".to_string())?;
+    let mut values = Vec::with_capacity(value_count as usize);
+    for _ in 0..value_count {
+        let len = read_u64(reader)?.ok_or_else(|| "Truncated diff value".to_string())?;
+        if len == u64::MAX {
+            values.push(None);
+        } else {
+            let mut value = vec![0_u8; len as usize];
+            reader
+                .read_exact(&mut value)
+                .map_err(|error| error.to_string())?;
+            values.push(Some(value));
+        }
+    }
+    let key = String::from_utf8(key).map_err(|error| error.to_string())?;
+    Ok(Some((key, RowEntry { values, hash })))
+}
+
+fn partition_rows<R>(
+    reader: R,
+    keys: &[String],
+    directory: &Path,
+    prefix: &str,
+) -> Result<(Vec<String>, usize, Vec<PathBuf>), String>
+where
+    R: RecordBatchReader,
+{
     let schema = reader.schema();
     let key_indexes = keys
         .iter()
@@ -474,8 +588,16 @@ fn collect_rows(reader: ArrowArrayStreamReader, keys: &[String]) -> Result<Colle
         .fields()
         .iter()
         .map(|field| field.name().clone())
-        .collect();
-    let mut rows = HashMap::new();
+        .collect::<Vec<_>>();
+    let paths = (0..DIFF_PARTITIONS)
+        .map(|partition| directory.join(format!("{prefix}-{partition}.pfpart")))
+        .collect::<Vec<_>>();
+    let mut writers = paths
+        .iter()
+        .map(|path| File::create(path).map(BufWriter::new))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut row_count = 0_usize;
     for maybe_batch in reader {
         let batch: RecordBatch = maybe_batch.map_err(|error| error.to_string())?;
         for row in 0..batch.num_rows() {
@@ -502,12 +624,66 @@ fn collect_rows(reader: ArrowArrayStreamReader, keys: &[String]) -> Result<Colle
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if rows.insert(key.clone(), values).is_some() {
-                return Err(format!("Duplicate key `{key}`; diff keys must be unique"));
-            }
+            let hash = row_values_hash(&values);
+            let partition = row_partition(&key);
+            write_row_record(&mut writers[partition], &key, &RowEntry { values, hash })?;
+            row_count += 1;
         }
     }
-    Ok((names, rows))
+    for writer in &mut writers {
+        writer.flush().map_err(|error| error.to_string())?;
+    }
+    Ok((names, row_count, paths))
+}
+
+fn process_diff_partition(
+    before_path: &Path,
+    after_path: &Path,
+    column_names: &[String],
+    added_keys: &mut Vec<String>,
+    removed_keys: &mut Vec<String>,
+    changed: &mut Vec<ChangedRow>,
+) -> Result<(), String> {
+    let mut before_rows = HashMap::new();
+    let mut before_reader =
+        BufReader::new(File::open(before_path).map_err(|error| error.to_string())?);
+    while let Some((key, entry)) = read_row_record(&mut before_reader)? {
+        if before_rows.insert(key.clone(), entry).is_some() {
+            return Err(format!("Duplicate key `{key}`; diff keys must be unique"));
+        }
+    }
+
+    let mut seen_after = HashSet::new();
+    let mut after_reader =
+        BufReader::new(File::open(after_path).map_err(|error| error.to_string())?);
+    while let Some((key, entry)) = read_row_record(&mut after_reader)? {
+        if !seen_after.insert(key.clone()) {
+            return Err(format!("Duplicate key `{key}`; diff keys must be unique"));
+        }
+        if let Some(before_entry) = before_rows.get(&key) {
+            if before_entry.hash != entry.hash {
+                let columns = before_entry
+                    .values
+                    .iter()
+                    .zip(&entry.values)
+                    .zip(column_names)
+                    .filter(|((before, after), _)| before != after)
+                    .map(|(_, name)| name.clone())
+                    .collect();
+                changed.push(ChangedRow { key, columns });
+            }
+        } else {
+            added_keys.push(key);
+        }
+    }
+
+    removed_keys.extend(
+        before_rows
+            .keys()
+            .filter(|key| !seen_after.contains(*key))
+            .cloned(),
+    );
+    Ok(())
 }
 
 fn privacy_fingerprint(value: &str) -> String {
@@ -517,10 +693,13 @@ fn privacy_fingerprint(value: &str) -> String {
     hasher.finalize().to_hex()[..16].to_string()
 }
 
-fn collect_leakage_ids(
-    reader: ArrowArrayStreamReader,
+fn collect_leakage_ids<R>(
+    reader: R,
     keys: &[String],
-) -> Result<(Vec<String>, usize, HashSet<String>), String> {
+) -> Result<(Vec<String>, usize, HashSet<String>), String>
+where
+    R: RecordBatchReader,
+{
     let schema = reader.schema();
     let names = schema
         .fields()
@@ -731,10 +910,10 @@ fn push_range_findings(
     }
 }
 
-fn validate_fast_batches(
-    reader: ArrowArrayStreamReader,
-    contract: &Contract,
-) -> Result<FastValidationReport, String> {
+fn validate_fast_batches<R>(reader: R, contract: &Contract) -> Result<FastValidationReport, String>
+where
+    R: RecordBatchReader,
+{
     let schema = reader.schema();
     let mut findings = Vec::new();
     let mut patterns = HashMap::new();
@@ -886,49 +1065,38 @@ fn diff_arrow(
     if keys.is_empty() {
         return Err(py_err("At least one key column is required"));
     }
-    let (before_names, before_rows) = collect_rows(before.0, &keys).map_err(py_err)?;
-    let (after_names, after_rows) = collect_rows(after.0, &keys).map_err(py_err)?;
+    let directory = TempDir::new().map_err(py_err)?;
+    let (before_names, before_count, before_paths) =
+        partition_rows(before.0, &keys, directory.path(), "before").map_err(py_err)?;
+    let (after_names, after_count, after_paths) =
+        partition_rows(after.0, &keys, directory.path(), "after").map_err(py_err)?;
     if before_names != after_names {
         return Err(py_err(
             "Schemas differ; normalize columns before row-level diff",
         ));
     }
 
-    let mut added_keys = after_rows
-        .keys()
-        .filter(|key| !before_rows.contains_key(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut removed_keys = before_rows
-        .keys()
-        .filter(|key| !after_rows.contains_key(*key))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut added_keys = Vec::new();
+    let mut removed_keys = Vec::new();
     let mut changed = Vec::new();
-    for (key, before_values) in &before_rows {
-        if let Some(after_values) = after_rows.get(key) {
-            if before_values != after_values {
-                let columns = before_values
-                    .iter()
-                    .zip(after_values)
-                    .zip(&before_names)
-                    .filter(|((before, after), _)| before != after)
-                    .map(|(_, name)| name.clone())
-                    .collect();
-                changed.push(ChangedRow {
-                    key: key.clone(),
-                    columns,
-                });
-            }
-        }
+    for (before_path, after_path) in before_paths.iter().zip(&after_paths) {
+        process_diff_partition(
+            before_path,
+            after_path,
+            &before_names,
+            &mut added_keys,
+            &mut removed_keys,
+            &mut changed,
+        )
+        .map_err(py_err)?;
     }
     added_keys.sort();
     removed_keys.sort();
     changed.sort_by(|left, right| left.key.cmp(&right.key));
     let report = DiffReport {
         keys,
-        before_rows: before_rows.len(),
-        after_rows: after_rows.len(),
+        before_rows: before_count,
+        after_rows: after_count,
         added_count: added_keys.len(),
         removed_count: removed_keys.len(),
         changed_count: changed.len(),
@@ -1050,6 +1218,88 @@ fn sign_proof_receipt(report_json: &str, private_key: &str) -> PyResult<String> 
 fn verify_proof_receipt(receipt_json: &str) -> PyResult<String> {
     let verification = receipt::verify_json(receipt_json).map_err(py_err)?;
     serde_json::to_string(&verification).map_err(py_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use arrow::array::ArrayRef;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatchIterator;
+    use proptest::prelude::*;
+
+    fn reader_from_batch(batch: RecordBatch) -> impl RecordBatchReader {
+        let schema = batch.schema();
+        RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema)
+    }
+
+    fn finding_signature(findings: &[Finding]) -> Vec<(&'static str, String, Option<u64>)> {
+        let mut signature = findings
+            .iter()
+            .map(|finding| (finding.rule, finding.column.clone(), finding.row))
+            .collect::<Vec<_>>();
+        signature.sort();
+        signature
+    }
+
+    proptest! {
+        #[test]
+        fn full_and_fast_paths_have_same_rule_verdicts(
+            rows in prop::collection::vec((-10_i64..10, -250_i32..250), 0..40)
+        ) {
+            let ids = rows.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            let scores = rows
+                .iter()
+                .map(|(_, score)| f64::from(*score) / 100.0)
+                .collect::<Vec<_>>();
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("score", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int64Array::from(ids)) as ArrayRef,
+                    Arc::new(Float64Array::from(scores)) as ArrayRef,
+                ],
+            )
+            .unwrap();
+            let contract = Contract {
+                columns: HashMap::from([
+                    (
+                        "id".to_string(),
+                        ColumnContract {
+                            unique: true,
+                            min: Some(-3.0),
+                            max: Some(3.0),
+                            ..ColumnContract::default()
+                        },
+                    ),
+                    (
+                        "score".to_string(),
+                        ColumnContract {
+                            unique: true,
+                            min: Some(-1.0),
+                            max: Some(1.0),
+                            ..ColumnContract::default()
+                        },
+                    ),
+                ]),
+                max_findings: 1_000,
+            };
+
+            let (_, full_findings) =
+                inspect_batches(reader_from_batch(batch.clone()), Some(&contract)).unwrap();
+            let fast_report = validate_fast_batches(reader_from_batch(batch), &contract).unwrap();
+
+            prop_assert_eq!(
+                finding_signature(&full_findings),
+                finding_signature(&fast_report.findings)
+            );
+        }
+    }
 }
 
 #[pymodule]
