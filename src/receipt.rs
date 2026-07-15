@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Serialize)]
-struct Keypair {
-    algorithm: &'static str,
-    private_key: String,
-    public_key: String,
+pub struct Keypair {
+    pub algorithm: &'static str,
+    pub private_key: String,
+    pub public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,11 +32,11 @@ struct SignedReceipt {
 }
 
 #[derive(Serialize)]
-pub(crate) struct Verification {
-    valid: bool,
-    signature_valid: bool,
-    report_hash_matches: bool,
-    schema_supported: bool,
+pub struct Verification {
+    pub valid: bool,
+    pub signature_valid: bool,
+    pub report_hash_matches: bool,
+    pub schema_supported: bool,
 }
 
 fn canonical(value: &impl Serialize) -> Result<Vec<u8>, String> {
@@ -82,7 +82,7 @@ fn decode_exact<const N: usize>(encoded: &str, label: &str) -> Result<[u8; N], S
         .map_err(|_| format!("Invalid {label} length"))
 }
 
-pub(crate) fn generate_keypair_json() -> Result<String, String> {
+pub fn generate_keypair_json() -> Result<String, String> {
     let mut seed = [0_u8; 32];
     getrandom::fill(&mut seed).map_err(|error| error.to_string())?;
     let signing = SigningKey::from_bytes(&seed);
@@ -94,7 +94,7 @@ pub(crate) fn generate_keypair_json() -> Result<String, String> {
     serde_json::to_string(&output).map_err(|error| error.to_string())
 }
 
-pub(crate) fn sign_json(report_json: &str, private_key: &str) -> Result<String, String> {
+pub fn sign_json(report_json: &str, private_key: &str) -> Result<String, String> {
     let report: Value = serde_json::from_str(report_json).map_err(|error| error.to_string())?;
     validate_i_json(&report)?;
     let signing = SigningKey::from_bytes(&decode_exact(private_key, "private key")?);
@@ -122,7 +122,7 @@ pub(crate) fn sign_json(report_json: &str, private_key: &str) -> Result<String, 
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn verify_json(receipt_json: &str) -> Result<Verification, String> {
+pub fn verify_json(receipt_json: &str) -> Result<Verification, String> {
     let receipt: SignedReceipt =
         serde_json::from_str(receipt_json).map_err(|error| error.to_string())?;
     validate_i_json(&receipt.unsigned.report)?;

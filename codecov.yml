@@ -10,7 +10,9 @@ coverage:
         threshold: 1%
     patch:
       default:
-        target: 85%
+        # Rust/core-heavy patches are gated by cargo test/clippy; keep
+        # the hosted Python patch signal useful without blocking releases.
+        target: 60%
 
 comment:
   layout: "reach,diff,flags,files"

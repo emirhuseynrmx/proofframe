@@ -37,7 +37,7 @@ Changelog = "https://github.com/emirhuseynrmx/proofframe/blob/main/CHANGELOG.md"
 [tool.maturin]
 python-source = "python"
 module-name = "proofframe._proofframe"
-features = ["pyo3/extension-module"]
+features = ["python", "pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

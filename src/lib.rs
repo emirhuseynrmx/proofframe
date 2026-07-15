@@ -1,13 +1,13 @@
 #![forbid(unsafe_code)]
 //! Native ProofFrame engine for Arrow-backed data contracts.
 //!
-//! The published crate currently provides the PyO3 extension module used by the Python package.
-//! Its core invariants are stable enough to publish as an alpha: `pf-fp-v1` canonical dataset
-//! fingerprints, disk-backed exact keyed diffs, privacy-preserving PII findings, leakage checks,
-//! and signed proof receipts. A smaller public Rust API is planned before the 0.4 stable line.
+//! The crate exposes a Rust-native API by default. The Python extension module is available behind
+//! the `python` feature and is enabled by the PyPI build configuration. Core invariants are stable
+//! enough to publish as an alpha: `pf-fp-v1` canonical dataset fingerprints, disk-backed exact
+//! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
 mod pii;
-mod receipt;
+pub mod receipt;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -22,11 +22,15 @@ use arrow::array::{
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
     UInt16Array, UInt32Array, UInt64Array,
 };
+#[cfg(feature = "python")]
 use arrow::ffi_stream::ArrowArrayStreamReader;
+#[cfg(feature = "python")]
 use arrow::pyarrow::PyArrowType;
 use arrow::record_batch::RecordBatchReader;
 use arrow::util::display::array_value_to_string;
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
 use roaring::RoaringTreemap;
@@ -51,14 +55,14 @@ struct ColumnSchema {
 }
 
 #[derive(Debug, Serialize)]
-struct ColumnProfile {
-    name: String,
-    data_type: String,
-    null_count: u64,
-    non_null_count: u64,
-    distinct_count: usize,
-    min: Option<f64>,
-    max: Option<f64>,
+pub struct ColumnProfile {
+    pub name: String,
+    pub data_type: String,
+    pub null_count: u64,
+    pub non_null_count: u64,
+    pub distinct_count: usize,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
 }
 
 #[derive(Default)]
@@ -71,18 +75,18 @@ struct ColumnState {
 }
 
 #[derive(Debug, Serialize)]
-struct Profile {
-    rows: u64,
-    columns: Vec<ColumnProfile>,
-    fingerprint: String,
+pub struct Profile {
+    pub rows: u64,
+    pub columns: Vec<ColumnProfile>,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct Contract {
+pub struct Contract {
     #[serde(default)]
-    columns: HashMap<String, ColumnContract>,
+    pub columns: HashMap<String, ColumnContract>,
     #[serde(default = "default_max_findings")]
-    max_findings: usize,
+    pub max_findings: usize,
 }
 
 fn default_max_findings() -> usize {
@@ -90,44 +94,44 @@ fn default_max_findings() -> usize {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct ColumnContract {
+pub struct ColumnContract {
     #[serde(default)]
-    required: bool,
+    pub required: bool,
     #[serde(default)]
-    not_null: bool,
+    pub not_null: bool,
     #[serde(default)]
-    unique: bool,
-    min: Option<f64>,
-    max: Option<f64>,
-    pattern: Option<String>,
-    allowed: Option<HashSet<String>>,
+    pub unique: bool,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub pattern: Option<String>,
+    pub allowed: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Serialize)]
-struct Finding {
-    rule: &'static str,
-    column: String,
-    row: Option<u64>,
-    message: String,
+pub struct Finding {
+    pub rule: &'static str,
+    pub column: String,
+    pub row: Option<u64>,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
-struct ValidationReport {
-    valid: bool,
-    violation_count: u64,
-    truncated: bool,
-    findings: Vec<Finding>,
-    profile: Profile,
+pub struct ValidationReport {
+    pub valid: bool,
+    pub violation_count: u64,
+    pub truncated: bool,
+    pub findings: Vec<Finding>,
+    pub profile: Profile,
 }
 
 #[derive(Debug, Serialize)]
-struct FastValidationReport {
-    valid: bool,
-    violation_count: u64,
-    truncated: bool,
-    findings: Vec<Finding>,
-    rows: u64,
-    mode: &'static str,
+pub struct FastValidationReport {
+    pub valid: bool,
+    pub violation_count: u64,
+    pub truncated: bool,
+    pub findings: Vec<Finding>,
+    pub rows: u64,
+    pub mode: &'static str,
 }
 
 struct ValidationOutcome {
@@ -192,57 +196,58 @@ impl UniqueState {
 }
 
 #[derive(Debug, Serialize)]
-struct ChangedRow {
-    key: String,
-    columns: Vec<String>,
+pub struct ChangedRow {
+    pub key: String,
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct DiffReport {
-    keys: Vec<String>,
-    before_rows: usize,
-    after_rows: usize,
-    added_count: usize,
-    removed_count: usize,
-    changed_count: usize,
-    added_keys: Vec<String>,
-    removed_keys: Vec<String>,
-    changed: Vec<ChangedRow>,
+pub struct DiffReport {
+    pub keys: Vec<String>,
+    pub before_rows: usize,
+    pub after_rows: usize,
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub changed_count: usize,
+    pub added_keys: Vec<String>,
+    pub removed_keys: Vec<String>,
+    pub changed: Vec<ChangedRow>,
 }
 
 #[derive(Debug, Serialize)]
-struct PiiFinding {
-    kind: &'static str,
-    confidence: &'static str,
-    column: String,
-    row: u64,
-    value_fingerprint: String,
+pub struct PiiFinding {
+    pub kind: &'static str,
+    pub confidence: &'static str,
+    pub column: String,
+    pub row: u64,
+    pub value_fingerprint: String,
 }
 
 #[derive(Debug, Serialize)]
-struct PiiReport {
-    detected: bool,
-    scanned_rows: u64,
-    finding_count: usize,
-    counts_by_kind: BTreeMap<&'static str, usize>,
-    truncated: bool,
-    findings: Vec<PiiFinding>,
+pub struct PiiReport {
+    pub detected: bool,
+    pub scanned_rows: u64,
+    pub finding_count: usize,
+    pub counts_by_kind: BTreeMap<&'static str, usize>,
+    pub truncated: bool,
+    pub findings: Vec<PiiFinding>,
 }
 
 #[derive(Debug, Serialize)]
-struct LeakageReport {
-    detected: bool,
-    mode: &'static str,
-    keys: Vec<String>,
-    train_rows: usize,
-    test_rows: usize,
-    overlap_count: usize,
-    train_overlap_rate: f64,
-    test_overlap_rate: f64,
-    sample_fingerprints: Vec<String>,
-    truncated: bool,
+pub struct LeakageReport {
+    pub detected: bool,
+    pub mode: &'static str,
+    pub keys: Vec<String>,
+    pub train_rows: usize,
+    pub test_rows: usize,
+    pub overlap_count: usize,
+    pub train_overlap_rate: f64,
+    pub test_overlap_rate: f64,
+    pub sample_fingerprints: Vec<String>,
+    pub truncated: bool,
 }
 
+#[cfg(feature = "python")]
 fn py_err(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -1103,57 +1108,56 @@ where
     })
 }
 
-#[pyfunction]
-fn profile_arrow(source: PyArrowType<ArrowArrayStreamReader>) -> PyResult<String> {
-    let (profile, _) = inspect_batches(source.0, None).map_err(py_err)?;
-    serde_json::to_string(&profile).map_err(py_err)
+/// Profile Arrow record batches and return typed Rust metadata.
+pub fn profile_reader<R>(reader: R) -> Result<Profile, String>
+where
+    R: RecordBatchReader,
+{
+    inspect_batches(reader, None).map(|(profile, _)| profile)
 }
 
-#[pyfunction]
-fn validate_arrow(
-    source: PyArrowType<ArrowArrayStreamReader>,
-    contract_json: &str,
-) -> PyResult<String> {
-    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
-    let (profile, outcome) = inspect_batches(source.0, Some(&contract)).map_err(py_err)?;
-    serde_json::to_string(&ValidationReport {
+/// Validate Arrow record batches with the full profiling path.
+pub fn validate_reader<R>(reader: R, contract: &Contract) -> Result<ValidationReport, String>
+where
+    R: RecordBatchReader,
+{
+    let (profile, outcome) = inspect_batches(reader, Some(contract))?;
+    Ok(ValidationReport {
         valid: outcome.violation_count == 0,
         violation_count: outcome.violation_count,
         truncated: outcome.truncated,
         findings: outcome.findings,
         profile,
     })
-    .map_err(py_err)
 }
 
-#[pyfunction]
-fn validate_fast_arrow(
-    source: PyArrowType<ArrowArrayStreamReader>,
-    contract_json: &str,
-) -> PyResult<String> {
-    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
-    let report = validate_fast_batches(source.0, &contract).map_err(py_err)?;
-    serde_json::to_string(&report).map_err(py_err)
+/// Validate Arrow record batches with the rules-only fast path.
+pub fn validate_fast_reader<R>(
+    reader: R,
+    contract: &Contract,
+) -> Result<FastValidationReport, String>
+where
+    R: RecordBatchReader,
+{
+    validate_fast_batches(reader, contract)
 }
 
-#[pyfunction]
-fn diff_arrow(
-    before: PyArrowType<ArrowArrayStreamReader>,
-    after: PyArrowType<ArrowArrayStreamReader>,
-    keys: Vec<String>,
-) -> PyResult<String> {
+/// Compute an exact keyed diff between two Arrow readers.
+pub fn diff_readers<B, A>(before: B, after: A, keys: &[String]) -> Result<DiffReport, String>
+where
+    B: RecordBatchReader,
+    A: RecordBatchReader,
+{
     if keys.is_empty() {
-        return Err(py_err("At least one key column is required"));
+        return Err("At least one key column is required".to_string());
     }
-    let directory = TempDir::new().map_err(py_err)?;
+    let directory = TempDir::new().map_err(|error| error.to_string())?;
     let (before_schema, before_count, before_paths) =
-        partition_rows(before.0, &keys, directory.path(), "before").map_err(py_err)?;
+        partition_rows(before, keys, directory.path(), "before")?;
     let (after_schema, after_count, after_paths) =
-        partition_rows(after.0, &keys, directory.path(), "after").map_err(py_err)?;
+        partition_rows(after, keys, directory.path(), "after")?;
     if before_schema != after_schema {
-        return Err(py_err(
-            "Schemas differ; normalize columns before row-level diff",
-        ));
+        return Err("Schemas differ; normalize columns before row-level diff".to_string());
     }
     let column_names = schema_names(&before_schema);
 
@@ -1168,14 +1172,13 @@ fn diff_arrow(
             &mut added_keys,
             &mut removed_keys,
             &mut changed,
-        )
-        .map_err(py_err)?;
+        )?;
     }
     added_keys.sort();
     removed_keys.sort();
     changed.sort_by(|left, right| left.key.cmp(&right.key));
-    let report = DiffReport {
-        keys,
+    Ok(DiffReport {
+        keys: keys.to_vec(),
         before_rows: before_count,
         after_rows: after_count,
         added_count: added_keys.len(),
@@ -1184,31 +1187,28 @@ fn diff_arrow(
         added_keys,
         removed_keys,
         changed,
-    };
-    serde_json::to_string(&report).map_err(py_err)
+    })
 }
 
-#[pyfunction]
-#[pyo3(signature = (source, max_findings=100))]
-fn scan_pii_arrow(
-    source: PyArrowType<ArrowArrayStreamReader>,
-    max_findings: usize,
-) -> PyResult<String> {
-    let reader = source.0;
+/// Scan Arrow record batches for high-signal PII patterns.
+pub fn scan_pii_reader<R>(reader: R, max_findings: usize) -> Result<PiiReport, String>
+where
+    R: RecordBatchReader,
+{
     let schema = reader.schema();
-    let detector = pii::Detector::new().map_err(py_err)?;
+    let detector = pii::Detector::new().map_err(|error| error.to_string())?;
     let mut findings = Vec::new();
     let mut counts = BTreeMap::new();
     let mut scanned_rows = 0_u64;
     let mut total_findings = 0_usize;
     for maybe_batch in reader {
-        let batch = maybe_batch.map_err(py_err)?;
+        let batch = maybe_batch.map_err(|error| error.to_string())?;
         for row in 0..batch.num_rows() {
             for (column, array) in batch.columns().iter().enumerate() {
                 if array.is_null(row) {
                     continue;
                 }
-                let value = value_for_rules(array.as_ref(), row).map_err(py_err)?;
+                let value = value_for_rules(array.as_ref(), row)?;
                 if let Some(classification) =
                     detector.classify_cell(&value, is_numeric_array(array.as_ref()))
                 {
@@ -1228,7 +1228,7 @@ fn scan_pii_arrow(
         }
         scanned_rows += batch.num_rows() as u64;
     }
-    serde_json::to_string(&PiiReport {
+    Ok(PiiReport {
         detected: total_findings > 0,
         scanned_rows,
         finding_count: total_findings,
@@ -1236,24 +1236,25 @@ fn scan_pii_arrow(
         truncated: total_findings > findings.len(),
         findings,
     })
-    .map_err(py_err)
 }
 
-#[pyfunction]
-#[pyo3(signature = (train, test, keys, max_samples=20))]
-fn detect_leakage_arrow(
-    train: PyArrowType<ArrowArrayStreamReader>,
-    test: PyArrowType<ArrowArrayStreamReader>,
-    keys: Vec<String>,
+/// Detect train/test row or key leakage between two Arrow readers.
+pub fn detect_leakage_readers<TR, TE>(
+    train: TR,
+    test: TE,
+    keys: &[String],
     max_samples: usize,
-) -> PyResult<String> {
-    let (train_names, train_rows, train_ids) =
-        collect_leakage_ids(train.0, &keys).map_err(py_err)?;
-    let (test_names, test_rows, test_ids) = collect_leakage_ids(test.0, &keys).map_err(py_err)?;
+) -> Result<LeakageReport, String>
+where
+    TR: RecordBatchReader,
+    TE: RecordBatchReader,
+{
+    let (train_names, train_rows, train_ids) = collect_leakage_ids(train, keys)?;
+    let (test_names, test_rows, test_ids) = collect_leakage_ids(test, keys)?;
     if keys.is_empty() && train_names != test_names {
-        return Err(py_err(
-            "Schemas differ; full-row leakage detection requires identical columns",
-        ));
+        return Err(
+            "Schemas differ; full-row leakage detection requires identical columns".to_string(),
+        );
     }
     let mut overlap = train_ids
         .intersection(&test_ids)
@@ -1270,10 +1271,10 @@ fn detect_leakage_arrow(
             count as f64 / total as f64
         }
     };
-    serde_json::to_string(&LeakageReport {
+    Ok(LeakageReport {
         detected: overlap_count > 0,
         mode: if keys.is_empty() { "full_row" } else { "key" },
-        keys,
+        keys: keys.to_vec(),
         train_rows,
         test_rows,
         overlap_count,
@@ -1282,19 +1283,85 @@ fn detect_leakage_arrow(
         sample_fingerprints: overlap,
         truncated,
     })
-    .map_err(py_err)
 }
 
+#[cfg(feature = "python")]
+#[pyfunction]
+fn profile_arrow(source: PyArrowType<ArrowArrayStreamReader>) -> PyResult<String> {
+    let profile = profile_reader(source.0).map_err(py_err)?;
+    serde_json::to_string(&profile).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn validate_arrow(
+    source: PyArrowType<ArrowArrayStreamReader>,
+    contract_json: &str,
+) -> PyResult<String> {
+    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
+    let report = validate_reader(source.0, &contract).map_err(py_err)?;
+    serde_json::to_string(&report).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn validate_fast_arrow(
+    source: PyArrowType<ArrowArrayStreamReader>,
+    contract_json: &str,
+) -> PyResult<String> {
+    let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
+    let report = validate_fast_batches(source.0, &contract).map_err(py_err)?;
+    serde_json::to_string(&report).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+fn diff_arrow(
+    before: PyArrowType<ArrowArrayStreamReader>,
+    after: PyArrowType<ArrowArrayStreamReader>,
+    keys: Vec<String>,
+) -> PyResult<String> {
+    let report = diff_readers(before.0, after.0, &keys).map_err(py_err)?;
+    serde_json::to_string(&report).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (source, max_findings=100))]
+fn scan_pii_arrow(
+    source: PyArrowType<ArrowArrayStreamReader>,
+    max_findings: usize,
+) -> PyResult<String> {
+    let report = scan_pii_reader(source.0, max_findings).map_err(py_err)?;
+    serde_json::to_string(&report).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(signature = (train, test, keys, max_samples=20))]
+fn detect_leakage_arrow(
+    train: PyArrowType<ArrowArrayStreamReader>,
+    test: PyArrowType<ArrowArrayStreamReader>,
+    keys: Vec<String>,
+    max_samples: usize,
+) -> PyResult<String> {
+    let report = detect_leakage_readers(train.0, test.0, &keys, max_samples).map_err(py_err)?;
+    serde_json::to_string(&report).map_err(py_err)
+}
+
+#[cfg(feature = "python")]
 #[pyfunction]
 fn generate_signing_keypair() -> PyResult<String> {
     receipt::generate_keypair_json().map_err(py_err)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 fn sign_proof_receipt(report_json: &str, private_key: &str) -> PyResult<String> {
     receipt::sign_json(report_json, private_key).map_err(py_err)
 }
 
+#[cfg(feature = "python")]
 #[pyfunction]
 fn verify_proof_receipt(receipt_json: &str) -> PyResult<String> {
     let verification = receipt::verify_json(receipt_json).map_err(py_err)?;
@@ -1385,6 +1452,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "python")]
 #[pymodule]
 fn _proofframe(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;

@@ -5,7 +5,8 @@
 
 **Ruff for data. Git-style evidence for DataFrames.**
 
-ProofFrame is a Rust-native Python library for answering three questions before bad data ships:
+ProofFrame is a Rust crate with Python bindings for answering three questions before bad data
+ships:
 
 1. **What is this dataset?** Profile it and produce a deterministic BLAKE3 fingerprint.
 2. **Does it satisfy its contract?** Return bounded, row-level evidence—not a vague pass/fail.
@@ -23,6 +24,7 @@ one pass without converting rows into Python objects.
 
 ```bash
 pip install proofframe
+cargo add proofframe
 ```
 
 ```python
@@ -182,8 +184,27 @@ The Rust core currently provides:
 - required, not-null, unique, numeric range, regex, and allowlist rules;
 - disk-backed key diff with exact added/removed/changed-column evidence;
 - bounded evidence reports;
-- Python 3.10+ ABI-stable wheels through PyO3/maturin.
+- a default Rust API without PyO3 or Python extension-module linkage;
+- optional Python 3.10+ ABI-stable wheels through PyO3/maturin.
 - `#![forbid(unsafe_code)]` in the ProofFrame crate.
+
+### Rust API
+
+The crates.io package builds as a normal Rust library by default:
+
+```rust
+use proofframe::{profile_reader, validate_reader, Contract};
+
+let profile = profile_reader(reader)?;
+let contract = Contract::default();
+let report = validate_reader(reader_again, &contract)?;
+
+assert_eq!(profile.fingerprint.split(':').next(), Some("pf-fp-v1"));
+assert_eq!(report.valid, report.violation_count == 0);
+```
+
+Enable the `python` feature only when building the Python extension path; the PyPI build enables it
+automatically through maturin.
 
 ## Development
 
