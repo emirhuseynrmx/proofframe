@@ -27,6 +27,7 @@ jobs:
       - run: pytest -q
       - run: ruff check python tests benchmarks
       - run: cargo fmt --check
+      - run: cargo test --all-targets --all-features
       - run: cargo package --allow-dirty
       - run: cargo clippy --all-targets -- -D warnings
 

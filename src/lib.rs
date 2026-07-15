@@ -38,8 +38,16 @@ const DIFF_PARTITIONS: usize = 64;
 
 type RowValues = Vec<Option<Vec<u8>>>;
 struct RowEntry {
+    display_key: String,
     values: RowValues,
     hash: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ColumnSchema {
+    name: String,
+    data_type: String,
+    nullable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +114,8 @@ struct Finding {
 #[derive(Debug, Serialize)]
 struct ValidationReport {
     valid: bool,
+    violation_count: u64,
+    truncated: bool,
     findings: Vec<Finding>,
     profile: Profile,
 }
@@ -113,9 +123,48 @@ struct ValidationReport {
 #[derive(Debug, Serialize)]
 struct FastValidationReport {
     valid: bool,
+    violation_count: u64,
+    truncated: bool,
     findings: Vec<Finding>,
     rows: u64,
     mode: &'static str,
+}
+
+struct ValidationOutcome {
+    findings: Vec<Finding>,
+    violation_count: u64,
+    truncated: bool,
+}
+
+struct ValidationState {
+    findings: Vec<Finding>,
+    violation_count: u64,
+    max_findings: usize,
+}
+
+impl ValidationState {
+    fn new(max_findings: usize) -> Self {
+        Self {
+            findings: Vec::new(),
+            violation_count: 0,
+            max_findings,
+        }
+    }
+
+    fn record(&mut self, finding: Finding) {
+        self.violation_count += 1;
+        if self.findings.len() < self.max_findings {
+            self.findings.push(finding);
+        }
+    }
+
+    fn finish(self) -> ValidationOutcome {
+        ValidationOutcome {
+            truncated: self.violation_count as usize > self.findings.len(),
+            violation_count: self.violation_count,
+            findings: self.findings,
+        }
+    }
 }
 
 enum UniqueState {
@@ -321,7 +370,7 @@ fn row_values_hash(values: &RowValues) -> String {
 fn inspect_batches<R>(
     reader: R,
     contract: Option<&Contract>,
-) -> Result<(Profile, Vec<Finding>), String>
+) -> Result<(Profile, ValidationOutcome), String>
 where
     R: RecordBatchReader,
 {
@@ -331,15 +380,15 @@ where
         .iter()
         .map(|_| ColumnState::default())
         .collect::<Vec<_>>();
-    let mut findings = Vec::new();
     let mut seen_unique: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
     let mut patterns: HashMap<String, Regex> = HashMap::new();
     let max_findings = contract.map_or(DEFAULT_MAX_FINDINGS, |value| value.max_findings);
+    let mut validation = ValidationState::new(max_findings);
 
     if let Some(contract) = contract {
         for (name, rule) in &contract.columns {
             if rule.required && schema.index_of(name).is_err() {
-                findings.push(Finding {
+                validation.record(Finding {
                     rule: "required",
                     column: name.clone(),
                     row: None,
@@ -377,8 +426,8 @@ where
                     state.null_count += 1;
                     update_hash(&mut hasher, column_index, array.as_ref(), row)?;
                     if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
-                        if rule.not_null && findings.len() < max_findings {
-                            findings.push(Finding {
+                        if rule.not_null {
+                            validation.record(Finding {
                                 rule: "not_null",
                                 column: field.name().clone(),
                                 row: Some(global_row),
@@ -405,9 +454,8 @@ where
                             .get_mut(field.name())
                             .expect("unique set initialized")
                             .insert(value_key)
-                        && findings.len() < max_findings
                     {
-                        findings.push(Finding {
+                        validation.record(Finding {
                             rule: "unique",
                             column: field.name().clone(),
                             row: Some(global_row),
@@ -415,10 +463,8 @@ where
                         });
                     }
                     if let Some(min) = rule.min {
-                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number < min)
-                            && findings.len() < max_findings
-                        {
-                            findings.push(Finding {
+                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number < min) {
+                            validation.record(Finding {
                                 rule: "min",
                                 column: field.name().clone(),
                                 row: Some(global_row),
@@ -427,10 +473,8 @@ where
                         }
                     }
                     if let Some(max) = rule.max {
-                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number > max)
-                            && findings.len() < max_findings
-                        {
-                            findings.push(Finding {
+                        if numeric_value(array.as_ref(), row)?.is_some_and(|number| number > max) {
+                            validation.record(Finding {
                                 rule: "max",
                                 column: field.name().clone(),
                                 row: Some(global_row),
@@ -439,8 +483,8 @@ where
                         }
                     }
                     if let Some(regex) = patterns.get(field.name()) {
-                        if !regex.is_match(&value) && findings.len() < max_findings {
-                            findings.push(Finding {
+                        if !regex.is_match(&value) {
+                            validation.record(Finding {
                                 rule: "pattern",
                                 column: field.name().clone(),
                                 row: Some(global_row),
@@ -452,8 +496,8 @@ where
                         }
                     }
                     if let Some(allowed) = &rule.allowed {
-                        if !allowed.contains(&value) && findings.len() < max_findings {
-                            findings.push(Finding {
+                        if !allowed.contains(&value) {
+                            validation.record(Finding {
                                 rule: "allowed",
                                 column: field.name().clone(),
                                 row: Some(global_row),
@@ -487,15 +531,54 @@ where
             columns,
             fingerprint: format!("pf-fp-v1:{}", hasher.finalize().to_hex()),
         },
-        findings,
+        validation.finish(),
     ))
 }
 
-fn row_partition(key: &str) -> usize {
-    let digest = blake3::hash(key.as_bytes());
+fn row_partition(key: &[u8]) -> usize {
+    let digest = blake3::hash(key);
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest.as_bytes()[..8]);
     (u64::from_le_bytes(bytes) as usize) % DIFF_PARTITIONS
+}
+
+fn schema_signature<R: RecordBatchReader>(reader: &R) -> Vec<ColumnSchema> {
+    reader
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| ColumnSchema {
+            name: field.name().clone(),
+            data_type: field.data_type().to_string(),
+            nullable: field.is_nullable(),
+        })
+        .collect()
+}
+
+fn schema_names(signature: &[ColumnSchema]) -> Vec<String> {
+    signature.iter().map(|field| field.name.clone()).collect()
+}
+
+fn diff_key(
+    batch: &RecordBatch,
+    key_indexes: &[usize],
+    row: usize,
+) -> Result<(Vec<u8>, String), String> {
+    let mut canonical = Vec::new();
+    let mut display = Vec::with_capacity(key_indexes.len());
+    for index in key_indexes {
+        let array = batch.column(*index);
+        let value = canonical_value_bytes(array.as_ref(), row)?;
+        canonical.extend_from_slice(&(*index as u64).to_le_bytes());
+        canonical.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        canonical.extend_from_slice(&value);
+        if array.is_null(row) {
+            display.push("<null>".to_string());
+        } else {
+            display.push(value_for_rules(array.as_ref(), row)?);
+        }
+    }
+    Ok((canonical, display.join("\u{1f}")))
 }
 
 fn write_u64(writer: &mut BufWriter<File>, value: u64) -> Result<(), String> {
@@ -529,10 +612,11 @@ fn read_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>, String> {
 
 fn write_row_record(
     writer: &mut BufWriter<File>,
-    key: &str,
+    key: &[u8],
     entry: &RowEntry,
 ) -> Result<(), String> {
-    write_bytes(writer, key.as_bytes())?;
+    write_bytes(writer, key)?;
+    write_bytes(writer, entry.display_key.as_bytes())?;
     write_bytes(writer, entry.hash.as_bytes())?;
     write_u64(writer, entry.values.len() as u64)?;
     for value in &entry.values {
@@ -544,7 +628,7 @@ fn write_row_record(
     Ok(())
 }
 
-fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(String, RowEntry)>, String> {
+fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(Vec<u8>, RowEntry)>, String> {
     let Some(key_len) = read_u64(reader)? else {
         return Ok(None);
     };
@@ -552,6 +636,7 @@ fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(String, RowEn
     reader
         .read_exact(&mut key)
         .map_err(|error| error.to_string())?;
+    let display_key = String::from_utf8(read_bytes(reader)?).map_err(|error| error.to_string())?;
     let hash = String::from_utf8(read_bytes(reader)?).map_err(|error| error.to_string())?;
     let value_count =
         read_u64(reader)?.ok_or_else(|| "Truncated diff partition record".to_string())?;
@@ -568,8 +653,14 @@ fn read_row_record(reader: &mut BufReader<File>) -> Result<Option<(String, RowEn
             values.push(Some(value));
         }
     }
-    let key = String::from_utf8(key).map_err(|error| error.to_string())?;
-    Ok(Some((key, RowEntry { values, hash })))
+    Ok(Some((
+        key,
+        RowEntry {
+            display_key,
+            values,
+            hash,
+        },
+    )))
 }
 
 fn partition_rows<R>(
@@ -577,7 +668,7 @@ fn partition_rows<R>(
     keys: &[String],
     directory: &Path,
     prefix: &str,
-) -> Result<(Vec<String>, usize, Vec<PathBuf>), String>
+) -> Result<(Vec<ColumnSchema>, usize, Vec<PathBuf>), String>
 where
     R: RecordBatchReader,
 {
@@ -590,11 +681,7 @@ where
                 .map_err(|_| format!("Key column `{key}` is missing"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let names = schema
-        .fields()
-        .iter()
-        .map(|field| field.name().clone())
-        .collect::<Vec<_>>();
+    let signature = schema_signature(&reader);
     let paths = (0..DIFF_PARTITIONS)
         .map(|partition| directory.join(format!("{prefix}-{partition}.pfpart")))
         .collect::<Vec<_>>();
@@ -607,18 +694,7 @@ where
     for maybe_batch in reader {
         let batch: RecordBatch = maybe_batch.map_err(|error| error.to_string())?;
         for row in 0..batch.num_rows() {
-            let key = key_indexes
-                .iter()
-                .map(|index| {
-                    let array = batch.column(*index);
-                    if array.is_null(row) {
-                        "<null>".to_string()
-                    } else {
-                        value_for_rules(array.as_ref(), row).unwrap_or_default()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\u{1f}");
+            let (key, display_key) = diff_key(&batch, &key_indexes, row)?;
             let values = batch
                 .columns()
                 .iter()
@@ -632,14 +708,22 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             let hash = row_values_hash(&values);
             let partition = row_partition(&key);
-            write_row_record(&mut writers[partition], &key, &RowEntry { values, hash })?;
+            write_row_record(
+                &mut writers[partition],
+                &key,
+                &RowEntry {
+                    display_key,
+                    values,
+                    hash,
+                },
+            )?;
             row_count += 1;
         }
     }
     for writer in &mut writers {
         writer.flush().map_err(|error| error.to_string())?;
     }
-    Ok((names, row_count, paths))
+    Ok((signature, row_count, paths))
 }
 
 fn process_diff_partition(
@@ -650,21 +734,24 @@ fn process_diff_partition(
     removed_keys: &mut Vec<String>,
     changed: &mut Vec<ChangedRow>,
 ) -> Result<(), String> {
-    let mut before_rows = HashMap::new();
+    let mut before_rows: HashMap<Vec<u8>, RowEntry> = HashMap::new();
     let mut before_reader =
         BufReader::new(File::open(before_path).map_err(|error| error.to_string())?);
     while let Some((key, entry)) = read_row_record(&mut before_reader)? {
-        if before_rows.insert(key.clone(), entry).is_some() {
-            return Err(format!("Duplicate key `{key}`; diff keys must be unique"));
+        if before_rows.insert(key, entry).is_some() {
+            return Err("Duplicate key detected; diff keys must be unique".to_string());
         }
     }
 
-    let mut seen_after = HashSet::new();
+    let mut seen_after: HashSet<Vec<u8>> = HashSet::new();
     let mut after_reader =
         BufReader::new(File::open(after_path).map_err(|error| error.to_string())?);
     while let Some((key, entry)) = read_row_record(&mut after_reader)? {
         if !seen_after.insert(key.clone()) {
-            return Err(format!("Duplicate key `{key}`; diff keys must be unique"));
+            return Err(format!(
+                "Duplicate key `{}`; diff keys must be unique",
+                entry.display_key
+            ));
         }
         if let Some(before_entry) = before_rows.get(&key) {
             if before_entry.hash != entry.hash {
@@ -676,19 +763,23 @@ fn process_diff_partition(
                     .filter(|((before, after), _)| before != after)
                     .map(|(_, name)| name.clone())
                     .collect();
-                changed.push(ChangedRow { key, columns });
+                changed.push(ChangedRow {
+                    key: entry.display_key,
+                    columns,
+                });
             }
         } else {
-            added_keys.push(key);
+            added_keys.push(entry.display_key);
         }
     }
 
-    removed_keys.extend(
-        before_rows
-            .keys()
-            .filter(|key| !seen_after.contains(*key))
-            .cloned(),
-    );
+    removed_keys.extend(before_rows.iter().filter_map(|(key, entry)| {
+        if seen_after.contains(key) {
+            None
+        } else {
+            Some(entry.display_key.clone())
+        }
+    }));
     Ok(())
 }
 
@@ -771,15 +862,13 @@ fn is_numeric_array(array: &dyn Array) -> bool {
         || array.as_any().is::<Float64Array>()
 }
 
-fn push_duplicate(findings: &mut Vec<Finding>, column: &str, row: u64, max_findings: usize) {
-    if findings.len() < max_findings {
-        findings.push(Finding {
-            rule: "unique",
-            column: column.to_string(),
-            row: Some(row),
-            message: "Duplicate value detected".to_string(),
-        });
-    }
+fn push_duplicate(validation: &mut ValidationState, column: &str, row: u64) {
+    validation.record(Finding {
+        rule: "unique",
+        column: column.to_string(),
+        row: Some(row),
+        message: "Duplicate value detected".to_string(),
+    });
 }
 
 fn check_unique(
@@ -787,8 +876,7 @@ fn check_unique(
     array: &dyn Array,
     column: &str,
     row_offset: u64,
-    findings: &mut Vec<Finding>,
-    max_findings: usize,
+    validation: &mut ValidationState,
 ) -> Result<(), String> {
     match state {
         UniqueState::Int64(seen) => {
@@ -799,7 +887,7 @@ fn check_unique(
             for row in 0..values.len() {
                 if values.is_valid(row) && !seen.insert((values.value(row) as u64) ^ (1_u64 << 63))
                 {
-                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                    push_duplicate(validation, column, row_offset + row as u64);
                 }
             }
         }
@@ -810,7 +898,7 @@ fn check_unique(
                 .expect("type fixed from schema");
             for row in 0..values.len() {
                 if values.is_valid(row) && !seen.insert(values.value(row)) {
-                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                    push_duplicate(validation, column, row_offset + row as u64);
                 }
             }
         }
@@ -821,7 +909,7 @@ fn check_unique(
                 .expect("type fixed from schema");
             for row in 0..values.len() {
                 if values.is_valid(row) && !seen.insert(values.value(row).to_bits()) {
-                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                    push_duplicate(validation, column, row_offset + row as u64);
                 }
             }
         }
@@ -832,7 +920,7 @@ fn check_unique(
                 .expect("type fixed from schema");
             for row in 0..values.len() {
                 if values.is_valid(row) && !seen.insert(values.value(row).to_owned()) {
-                    push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                    push_duplicate(validation, column, row_offset + row as u64);
                 }
             }
         }
@@ -841,7 +929,7 @@ fn check_unique(
                 if array.is_valid(row) {
                     let value = canonical_value_bytes(array, row)?;
                     if !seen.insert(value) {
-                        push_duplicate(findings, column, row_offset + row as u64, max_findings);
+                        push_duplicate(validation, column, row_offset + row as u64);
                     }
                 }
             }
@@ -855,8 +943,7 @@ fn check_range(
     rule: &ColumnContract,
     column: &str,
     row_offset: u64,
-    findings: &mut Vec<Finding>,
-    max_findings: usize,
+    validation: &mut ValidationState,
 ) -> Result<(), String> {
     if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
         for row in 0..values.len() {
@@ -866,8 +953,7 @@ fn check_range(
                     rule,
                     column,
                     row_offset + row as u64,
-                    findings,
-                    max_findings,
+                    validation,
                 );
             }
         }
@@ -875,14 +961,7 @@ fn check_range(
         for row in 0..array.len() {
             if array.is_valid(row) {
                 if let Some(value) = numeric_value(array, row)? {
-                    push_range_findings(
-                        value,
-                        rule,
-                        column,
-                        row_offset + row as u64,
-                        findings,
-                        max_findings,
-                    );
+                    push_range_findings(value, rule, column, row_offset + row as u64, validation);
                 }
             }
         }
@@ -895,19 +974,18 @@ fn push_range_findings(
     rule: &ColumnContract,
     column: &str,
     row: u64,
-    findings: &mut Vec<Finding>,
-    max_findings: usize,
+    validation: &mut ValidationState,
 ) {
-    if rule.min.is_some_and(|minimum| number < minimum) && findings.len() < max_findings {
-        findings.push(Finding {
+    if rule.min.is_some_and(|minimum| number < minimum) {
+        validation.record(Finding {
             rule: "min",
             column: column.to_string(),
             row: Some(row),
             message: format!("Value is below {}", rule.min.unwrap()),
         });
     }
-    if rule.max.is_some_and(|maximum| number > maximum) && findings.len() < max_findings {
-        findings.push(Finding {
+    if rule.max.is_some_and(|maximum| number > maximum) {
+        validation.record(Finding {
             rule: "max",
             column: column.to_string(),
             row: Some(row),
@@ -921,12 +999,12 @@ where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
-    let mut findings = Vec::new();
+    let mut validation = ValidationState::new(contract.max_findings);
     let mut patterns = HashMap::new();
     let mut unique_states: HashMap<String, UniqueState> = HashMap::new();
     for (name, rule) in &contract.columns {
         if rule.required && schema.index_of(name).is_err() {
-            findings.push(Finding {
+            validation.record(Finding {
                 rule: "required",
                 column: name.clone(),
                 row: None,
@@ -956,8 +1034,8 @@ where
             }
             if rule.not_null && array.null_count() > 0 {
                 for row in 0..batch.num_rows() {
-                    if array.is_null(row) && findings.len() < contract.max_findings {
-                        findings.push(Finding {
+                    if array.is_null(row) {
+                        validation.record(Finding {
                             rule: "not_null",
                             column: field.name().clone(),
                             row: Some(rows + row as u64),
@@ -974,23 +1052,15 @@ where
                     array.as_ref(),
                     field.name(),
                     rows,
-                    &mut findings,
-                    contract.max_findings,
+                    &mut validation,
                 )?;
             }
             if rule.min.is_some() || rule.max.is_some() {
-                check_range(
-                    array.as_ref(),
-                    rule,
-                    field.name(),
-                    rows,
-                    &mut findings,
-                    contract.max_findings,
-                )?;
+                check_range(array.as_ref(), rule, field.name(), rows, &mut validation)?;
             }
             if rule.pattern.is_some() || rule.allowed.is_some() {
                 for row in 0..batch.num_rows() {
-                    if array.is_null(row) || findings.len() >= contract.max_findings {
+                    if array.is_null(row) {
                         continue;
                     }
                     let value = value_for_rules(array.as_ref(), row)?;
@@ -998,7 +1068,7 @@ where
                         .get(field.name())
                         .is_some_and(|pattern| !pattern.is_match(&value))
                     {
-                        findings.push(Finding {
+                        validation.record(Finding {
                             rule: "pattern",
                             column: field.name().clone(),
                             row: Some(rows + row as u64),
@@ -1009,9 +1079,8 @@ where
                         .allowed
                         .as_ref()
                         .is_some_and(|allowed| !allowed.contains(&value))
-                        && findings.len() < contract.max_findings
                     {
-                        findings.push(Finding {
+                        validation.record(Finding {
                             rule: "allowed",
                             column: field.name().clone(),
                             row: Some(rows + row as u64),
@@ -1023,9 +1092,12 @@ where
         }
         rows += batch.num_rows() as u64;
     }
+    let outcome = validation.finish();
     Ok(FastValidationReport {
-        valid: findings.is_empty(),
-        findings,
+        valid: outcome.violation_count == 0,
+        violation_count: outcome.violation_count,
+        truncated: outcome.truncated,
+        findings: outcome.findings,
         rows,
         mode: "rules_only",
     })
@@ -1043,10 +1115,12 @@ fn validate_arrow(
     contract_json: &str,
 ) -> PyResult<String> {
     let contract: Contract = serde_json::from_str(contract_json).map_err(py_err)?;
-    let (profile, findings) = inspect_batches(source.0, Some(&contract)).map_err(py_err)?;
+    let (profile, outcome) = inspect_batches(source.0, Some(&contract)).map_err(py_err)?;
     serde_json::to_string(&ValidationReport {
-        valid: findings.is_empty(),
-        findings,
+        valid: outcome.violation_count == 0,
+        violation_count: outcome.violation_count,
+        truncated: outcome.truncated,
+        findings: outcome.findings,
         profile,
     })
     .map_err(py_err)
@@ -1072,15 +1146,16 @@ fn diff_arrow(
         return Err(py_err("At least one key column is required"));
     }
     let directory = TempDir::new().map_err(py_err)?;
-    let (before_names, before_count, before_paths) =
+    let (before_schema, before_count, before_paths) =
         partition_rows(before.0, &keys, directory.path(), "before").map_err(py_err)?;
-    let (after_names, after_count, after_paths) =
+    let (after_schema, after_count, after_paths) =
         partition_rows(after.0, &keys, directory.path(), "after").map_err(py_err)?;
-    if before_names != after_names {
+    if before_schema != after_schema {
         return Err(py_err(
             "Schemas differ; normalize columns before row-level diff",
         ));
     }
+    let column_names = schema_names(&before_schema);
 
     let mut added_keys = Vec::new();
     let mut removed_keys = Vec::new();
@@ -1089,7 +1164,7 @@ fn diff_arrow(
         process_diff_partition(
             before_path,
             after_path,
-            &before_names,
+            &column_names,
             &mut added_keys,
             &mut removed_keys,
             &mut changed,
@@ -1296,14 +1371,16 @@ mod tests {
                 max_findings: 1_000,
             };
 
-            let (_, full_findings) =
+            let (_, full_outcome) =
                 inspect_batches(reader_from_batch(batch.clone()), Some(&contract)).unwrap();
             let fast_report = validate_fast_batches(reader_from_batch(batch), &contract).unwrap();
 
             prop_assert_eq!(
-                finding_signature(&full_findings),
+                finding_signature(&full_outcome.findings),
                 finding_signature(&fast_report.findings)
             );
+            prop_assert_eq!(full_outcome.violation_count, fast_report.violation_count);
+            prop_assert_eq!(full_outcome.truncated, fast_report.truncated);
         }
     }
 }

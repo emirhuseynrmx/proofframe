@@ -6,6 +6,11 @@
 - Added disk-backed exact keyed diffs with hash partitions and changed-column evidence.
 - Added privacy-preserving PII findings, leakage checks, and signed proof receipts.
 - Added full-vs-fast differential Proptest coverage for validation verdict drift.
+- Added explicit `violation_count`/`truncated` validation reporting so bounded finding examples
+  cannot hide contract failures.
+- Hardened diff keys with canonical binary composite-key tuples and full schema signatures.
+- Added CLI exit codes for valid data, contract violations, input/config errors, and internal
+  failures.
 - Hardened release gates with `#![forbid(unsafe_code)]`, Clippy warnings-as-errors, coverage gates,
   `cargo package`, and cross-platform wheel builds.
 

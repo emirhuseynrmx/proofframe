@@ -10,6 +10,8 @@
 - Rules-only validation uses typed Arrow buffers, exact Roaring bitmaps for 64-bit integer
   uniqueness, and exact hash sets for floating-point/string uniqueness. It still returns bounded
   row evidence; it skips only the separate profile and fingerprint products.
+- Contract validation tracks `violation_count` independently from stored finding examples, so
+  `max_findings=0` cannot hide invalid data.
 
 ## Miri and Loom decision
 

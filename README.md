@@ -49,7 +49,8 @@ for finding in report["findings"]:
 ```
 
 ProofFrame reports the duplicate ID, null email, malformed email, and out-of-range score with their
-row numbers. The same pass returns a content fingerprint and per-column profile.
+row numbers. The same pass returns `valid`, `violation_count`, `truncated`, a content fingerprint,
+and a per-column profile.
 
 For a rules-only pipeline gate that keeps bounded row evidence but skips profile and fingerprint
 work, use `pf.validate(users, contract, include_profile=False)`.
@@ -131,6 +132,9 @@ proofframe diff yesterday.parquet today.parquet --key tenant_id --key user_id
 Every command prints stable JSON and uses exit-safe parsing, making it suitable for CI, agents, and
 data pipeline gates.
 
+`proofframe validate` exits with `0` for valid data, `1` for contract violations, `2` for input or
+configuration errors, and `3` for unexpected internal failures.
+
 ## Contract format
 
 ```json
@@ -145,7 +149,9 @@ data pipeline gates.
 }
 ```
 
-`max_findings` bounds report size while the profile and fingerprint still cover the full stream.
+`max_findings` bounds the number of finding examples, not correctness. `violation_count` still
+counts every violation, `truncated` tells you whether examples were omitted, and the profile and
+fingerprint still cover the full stream.
 
 ## Why Rust + Arrow
 

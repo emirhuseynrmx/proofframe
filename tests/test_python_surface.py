@@ -96,8 +96,32 @@ def test_cli_profile_validate_and_diff_paths(tmp_path, monkeypatch, capsys):
     assert changed["removed_count"] == 1
 
 
+def test_cli_validate_uses_nonzero_exit_for_contract_violations(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "invalid.parquet"
+    contract_path = tmp_path / "contract.json"
+    parquet.write_table(pa.table({"id": pa.array([None], type=pa.int64())}), source)
+    contract_path.write_text(
+        json.dumps({"columns": {"id": {"not_null": True}}, "max_findings": 0}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["proofframe", "validate", str(source), "--contract", str(contract_path)],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert exit_info.value.code == 1
+    assert report["valid"] is False
+    assert report["violation_count"] == 1
+    assert report["truncated"] is True
+
+
 def test_cli_rejects_unknown_file_type():
-    with pytest.raises(SystemExit, match="Unsupported input"):
+    with pytest.raises(ValueError, match="Unsupported input"):
         cli._read("dataset.json")
 
 

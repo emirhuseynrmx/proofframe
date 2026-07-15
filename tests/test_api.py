@@ -4,6 +4,7 @@ import sys
 
 import pyarrow as pa
 import pyarrow.csv as arrow_csv
+import pytest
 
 import proofframe
 
@@ -76,6 +77,18 @@ def test_contract_reports_row_level_evidence():
     assert {finding["rule"] for finding in fast["findings"]} == {"unique", "not_null", "max"}
 
 
+def test_max_findings_zero_still_reports_invalid_and_truncated():
+    report = proofframe.validate(
+        pa.table({"id": pa.array([None], type=pa.int64())}),
+        {"columns": {"id": {"not_null": True}}, "max_findings": 0},
+    )
+
+    assert report["valid"] is False
+    assert report["violation_count"] == 1
+    assert report["truncated"] is True
+    assert report["findings"] == []
+
+
 def test_diff_reports_changed_columns():
     before = users()
     after = pa.table(
@@ -89,6 +102,34 @@ def test_diff_reports_changed_columns():
     assert report["added_keys"] == ["4"]
     assert report["removed_keys"] == ["3"]
     assert report["changed"] == [{"key": "2", "columns": ["email"]}]
+
+
+def test_diff_composite_keys_use_canonical_tuples_not_joined_text():
+    before = pa.table({"k1": ["a", "a\u001fb"], "k2": ["b\u001fc", "c"], "value": [1, 2]})
+    after = pa.table({"k1": ["a", "a\u001fb"], "k2": ["b\u001fc", "c"], "value": [1, 3]})
+
+    report = proofframe.diff(before, after, keys=["k1", "k2"])
+
+    assert report["changed_count"] == 1
+    assert report["changed"][0]["columns"] == ["value"]
+
+
+def test_diff_distinguishes_null_key_from_literal_null_text():
+    before = pa.table({"id": pa.array([None, "<null>"], type=pa.string()), "value": [1, 2]})
+    after = pa.table({"id": pa.array([None, "<null>"], type=pa.string()), "value": [3, 2]})
+
+    report = proofframe.diff(before, after, keys="id")
+
+    assert report["changed_count"] == 1
+    assert report["changed"][0]["columns"] == ["value"]
+
+
+def test_diff_rejects_same_column_names_with_different_types():
+    before = pa.table({"id": pa.array([1], type=pa.int64()), "value": [1]})
+    after = pa.table({"id": pa.array(["1"], type=pa.string()), "value": [1]})
+
+    with pytest.raises(ValueError, match="Schemas differ"):
+        proofframe.diff(before, after, keys="id")
 
 
 def test_diff_handles_more_rows_than_one_partition():

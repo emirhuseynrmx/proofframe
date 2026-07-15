@@ -38,7 +38,8 @@ to low confidence because order IDs and account-like identifiers can pass Luhn b
 
 ## Operational limits
 
-`max_findings` bounds report size while profile/fingerprint scans still cover the full stream. Keyed
-diff writes both sides into temporary hash partitions, then loads one partition at a time to preserve
-exact added, removed, and changed-column evidence without holding both full datasets in memory.
-Regex patterns and contracts are trusted configuration in the 0.4 alpha line.
+`max_findings` bounds stored finding examples while `violation_count` remains the source of truth
+for validity. Profile/fingerprint scans still cover the full stream. Keyed diff writes both sides
+into temporary hash partitions, then loads one partition at a time to preserve exact added, removed,
+and changed-column evidence without holding both full datasets in memory. Regex patterns and
+contracts are trusted configuration in the 0.4 alpha line.
