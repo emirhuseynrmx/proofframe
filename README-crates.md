@@ -9,6 +9,7 @@
 [![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/emirhuseynrmx/proofframe/blob/main/LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/emirhuseynrmx)
 
 **Arrow-native data contracts, canonical fingerprints, and proof receipts for Rust.**
 
