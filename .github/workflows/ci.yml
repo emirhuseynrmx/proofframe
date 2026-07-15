@@ -21,7 +21,7 @@ jobs:
         with:
           toolchain: "1.85"
           components: rustfmt, clippy
-      - run: python -m pip install maturin pytest pytest-cov ruff pandas pyarrow
+      - run: python -m pip install maturin pytest pytest-cov ruff pandas polars pyarrow
       - run: maturin build --release --out dist
       - run: python -m pip install --no-index --find-links dist --no-deps --pre proofframe
       - run: pytest -q
@@ -44,7 +44,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.85"
-      - run: python -m pip install maturin pytest pytest-cov pandas pyarrow
+      - run: python -m pip install maturin pytest pytest-cov pandas polars pyarrow
       - run: maturin build --release --out dist
       - run: python -m pip install --no-index --find-links dist --no-deps --pre proofframe
       - run: pytest -q --cov=proofframe --cov-report=term-missing --cov-report=xml --cov-fail-under=85

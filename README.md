@@ -79,8 +79,15 @@ ProofFrame reports the duplicate ID, null email, malformed email, and out-of-ran
 row numbers. The same pass returns `valid`, `violation_count`, `truncated`, a content fingerprint,
 and a per-column profile.
 
-For a rules-only pipeline gate that keeps bounded row evidence but skips profile and fingerprint
-work, use `pf.validate(users, contract, include_profile=False)`.
+For production validation gates, prefer the typed fast path:
+
+```python
+gate = pf.validate(users, contract, include_profile=False)
+```
+
+That path keeps bounded row evidence and `violation_count`, but skips profile, fingerprint, and
+exact distinct state. The default `include_profile=True` path is useful when you want validation and
+a profile/fingerprint artifact from the same scan, but it is intentionally heavier.
 
 ## Dataset fingerprints
 
@@ -100,10 +107,16 @@ input uses ProofFrame's canonical byte encoding rather than Arrow's display form
 Arrow cannot silently change fingerprints through prettier string rendering. Store the fingerprint
 in CI metadata to prove exactly which data was checked.
 
-For large datasets where exact cardinality is not needed, use
-`pf.profile(data, distinct="none")`. The standalone `pf.fingerprint(data)` path computes only the
-schema, null/value boundaries, ordered canonical data, and BLAKE3 hash without profile or distinct
-state.
+For large datasets where exact cardinality is not needed, prefer:
+
+```python
+snapshot = pf.profile(data, distinct="none")
+fingerprint = pf.fingerprint(data)
+```
+
+`pf.profile(data, distinct="exact")` remains available for exact cardinality, but it is deliberately
+more expensive. The standalone `pf.fingerprint(data)` path computes only the schema, null/value
+boundaries, ordered canonical data, and BLAKE3 hash without profile or distinct state.
 
 ## Row-level diff
 
@@ -262,6 +275,13 @@ rules-only path. Raw peer samples and exact versions are committed in
 `benchmarks/results/windows-1m-fast.json`; this is a reproducible machine-local result, not a
 universal performance guarantee or a marketing claim.
 
+The 0.4.0a4 rule-matrix harness records required/not-null, min/max, unique, full-contract,
+fingerprint-only, and exact-distinct profile cases separately with raw timings, rows/sec, Arrow
+schema, package versions, and isolated-process RSS deltas. A local Windows 7.6M-row run is committed
+as `benchmarks/results/windows-7_6m-a4.json`. The older `windows-7_6m-baseline.json` is a historical
+0.4.0a3 baseline from a different notebook-style run and should not be treated as a strict
+apples-to-apples comparison.
+
 The benchmark prints measured rows/second for the current machine; this README intentionally makes
 no unverified performance claim.
 
@@ -275,8 +295,8 @@ hardware before drawing performance conclusions.
 
 ## Roadmap
 
-- **0.4 stable:** validation-only fast path, extracted Miri-compatible core, fuzz targets, pinned
-  cross-platform benchmarks, and a stabilized receipt schema.
+- **0.4 stable:** extracted Miri-compatible core, fuzz targets, pinned cross-platform benchmarks,
+  Criterion microbenchmarks, allocation tracking, and a stabilized receipt schema.
 - **0.5:** reversible dataset patches, Parquet predicate pushdown, and configurable diff partition
   tuning.
 - **1.0:** stable contract schema and cross-language Rust/Python compatibility.

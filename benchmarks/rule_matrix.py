@@ -12,6 +12,8 @@ import argparse
 import json
 import platform
 import statistics
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -44,14 +46,15 @@ def monitor_peak_rss(stop: threading.Event, peak: list[int], interval: float = 0
     peak[0] = max(peak[0], process.memory_info().rss)
 
 
-def timed(run: Callable[[], Any], *, warmups: int, repeats: int) -> tuple[list[float], int]:
+def timed(run: Callable[[], Any], *, warmups: int, repeats: int) -> tuple[list[float], int, int]:
     for _ in range(warmups):
         run()
     samples: list[float] = []
+    baseline_rss = psutil.Process().memory_info().rss
     peak_rss = 0
     for _ in range(repeats):
         stop = threading.Event()
-        peak = [psutil.Process().memory_info().rss]
+        peak = [baseline_rss]
         thread = threading.Thread(target=monitor_peak_rss, args=(stop, peak), daemon=True)
         thread.start()
         started = time.perf_counter()
@@ -60,7 +63,7 @@ def timed(run: Callable[[], Any], *, warmups: int, repeats: int) -> tuple[list[f
         stop.set()
         thread.join()
         peak_rss = max(peak_rss, peak[0])
-    return samples, peak_rss
+    return samples, baseline_rss, peak_rss
 
 
 def contract_for(case: str) -> dict[str, Any]:
@@ -121,15 +124,36 @@ def run_case(case: str, table: pa.Table) -> Callable[[], Any]:
     raise ValueError(f"Unknown benchmark case: {case}")
 
 
-def summarize(case: str, rows: int, samples: list[float], peak_rss: int) -> dict[str, Any]:
+def summarize(
+    case: str, rows: int, samples: list[float], baseline_rss: int, peak_rss: int
+) -> dict[str, Any]:
     median = statistics.median(samples)
     return {
         "rules": rules_for(case),
         "samples_seconds": samples,
         "median_seconds": median,
         "rows_per_second": rows / median,
+        "baseline_rss_bytes": baseline_rss,
         "peak_rss_bytes": peak_rss,
+        "peak_rss_delta_bytes": max(0, peak_rss - baseline_rss),
     }
+
+
+def run_isolated_case(case: str, rows: int, warmups: int, repeats: int) -> dict[str, Any]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--case",
+        case,
+        "--rows",
+        str(rows),
+        "--warmups",
+        str(warmups),
+        "--repeats",
+        str(repeats),
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
 
 
 def main() -> None:
@@ -137,10 +161,17 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=1_000_000)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--case", choices=[
+        "required_not_null",
+        "min_max",
+        "unique",
+        "full_contract",
+        "fingerprint_only",
+        "exact_distinct_profile",
+    ])
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    table = build_table(args.rows)
     cases = [
         "required_not_null",
         "min_max",
@@ -149,17 +180,28 @@ def main() -> None:
         "fingerprint_only",
         "exact_distinct_profile",
     ]
+    if args.case:
+        table = build_table(args.rows)
+        samples, baseline_rss, peak_rss = timed(
+            run_case(args.case, table), warmups=args.warmups, repeats=args.repeats
+        )
+        print(json.dumps(summarize(args.case, args.rows, samples, baseline_rss, peak_rss)))
+        return
+
+    table = build_table(args.rows)
+    arrow_schema = str(table.schema)
+    del table
     results = {}
     for case in cases:
-        samples, peak_rss = timed(run_case(case, table), warmups=args.warmups, repeats=args.repeats)
-        results[case] = summarize(case, args.rows, samples, peak_rss)
+        results[case] = run_isolated_case(case, args.rows, args.warmups, args.repeats)
 
     payload = {
         "methodology": {
             "rows": args.rows,
             "warmups": args.warmups,
             "repeats": args.repeats,
-            "timing_scope": "in-memory Arrow table; setup/import/table construction excluded",
+            "timing_scope": "each case runs in an isolated subprocess; setup/import/table construction excluded from timed section",
+            "memory_scope": "baseline RSS is measured after table construction; peak_rss_delta_bytes is peak minus baseline within that subprocess",
             "cases": cases,
         },
         "environment": {
@@ -171,7 +213,7 @@ def main() -> None:
                 "psutil": version("psutil"),
             },
         },
-        "arrow_schema": str(table.schema),
+        "arrow_schema": arrow_schema,
         "results": results,
     }
     rendered = json.dumps(payload, indent=2)

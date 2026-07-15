@@ -17,6 +17,8 @@
   metadata, Arrow schema, and package versions.
 - Recorded the historical 7.6M-row Windows baseline: validation 8.82s, Arrow validation 8.66s, full
   profile 47.47s.
+- Added a fresh local Windows 7.6M-row a4 rule-matrix result under
+  `benchmarks/results/windows-7_6m-a4.json`.
 - Removed the `roaring` dependency from unique validation state.
 
 ## 0.4.0-alpha.3

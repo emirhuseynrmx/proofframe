@@ -5,6 +5,7 @@ import sys
 import pyarrow as pa
 import pyarrow.csv as arrow_csv
 import pytest
+import polars as pl
 
 import proofframe
 
@@ -57,6 +58,21 @@ def test_profile_can_skip_exact_distinct_counts():
 
     with pytest.raises(ValueError, match="distinct"):
         proofframe.profile(users(), distinct="approximate")
+
+
+def test_real_polars_dataframe_uses_arrow_path():
+    frame = pl.DataFrame({"id": [1, 2, 3], "score": [0.1, 0.2, 0.3]})
+
+    profile = proofframe.profile(frame, distinct="none")
+    report = proofframe.validate(
+        frame,
+        {"columns": {"id": {"required": True, "unique": True}, "score": {"min": 0, "max": 1}}},
+        include_profile=False,
+    )
+
+    assert profile["rows"] == 3
+    assert profile["fingerprint"] == proofframe.fingerprint(frame)
+    assert report["valid"] is True
 
 
 def test_contract_reports_row_level_evidence():

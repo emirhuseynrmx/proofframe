@@ -1,0 +1,118 @@
+{
+  "methodology": {
+    "rows": 7600000,
+    "warmups": 0,
+    "repeats": 1,
+    "timing_scope": "each case runs in an isolated subprocess; setup/import/table construction excluded from timed section",
+    "memory_scope": "baseline RSS is measured after table construction; peak_rss_delta_bytes is peak minus baseline within that subprocess",
+    "cases": [
+      "required_not_null",
+      "min_max",
+      "unique",
+      "full_contract",
+      "fingerprint_only",
+      "exact_distinct_profile"
+    ]
+  },
+  "environment": {
+    "python": "3.12.13",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "versions": {
+      "proofframe": "0.4.0a4",
+      "pyarrow": "25.0.0",
+      "psutil": "7.2.2"
+    }
+  },
+  "arrow_schema": "id: int64\nscore: double\nevent_ts: timestamp[us]\nbucket: string",
+  "results": {
+    "required_not_null": {
+      "rules": [
+        "id required",
+        "id not_null"
+      ],
+      "samples_seconds": [
+        0.0019087000109720975
+      ],
+      "median_seconds": 0.0019087000109720975,
+      "rows_per_second": 3981767672.400931,
+      "baseline_rss_bytes": 369074176,
+      "peak_rss_bytes": 370659328,
+      "peak_rss_delta_bytes": 1585152
+    },
+    "min_max": {
+      "rules": [
+        "0 <= score <= 1"
+      ],
+      "samples_seconds": [
+        0.35620510000444483
+      ],
+      "median_seconds": 0.35620510000444483,
+      "rows_per_second": 21336022.42052448,
+      "baseline_rss_bytes": 369389568,
+      "peak_rss_bytes": 370995200,
+      "peak_rss_delta_bytes": 1605632
+    },
+    "unique": {
+      "rules": [
+        "id unique"
+      ],
+      "samples_seconds": [
+        4.7099835999979405
+      ],
+      "median_seconds": 4.7099835999979405,
+      "rows_per_second": 1613593.728862097,
+      "baseline_rss_bytes": 369381376,
+      "peak_rss_bytes": 371924992,
+      "peak_rss_delta_bytes": 2543616
+    },
+    "full_contract": {
+      "rules": [
+        "id required",
+        "id not_null",
+        "id unique",
+        "0 <= score <= 1",
+        "bucket not_null"
+      ],
+      "samples_seconds": [
+        5.324968900007661
+      ],
+      "median_seconds": 5.324968900007661,
+      "rows_per_second": 1427238.3825545094,
+      "baseline_rss_bytes": 369176576,
+      "peak_rss_bytes": 371892224,
+      "peak_rss_delta_bytes": 2715648
+    },
+    "fingerprint_only": {
+      "rules": [
+        "schema",
+        "null/value boundaries",
+        "ordered canonical data",
+        "BLAKE3"
+      ],
+      "samples_seconds": [
+        39.58810729999095
+      ],
+      "median_seconds": 39.58810729999095,
+      "rows_per_second": 191976.84654153034,
+      "baseline_rss_bytes": 369479680,
+      "peak_rss_bytes": 370900992,
+      "peak_rss_delta_bytes": 1421312
+    },
+    "exact_distinct_profile": {
+      "rules": [
+        "profile",
+        "exact distinct",
+        "min/max",
+        "fingerprint"
+      ],
+      "samples_seconds": [
+        123.51865869999165
+      ],
+      "median_seconds": 123.51865869999165,
+      "rows_per_second": 61529.1655527062,
+      "baseline_rss_bytes": 371380224,
+      "peak_rss_bytes": 371421184,
+      "peak_rss_delta_bytes": 40960
+    }
+  }
+}

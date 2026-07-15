@@ -7,9 +7,9 @@
 - Clippy with warnings denied, rustfmt, Ruff, and a three-OS CI matrix are release gates.
 - The local comparison benchmark is standalone and records inputs, package versions, raw samples,
   median time, and throughput.
-- Rules-only validation uses typed Arrow buffers, exact Roaring bitmaps for 64-bit integer
-  uniqueness, and exact hash sets for floating-point/string uniqueness. It still returns bounded
-  row evidence; it skips only the separate profile and fingerprint products.
+- Rules-only validation uses typed Arrow buffers and type-specific hash sets for integer,
+  timestamp, floating-point, and string uniqueness. It still returns bounded row evidence; it skips
+  profile, fingerprint, exact distinct, and min/max profile state.
 - Contract validation tracks `violation_count` independently from stored finding examples, so
   `max_findings=0` cannot hide invalid data.
 

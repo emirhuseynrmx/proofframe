@@ -62,12 +62,14 @@ assert_eq!(report.valid, report.violation_count == 0);
 
 The core functions accept Arrow readers and return typed Rust structs:
 
-- `profile_reader(reader) -> Result<Profile, String>`
-- `validate_reader(reader, &contract) -> Result<ValidationReport, String>`
-- `validate_fast_reader(reader, &contract) -> Result<FastValidationReport, String>`
-- `diff_readers(before, after, &keys) -> Result<DiffReport, String>`
-- `scan_pii_reader(reader, max_findings) -> Result<PiiReport, String>`
-- `detect_leakage_readers(train, test, &keys, max_samples) -> Result<LeakageReport, String>`
+- `profile_reader(reader) -> Result<Profile, ProofFrameError>`
+- `profile_reader_with_distinct(reader, DistinctMode::None|Exact) -> Result<Profile, ProofFrameError>`
+- `fingerprint_reader(reader) -> Result<String, ProofFrameError>`
+- `validate_reader(reader, &contract) -> Result<ValidationReport, ProofFrameError>`
+- `validate_fast_reader(reader, &contract) -> Result<FastValidationReport, ProofFrameError>`
+- `diff_readers(before, after, &keys) -> Result<DiffReport, ProofFrameError>`
+- `scan_pii_reader(reader, max_findings) -> Result<PiiReport, ProofFrameError>`
+- `detect_leakage_readers(train, test, &keys, max_samples) -> Result<LeakageReport, ProofFrameError>`
 - `receipt::generate_keypair_json()`
 - `receipt::sign_json(report_json, private_key)`
 - `receipt::verify_json(receipt_json)`
