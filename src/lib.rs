@@ -16,11 +16,12 @@ use std::path::{Path, PathBuf};
 
 use ahash::RandomState;
 use arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array, Float32Array,
-    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
-    LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, RecordBatch,
+    StringArray, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 #[cfg(feature = "python")]
 use arrow::ffi_stream::ArrowArrayStreamReader;
@@ -412,10 +413,50 @@ fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, Strin
         return Ok(encoded);
     }
 
+    // Nested types recurse into their children. Element counts and per-element
+    // length prefixes keep boundaries unambiguous, and each nested kind carries a
+    // distinct tag so a one-element list cannot collide with its bare element.
+    if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+        return encode_child_sequence(23, values.value(row).as_ref());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
+        return encode_child_sequence(24, values.value(row).as_ref());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<FixedSizeListArray>() {
+        return encode_child_sequence(25, values.value(row).as_ref());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<StructArray>() {
+        let mut encoded = vec![26];
+        encoded.extend_from_slice(&(values.num_columns() as u64).to_le_bytes());
+        for column in values.columns() {
+            let element = canonical_value_bytes(column.as_ref(), row)?;
+            encoded.extend_from_slice(&(element.len() as u64).to_le_bytes());
+            encoded.extend_from_slice(&element);
+        }
+        return Ok(encoded);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<MapArray>() {
+        // A map row is a struct array of {key, value} entries in physical order.
+        return encode_child_sequence(27, &values.value(row));
+    }
+
     Err(format!(
         "Unsupported Arrow type `{}` for canonical fingerprinting",
         array.data_type()
     ))
+}
+
+/// Encode every element of a nested child array with a tag, an element count,
+/// and per-element length prefixes.
+fn encode_child_sequence(tag: u8, child: &dyn Array) -> Result<Vec<u8>, String> {
+    let mut encoded = vec![tag];
+    encoded.extend_from_slice(&(child.len() as u64).to_le_bytes());
+    for index in 0..child.len() {
+        let element = canonical_value_bytes(child, index)?;
+        encoded.extend_from_slice(&(element.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(&element);
+    }
+    Ok(encoded)
 }
 
 fn value_for_rules(array: &dyn Array, row: usize) -> Result<String, String> {
@@ -1527,6 +1568,46 @@ mod tests {
             prop_assert_eq!(full_outcome.violation_count, fast_report.violation_count);
             prop_assert_eq!(full_outcome.truncated, fast_report.truncated);
         }
+    }
+
+    #[test]
+    fn nested_columns_fingerprint_without_error() {
+        use arrow::array::{Int64Builder, ListBuilder, StructArray};
+
+        fn nested_batch(second: i64) -> RecordBatch {
+            let mut list_builder = ListBuilder::new(Int64Builder::new());
+            list_builder.values().append_value(1);
+            list_builder.values().append_value(2);
+            list_builder.append(true);
+            list_builder.values().append_value(second);
+            list_builder.append(true);
+            let tags = Arc::new(list_builder.finish()) as ArrayRef;
+
+            let group = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("id", DataType::Int64, false)),
+                    Arc::new(Int64Array::from(vec![10_i64, 20])) as ArrayRef,
+                ),
+                (
+                    Arc::new(Field::new("team", DataType::Utf8, false)),
+                    Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef,
+                ),
+            ]);
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("tags", tags.data_type().clone(), true),
+                Field::new("group", group.data_type().clone(), false),
+            ]));
+            RecordBatch::try_new(schema, vec![tags, Arc::new(group) as ArrayRef]).unwrap()
+        }
+
+        let first = profile_reader(reader_from_batch(nested_batch(3))).unwrap();
+        let repeat = profile_reader(reader_from_batch(nested_batch(3))).unwrap();
+        let different = profile_reader(reader_from_batch(nested_batch(99))).unwrap();
+
+        assert!(first.fingerprint.starts_with("pf-fp-v1:"));
+        assert_eq!(first.fingerprint, repeat.fingerprint);
+        assert_ne!(first.fingerprint, different.fingerprint);
     }
 }
 

@@ -1,5 +1,11 @@
 # ProofFrame
 
+[![Crates.io](https://img.shields.io/crates/v/proofframe.svg)](https://crates.io/crates/proofframe)
+[![docs.rs](https://img.shields.io/docsrs/proofframe)](https://docs.rs/proofframe)
+[![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/emirhuseynrmx/proofframe/blob/main/LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
+
 **Arrow-native data contracts, canonical fingerprints, and proof receipts for Rust.**
 
 ProofFrame is a Rust crate for checking Arrow `RecordBatchReader` streams and producing deterministic evidence:

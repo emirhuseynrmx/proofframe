@@ -1,7 +1,11 @@
 # ProofFrame
 
 [![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/proofframe.svg)](https://crates.io/crates/proofframe)
+[![docs.rs](https://img.shields.io/docsrs/proofframe)](https://docs.rs/proofframe)
 [![codecov](https://codecov.io/gh/emirhuseynrmx/proofframe/graph/badge.svg)](https://codecov.io/gh/emirhuseynrmx/proofframe)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
 
 **Ruff for data. Git-style evidence for DataFrames.**
 

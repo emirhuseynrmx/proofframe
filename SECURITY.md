@@ -15,8 +15,10 @@ domain-separated before hashing.
 
 The current canonical encoder covers booleans, signed and unsigned integer widths, float32/float64,
 decimal128, UTF-8 strings, binary values, date32/date64, and
-second/millisecond/microsecond/nanosecond timestamps. Unsupported types fail closed instead of
-producing a fingerprint with unstable formatting.
+second/millisecond/microsecond/nanosecond timestamps. Nested list, large-list, fixed-size-list,
+struct, and map columns are encoded recursively with per-kind tags, element counts, and
+length-prefixed children, so a one-element list cannot collide with its bare element. Any remaining
+unsupported type fails closed instead of producing a fingerprint with unstable formatting.
 
 Regex and allowlist contract rules intentionally evaluate Arrow's text rendering of the value
 because they are text rules. Those verdict messages are not used as proof-critical canonical bytes;

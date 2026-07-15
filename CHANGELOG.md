@@ -2,6 +2,8 @@
 
 ## 0.4.0-alpha.3
 
+- Extended canonical fingerprinting to nested list, large-list, fixed-size-list, struct, and map
+  columns using recursive, domain-separated encodings so nested data no longer fails closed.
 - Documented the public Rust API: every exported type, field, and function now carries rustdoc,
   and the `receipt` module has a module-level overview.
 - Added a `documentation` link to crate metadata.
