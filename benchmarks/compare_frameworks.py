@@ -1,6 +1,6 @@
-"""Reproducible valid-data benchmark against Pandera and Great Expectations.
+"""Reproducible valid-data benchmark for same-rule validation engines.
 
-Setup and imports are excluded. Every framework checks the same three predicates:
+Setup and imports are excluded. Every engine checks the same three predicates:
 `id` is non-null and unique, and `score` is between zero and one inclusive.
 """
 
@@ -53,7 +53,7 @@ def build_gx_validator(dataframe: pd.DataFrame) -> Callable[[], object]:
     def validate() -> object:
         result = definition.run(batch_parameters={"dataframe": dataframe})
         if not result.success:
-            raise RuntimeError("Great Expectations rejected valid benchmark data")
+            raise RuntimeError("Peer validator rejected valid benchmark data")
         return result
 
     return validate
@@ -80,7 +80,7 @@ def main() -> None:
             "score": {"min": 0, "max": 1},
         }
     }
-    pandera_schema = pa.DataFrameSchema(
+    dataframe_schema = pa.DataFrameSchema(
         {
             "id": pa.Column("int64", nullable=False, unique=True),
             "score": pa.Column("float64", checks=pa.Check.in_range(0, 1)),
@@ -94,12 +94,12 @@ def main() -> None:
             raise RuntimeError("ProofFrame rejected valid benchmark data")
         return result
 
-    def pandera_run() -> object:
-        return pandera_schema.validate(dataframe, lazy=True)
+    def dataframe_validator_run() -> object:
+        return dataframe_schema.validate(dataframe, lazy=True)
 
     runners = {
         "proofframe": proof_run,
-        "pandera": pandera_run,
+        "pandera": dataframe_validator_run,
         "great_expectations": build_gx_validator(dataframe),
     }
     results = {}

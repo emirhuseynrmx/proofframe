@@ -15,8 +15,9 @@ It accepts PyArrow tables and streams directly through the Arrow C Stream interf
 Polars DataFrames use the same Arrow-native path. The validation engine processes record batches in
 one pass without converting rows into Python objects.
 
-> Alpha software: `0.4.0a1` adds privacy-preserving PII findings, train/test leakage checks, and
-> signed proof receipts. The receipt schema and detector taxonomy may still change before 0.4 stable.
+> Alpha software: `0.4.0a2` adds canonical proof fingerprints, disk-backed exact diffs,
+> privacy-preserving PII findings, train/test leakage checks, and signed proof receipts. The receipt
+> schema and detector taxonomy may still change before 0.4 stable.
 
 ## The 30-second demo
 
@@ -154,16 +155,16 @@ compatible producer can feed the same native engine.
 
 ```text
 Pandas / Polars / PyArrow / Arrow C Stream
-                    │
-                    ▼
+                    |
+                    v
            Arrow record batches
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
+                    |
+        +-----------+-----------+
+        v           v           v
      profile     contracts     keyed diff
-        │           │           │
-        └───────────┼───────────┘
-                    ▼
+        |           |           |
+        +-----------+-----------+
+                    v
        deterministic JSON evidence
 ```
 
@@ -173,7 +174,7 @@ The Rust core currently provides:
 - versioned canonical BLAKE3 dataset fingerprints;
 - null, distinct, numeric min/max profiles;
 - required, not-null, unique, numeric range, regex, and allowlist rules;
-- key-based added/removed/changed row detection;
+- disk-backed key diff with exact added/removed/changed-column evidence;
 - bounded evidence reports;
 - Python 3.10+ ABI-stable wheels through PyO3/maturin.
 - `#![forbid(unsafe_code)]` in the ProofFrame crate.
@@ -198,26 +199,25 @@ The Python API and CLI coverage gate is 85%; the current local branch-and-line r
 Rust correctness is gated separately by unit tests, Proptest, and Clippy on the declared Rust 1.85
 MSRV so Python coverage cannot hide a native-core failure.
 
-Run the same-rule comparative benchmark:
+Run the same-rule local benchmark harness:
 
 ```bash
 pip install -e ".[benchmark]"
 python benchmarks/compare_frameworks.py --rows 1000000 --repeats 5
 ```
 
-The script runs the same non-null, uniqueness, and range predicates in ProofFrame, Pandera, and
-Great Expectations; excludes setup/import time; and records raw samples plus exact package versions.
-It uses ProofFrame's `include_profile=False` rules-only path because the other frameworks are not
-asked to compute a BLAKE3 dataset fingerprint or exact per-column profile. See `docs/testing.md`.
+The script runs the same non-null, uniqueness, and range predicates across a small set of validation
+engines; excludes setup/import time; and records raw samples plus exact package versions. It uses
+ProofFrame's `include_profile=False` rules-only path because benchmark peers are not asked to
+compute a BLAKE3 dataset fingerprint or exact per-column profile. See `docs/testing.md`.
 
-### Local 0.4 alpha same-rule benchmark
+### Local 0.4 alpha benchmark snapshot
 
 On the development machine (Windows 11, Python 3.12), 1,000,000 valid rows, one warmup, and seven
-measured repetitions produced these medians: ProofFrame **0.0162 s** (61.65M rows/s), Pandera
-**0.0340 s** (29.43M rows/s), and Great Expectations **0.1365 s** (7.33M rows/s). In this specific
-run ProofFrame was 2.09x faster than Pandera and 8.41x faster than Great Expectations. Raw samples
-and exact versions are committed in `benchmarks/results/windows-1m-fast.json`; this is a reproducible
-machine-local result, not a universal performance guarantee.
+measured repetitions produced a ProofFrame median of **0.0162 s** (**61.65M rows/s**) for the
+rules-only path. Raw peer samples and exact versions are committed in
+`benchmarks/results/windows-1m-fast.json`; this is a reproducible machine-local result, not a
+universal performance guarantee or a marketing claim.
 
 The benchmark prints measured rows/second for the current machine; this README intentionally makes
 no unverified performance claim.

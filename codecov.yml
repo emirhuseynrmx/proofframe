@@ -1,4 +1,5 @@
 coverage:
+  # Keep hosted coverage gates aligned with pyproject.toml and CI.
   precision: 2
   round: down
   range: "85...100"

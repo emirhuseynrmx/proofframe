@@ -1,20 +1,25 @@
 [package]
 name = "proofframe"
-version = "0.4.0-alpha.1"
+version = "0.4.0-alpha.2"
 edition = "2024"
 rust-version = "1.85"
-description = "Rust-native data contracts, fingerprints, and row-level diffs for Arrow data"
+description = "Rust-native Arrow data contracts, canonical fingerprints, and proof receipts"
 license = "Apache-2.0"
 repository = "https://github.com/emirhuseynrmx/proofframe"
-keywords = ["arrow", "data-quality", "dataframe", "parquet", "validation"]
+homepage = "https://github.com/emirhuseynrmx/proofframe"
+readme = "README.md"
+keywords = ["arrow", "data-quality", "dataframe", "validation", "fingerprint"]
 categories = ["data-structures", "development-tools", "science"]
 include = [
   "/src/**",
   "/python/**",
+  "/docs/**",
+  "/examples/**",
   "/Cargo.toml",
   "/Cargo.lock",
   "/pyproject.toml",
   "/README.md",
+  "/CHANGELOG.md",
   "/LICENSE",
   "/SECURITY.md",
 ]

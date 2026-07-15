@@ -1,5 +1,8 @@
 /target
 /dist
+/target/package
+/*.tar.gz
+/*.whl
 /.venv
 /.pytest_cache
 /.coverage

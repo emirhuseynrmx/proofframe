@@ -1,4 +1,10 @@
 #![forbid(unsafe_code)]
+//! Native ProofFrame engine for Arrow-backed data contracts.
+//!
+//! The published crate currently provides the PyO3 extension module used by the Python package.
+//! Its core invariants are stable enough to publish as an alpha: `pf-fp-v1` canonical dataset
+//! fingerprints, disk-backed exact keyed diffs, privacy-preserving PII findings, leakage checks,
+//! and signed proof receipts. A smaller public Rust API is planned before the 0.4 stable line.
 
 mod pii;
 mod receipt;

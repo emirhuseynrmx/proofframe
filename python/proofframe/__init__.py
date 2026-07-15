@@ -1,4 +1,4 @@
-"""ProofFrame: Rust-native contracts and diffs for DataFrames."""
+"""ProofFrame: Rust-native contracts, canonical fingerprints, and proof receipts."""
 
 from ._proofframe import __version__
 from .api import (

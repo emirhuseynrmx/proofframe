@@ -91,6 +91,25 @@ def test_diff_reports_changed_columns():
     assert report["changed"] == [{"key": "2", "columns": ["email"]}]
 
 
+def test_diff_handles_more_rows_than_one_partition():
+    before = pa.table({"id": list(range(160)), "score": [float(value) for value in range(160)]})
+    after = pa.table(
+        {
+            "id": [*range(80), *range(81, 160), 200],
+            "score": [
+                *(float(value) for value in range(80)),
+                *(999.0 if value == 81 else float(value) for value in range(81, 160)),
+                200.0,
+            ],
+        }
+    )
+
+    report = proofframe.diff(before, after, keys="id")
+    assert report["added_keys"] == ["200"]
+    assert report["removed_keys"] == ["80"]
+    assert report["changed"] == [{"key": "81", "columns": ["score"]}]
+
+
 def test_pii_findings_are_redacted():
     raw_email = "private.person@example.com"
     report = proofframe.scan_pii(pa.table({"contact": [raw_email, "not pii"]}))

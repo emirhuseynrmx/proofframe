@@ -5,7 +5,7 @@
 - Rust unit tests and Proptest properties cover PII primitives and signed-receipt tampering.
 - Python integration tests cross the PyO3/Arrow C Stream boundary.
 - Clippy with warnings denied, rustfmt, Ruff, and a three-OS CI matrix are release gates.
-- The comparative benchmark is standalone and records inputs, package versions, raw samples,
+- The local comparison benchmark is standalone and records inputs, package versions, raw samples,
   median time, and throughput.
 - Rules-only validation uses typed Arrow buffers, exact Roaring bitmaps for 64-bit integer
   uniqueness, and exact hash sets for floating-point/string uniqueness. It still returns bounded
@@ -26,7 +26,7 @@ interleaving-sensitive state is introduced.
 
 1. Extract `proofframe-core` and run Miri on it.
 2. Add cargo-fuzz targets for detector inputs, canonical receipt parsing, and Arrow batch boundaries.
-3. Add differential properties proving fingerprints are invariant to batch segmentation.
+3. Add differential properties for partitioned diff equivalence and fingerprint batch boundaries.
 4. Run the benchmark on a pinned dedicated runner; publish all raw samples, not only a speedup ratio.
 
 No benchmark result is a universal performance claim. Data shape, null density, rule selection,
