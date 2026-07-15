@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "proofframe"
-version = "0.4.0a2"
+version = "0.4.0a3"
 description = "Rust-native data contracts, canonical fingerprints, and proof receipts for DataFrames."
 readme = "README.md"
 requires-python = ">=3.10"
