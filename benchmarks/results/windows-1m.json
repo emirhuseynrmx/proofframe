@@ -1,0 +1,54 @@
+{
+  "methodology": {
+    "dataset": "in-memory pandas DataFrame; int64 id and float64 score",
+    "rows": 1000000,
+    "rules": [
+      "id not null",
+      "id unique",
+      "0 <= score <= 1"
+    ],
+    "warmups": 1,
+    "repeats": 3,
+    "timing_scope": "validation only; imports, setup, and conversion excluded"
+  },
+  "environment": {
+    "python": "3.12.13",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "versions": {
+      "proofframe": "0.4.0a1",
+      "pandera": "0.32.1",
+      "great_expectations": "1.19.0",
+      "pandas": "3.0.3",
+      "pyarrow": "25.0.0"
+    }
+  },
+  "results": {
+    "proofframe": {
+      "samples_seconds": [
+        2.638098600000376,
+        2.584699200000614,
+        2.5395681000009063
+      ],
+      "median_seconds": 2.584699200000614,
+      "rows_per_second": 386892.21554282313
+    },
+    "pandera": {
+      "samples_seconds": [
+        0.04313910000200849,
+        0.03906489999644691,
+        0.03965779999998631
+      ],
+      "median_seconds": 0.03965779999998631,
+      "rows_per_second": 25215720.48879023
+    },
+    "great_expectations": {
+      "samples_seconds": [
+        0.1384768999996595,
+        0.12886140000045998,
+        0.13529209999978775
+      ],
+      "median_seconds": 0.13529209999978775,
+      "rows_per_second": 7391414.576324625
+    }
+  }
+}

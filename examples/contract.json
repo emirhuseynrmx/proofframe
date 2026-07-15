@@ -1,0 +1,10 @@
+{
+  "columns": {
+    "user_id": { "required": true, "unique": true, "not_null": true },
+    "email": { "not_null": true, "pattern": "^[^@]+@[^@]+$" },
+    "score": { "min": 0.0, "max": 1.0 },
+    "status": { "allowed": ["active", "paused", "deleted"] }
+  },
+  "max_findings": 100
+}
+

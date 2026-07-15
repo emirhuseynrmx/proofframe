@@ -1,0 +1,8 @@
+/target
+/dist
+/.venv
+/.pytest_cache
+**/__pycache__
+*.pyd
+*.pdb
+*.so

@@ -1,0 +1,103 @@
+import json
+import subprocess
+import sys
+
+import pyarrow as pa
+import pyarrow.csv as arrow_csv
+
+import proofframe
+
+
+def users(ids=(1, 2, 3), emails=("a@example.com", "b@example.com", "c@example.com")):
+    return pa.table({"id": ids, "email": emails, "score": [0.9, 0.4, 0.8]})
+
+
+def test_profile_is_deterministic():
+    first = proofframe.profile(users())
+    second = proofframe.profile(users())
+    assert first["rows"] == 3
+    assert first["fingerprint"] == second["fingerprint"]
+    assert first["columns"][0]["distinct_count"] == 3
+    assert (
+        first["fingerprint"]
+        != proofframe.profile(
+            pa.table(
+                {
+                    "other_id": [1, 2, 3],
+                    "email": ["a@example.com", "b@example.com", "c@example.com"],
+                    "score": [0.9, 0.4, 0.8],
+                }
+            )
+        )["fingerprint"]
+    )
+
+
+def test_contract_reports_row_level_evidence():
+    report = proofframe.validate(
+        pa.table({"id": [1, 1], "email": ["ok@example.com", None], "score": [1.2, 0.5]}),
+        {
+            "columns": {
+                "id": {"required": True, "unique": True},
+                "email": {"not_null": True, "pattern": r"^[^@]+@[^@]+$"},
+                "score": {"min": 0, "max": 1},
+            }
+        },
+    )
+    assert report["valid"] is False
+    assert {finding["rule"] for finding in report["findings"]} == {"unique", "not_null", "max"}
+
+
+def test_diff_reports_changed_columns():
+    before = users()
+    after = pa.table(
+        {
+            "id": [1, 2, 4],
+            "email": ["a@example.com", "new@example.com", "d@example.com"],
+            "score": [0.9, 0.4, 0.7],
+        }
+    )
+    report = proofframe.diff(before, after, keys="id")
+    assert report["added_keys"] == ["4"]
+    assert report["removed_keys"] == ["3"]
+    assert report["changed"] == [{"key": "2", "columns": ["email"]}]
+
+
+def test_pii_findings_are_redacted():
+    raw_email = "private.person@example.com"
+    report = proofframe.scan_pii(pa.table({"contact": [raw_email, "not pii"]}))
+    assert report["detected"] is True
+    assert report["counts_by_kind"] == {"email": 1}
+    assert report["findings"][0]["value_fingerprint"]
+    assert raw_email not in json.dumps(report)
+
+
+def test_leakage_reports_only_hashed_samples():
+    train = pa.table({"id": [1, 2, 3], "feature": ["a", "b", "c"]})
+    test = pa.table({"id": [3, 4], "feature": ["x", "d"]})
+    report = proofframe.detect_leakage(train, test, keys="id")
+    assert report["overlap_count"] == 1
+    assert report["mode"] == "key"
+    assert report["sample_fingerprints"][0] != "3"
+
+
+def test_signed_receipt_detects_tampering():
+    keys = proofframe.generate_keypair()
+    receipt = proofframe.sign_receipt({"valid": True, "rows": 3}, private_key=keys["private_key"])
+    assert receipt["public_key"] == keys["public_key"]
+    assert proofframe.verify_receipt(receipt)["valid"] is True
+    receipt["report"]["rows"] = 4
+    verification = proofframe.verify_receipt(receipt)
+    assert verification["valid"] is False
+    assert verification["report_hash_matches"] is False
+
+
+def test_cli_profiles_csv(tmp_path):
+    source = tmp_path / "users.csv"
+    arrow_csv.write_csv(users(), source)
+    result = subprocess.run(
+        [sys.executable, "-m", "proofframe.cli", "profile", str(source)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout)["rows"] == 3

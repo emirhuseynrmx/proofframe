@@ -1,0 +1,46 @@
+[build-system]
+requires = ["maturin>=1.11,<2"]
+build-backend = "maturin"
+
+[project]
+name = "proofframe"
+version = "0.4.0a1"
+description = "Ruff for data. Git-style fingerprints and diffs for DataFrames."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Emir Huseyin Inci" }]
+keywords = ["data-quality", "dataframe", "arrow", "parquet", "pandas", "polars"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = ["pyarrow>=15"]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2"]
+polars = ["polars>=1"]
+dev = ["maturin>=1.11", "pytest>=8", "ruff>=0.15", "pandas>=2"]
+benchmark = ["pandas>=2", "pandera>=0.26", "great-expectations>=1.8"]
+
+[project.scripts]
+proofframe = "proofframe.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/emirhuseynrmx/proofframe"
+Issues = "https://github.com/emirhuseynrmx/proofframe/issues"
+
+[tool.maturin]
+python-source = "python"
+module-name = "proofframe._proofframe"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
