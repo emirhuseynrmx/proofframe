@@ -7,7 +7,7 @@ description = "Rust-native Arrow data contracts, canonical fingerprints, and pro
 license = "Apache-2.0"
 repository = "https://github.com/emirhuseynrmx/proofframe"
 homepage = "https://github.com/emirhuseynrmx/proofframe"
-readme = "README.md"
+readme = "README-crates.md"
 keywords = ["arrow", "data-quality", "dataframe", "validation", "fingerprint"]
 categories = ["data-structures", "development-tools", "science"]
 include = [
@@ -17,6 +17,7 @@ include = [
   "/Cargo.toml",
   "/Cargo.lock",
   "/README.md",
+  "/README-crates.md",
   "/CHANGELOG.md",
   "/LICENSE",
   "/SECURITY.md",

@@ -5,6 +5,22 @@
 
 **Ruff for data. Git-style evidence for DataFrames.**
 
+## Why ProofFrame
+
+Most data checks answer one narrow question: did this table pass? ProofFrame is built for the
+harder production question: **what exactly was checked, why did it fail, and can we prove that later?**
+
+- **Proof, not vibes:** every profile includes a versioned canonical BLAKE3 fingerprint
+  (`pf-fp-v1`) so the checked dataset can be identified again.
+- **Bounded evidence:** validation returns row-level findings, total violation counts, and
+  truncation status instead of hiding failures behind a boolean.
+- **One Arrow-native engine:** Rust core, Python bindings, PyArrow/Pandas/Polars input, no Python
+  row materialization in the hot path.
+- **CI-friendly contracts:** deterministic JSON, explicit CLI exit codes, signed proof receipts,
+  PII scanning, leakage checks, and keyed diffs.
+- **Fast Python package, real Rust core:** installable from PyPI with ABI-stable wheels, while the
+  same engine is available to Rust users through crates.io.
+
 ProofFrame is a Rust crate with Python bindings for answering three questions before bad data
 ships:
 
@@ -23,8 +39,7 @@ one pass without converting rows into Python objects.
 ## The 30-second demo
 
 ```bash
-pip install proofframe
-cargo add proofframe
+pip install proofframe==0.4.0a2
 ```
 
 ```python
@@ -184,27 +199,11 @@ The Rust core currently provides:
 - required, not-null, unique, numeric range, regex, and allowlist rules;
 - disk-backed key diff with exact added/removed/changed-column evidence;
 - bounded evidence reports;
-- a default Rust API without PyO3 or Python extension-module linkage;
-- optional Python 3.10+ ABI-stable wheels through PyO3/maturin.
+- a crates.io package with a default Rust API and no required Python linkage;
+- Python 3.10+ ABI-stable wheels through PyO3/maturin.
 - `#![forbid(unsafe_code)]` in the ProofFrame crate.
 
-### Rust API
-
-The crates.io package builds as a normal Rust library by default:
-
-```rust
-use proofframe::{profile_reader, validate_reader, Contract};
-
-let profile = profile_reader(reader)?;
-let contract = Contract::default();
-let report = validate_reader(reader_again, &contract)?;
-
-assert_eq!(profile.fingerprint.split(':').next(), Some("pf-fp-v1"));
-assert_eq!(report.valid, report.violation_count == 0);
-```
-
-Enable the `python` feature only when building the Python extension path; the PyPI build enables it
-automatically through maturin.
+Rust users get a separate crates.io-focused README via `README-crates.md`.
 
 ## Development
 
