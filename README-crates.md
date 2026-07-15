@@ -28,7 +28,7 @@ The default crates.io build is a normal Rust library. It does not require PyO3, 
 ## Install
 
 ```bash
-cargo add proofframe@0.4.0-alpha.2
+cargo add proofframe@0.4.0-alpha.3
 ```
 
 ## Quick use
@@ -75,14 +75,14 @@ The core functions accept Arrow readers and return typed Rust structs:
 
 ```toml
 [dependencies]
-proofframe = "0.4.0-alpha.2"
+proofframe = "0.4.0-alpha.3"
 ```
 
 The default feature set is intentionally empty. Enable `python` only when building the Python
 extension path:
 
 ```toml
-proofframe = { version = "0.4.0-alpha.2", features = ["python"] }
+proofframe = { version = "0.4.0-alpha.3", features = ["python"] }
 ```
 
 The PyPI package enables `python` plus `pyo3/extension-module` through maturin. Plain Rust tests and
@@ -102,7 +102,7 @@ that can be stored in CI, data contracts, and release artifacts.
 Python users should install the wheel from PyPI:
 
 ```bash
-pip install proofframe==0.4.0a2
+pip install proofframe==0.4.0a3
 ```
 
 The Python README and CLI documentation live in the repository `README.md`.
