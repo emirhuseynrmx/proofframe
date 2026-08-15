@@ -2,6 +2,7 @@
 
 from ._proofframe import __version__
 from .api import (
+    check,
     detect_leakage,
     diff,
     fingerprint,
@@ -12,9 +13,24 @@ from .api import (
     validate,
     verify_receipt,
 )
+from .errors import (
+    ContractError,
+    CorruptDataError,
+    ProofFrameError,
+    ReceiptError,
+    ResourceLimitError,
+    SchemaError,
+)
 
 __all__ = [
+    "ContractError",
+    "CorruptDataError",
+    "ProofFrameError",
+    "ReceiptError",
+    "ResourceLimitError",
+    "SchemaError",
     "__version__",
+    "check",
     "detect_leakage",
     "diff",
     "fingerprint",

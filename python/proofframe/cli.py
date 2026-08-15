@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.csv as arrow_csv
-import pyarrow.parquet as parquet
+from pyarrow import parquet
 
 from .api import diff, profile, validate
 

@@ -15,6 +15,8 @@ pub mod evidence;
 mod execution;
 mod leakage;
 mod pii;
+#[cfg(feature = "python")]
+mod python;
 pub mod receipt;
 
 pub use contract::{
@@ -41,14 +43,8 @@ use arrow::array::{
     StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-#[cfg(feature = "python")]
-use arrow::ffi_stream::ArrowArrayStreamReader;
-#[cfg(feature = "python")]
-use arrow::pyarrow::PyArrowType;
 use arrow::record_batch::RecordBatchReader;
 use arrow::util::display::array_value_to_string;
-#[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
@@ -337,11 +333,6 @@ pub struct LeakageReport {
     pub sample_fingerprints: Vec<String>,
     /// `true` when the sample list was capped by `max_samples`.
     pub truncated: bool,
-}
-
-#[cfg(feature = "python")]
-fn py_err(error: impl std::fmt::Display) -> PyErr {
-    PyValueError::new_err(error.to_string())
 }
 
 fn update_len_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -941,99 +932,6 @@ where
     )
 }
 
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (source, distinct="exact"))]
-fn profile_arrow(source: PyArrowType<ArrowArrayStreamReader>, distinct: &str) -> PyResult<String> {
-    let distinct_mode = DistinctMode::from_name(distinct).map_err(py_err)?;
-    let profile = profile_reader_with_distinct(source.0, distinct_mode).map_err(py_err)?;
-    serde_json::to_string(&profile).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn fingerprint_arrow(source: PyArrowType<ArrowArrayStreamReader>) -> PyResult<String> {
-    fingerprint_reader(source.0).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn validate_arrow(
-    source: PyArrowType<ArrowArrayStreamReader>,
-    contract_json: &str,
-) -> PyResult<String> {
-    let contract: Contract = serde_json::from_str(contract_json)
-        .map_err(|error| py_err(ProofFrameError::InvalidContract(error.to_string())))?;
-    let report = validate_reader(source.0, &contract).map_err(py_err)?;
-    serde_json::to_string(&report).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn validate_fast_arrow(
-    source: PyArrowType<ArrowArrayStreamReader>,
-    contract_json: &str,
-) -> PyResult<String> {
-    let contract: Contract = serde_json::from_str(contract_json)
-        .map_err(|error| py_err(ProofFrameError::InvalidContract(error.to_string())))?;
-    let report = validate_fast_batches(source.0, &contract).map_err(py_err)?;
-    serde_json::to_string(&report).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn diff_arrow(
-    before: PyArrowType<ArrowArrayStreamReader>,
-    after: PyArrowType<ArrowArrayStreamReader>,
-    keys: Vec<String>,
-) -> PyResult<String> {
-    let report = diff_readers(before.0, after.0, &keys).map_err(py_err)?;
-    serde_json::to_string(&report).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (source, max_findings=100))]
-fn scan_pii_arrow(
-    source: PyArrowType<ArrowArrayStreamReader>,
-    max_findings: usize,
-) -> PyResult<String> {
-    let report = scan_pii_reader(source.0, max_findings).map_err(py_err)?;
-    serde_json::to_string(&report).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-#[pyo3(signature = (train, test, keys, max_samples=20))]
-fn detect_leakage_arrow(
-    train: PyArrowType<ArrowArrayStreamReader>,
-    test: PyArrowType<ArrowArrayStreamReader>,
-    keys: Vec<String>,
-    max_samples: usize,
-) -> PyResult<String> {
-    let report = detect_leakage_readers(train.0, test.0, &keys, max_samples).map_err(py_err)?;
-    serde_json::to_string(&report).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn generate_signing_keypair() -> PyResult<String> {
-    receipt::generate_keypair_json().map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn sign_proof_receipt(report_json: &str, private_key: &str) -> PyResult<String> {
-    receipt::sign_json(report_json, private_key).map_err(py_err)
-}
-
-#[cfg(feature = "python")]
-#[pyfunction]
-fn verify_proof_receipt(receipt_json: &str) -> PyResult<String> {
-    let verification = receipt::verify_json(receipt_json).map_err(py_err)?;
-    serde_json::to_string(&verification).map_err(py_err)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,16 +1192,5 @@ mod tests {
 #[cfg(feature = "python")]
 #[pymodule]
 fn _proofframe(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(validate_fast_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(scan_pii_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(detect_leakage_arrow, module)?)?;
-    module.add_function(wrap_pyfunction!(generate_signing_keypair, module)?)?;
-    module.add_function(wrap_pyfunction!(sign_proof_receipt, module)?)?;
-    module.add_function(wrap_pyfunction!(verify_proof_receipt, module)?)?;
-    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    Ok(())
+    python::register(module)
 }

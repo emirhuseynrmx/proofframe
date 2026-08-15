@@ -94,12 +94,7 @@ where
                 "unique",
                 column.field().name(),
                 Some(duplicate.duplicate_row),
-                || {
-                    format!(
-                        "Duplicate value first appeared at row {}",
-                        duplicate.first_row
-                    )
-                },
+                || "Duplicate value detected".to_string(),
             );
         }
         validation.violation_count += summary.duplicate_count.saturating_sub(sampled);

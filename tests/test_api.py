@@ -2,12 +2,11 @@ import json
 import subprocess
 import sys
 
+import polars as pl
+import proofframe
 import pyarrow as pa
 import pyarrow.csv as arrow_csv
 import pytest
-import polars as pl
-
-import proofframe
 
 
 def users(ids=(1, 2, 3), emails=("a@example.com", "b@example.com", "c@example.com")):

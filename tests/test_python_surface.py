@@ -1,14 +1,15 @@
 import json
 import sys
+import threading
+import time
 
 import pandas as pd
+import proofframe
 import pyarrow as pa
 import pyarrow.csv as arrow_csv
-import pyarrow.parquet as parquet
 import pytest
-
-import proofframe
 from proofframe import api, cli
+from pyarrow import parquet
 
 
 def table() -> pa.Table:
@@ -25,6 +26,14 @@ class ArrowStreamProvider:
         return table().__arrow_c_stream__(requested_schema)
 
 
+class BothArrowProtocols:
+    def __arrow_c_stream__(self, requested_schema=None):
+        return table().__arrow_c_stream__(requested_schema)
+
+    def to_arrow(self):
+        raise AssertionError("materializing to_arrow path was selected")
+
+
 def test_all_supported_python_inputs_reach_native_engine():
     source = table()
     batch = source.to_batches()[0]
@@ -36,6 +45,7 @@ def test_all_supported_python_inputs_reach_native_engine():
     assert proofframe.profile(ArrowConvertible())["rows"] == 2
     assert proofframe.profile(dataframe)["rows"] == 2
     assert proofframe.profile(ArrowStreamProvider())["rows"] == 2
+    assert proofframe.profile(BothArrowProtocols(), distinct="none")["rows"] == 2
 
     with pytest.raises(TypeError, match="Expected a PyArrow"):
         proofframe.profile(object())
@@ -128,3 +138,48 @@ def test_cli_rejects_unknown_file_type():
 def test_private_reader_helper_returns_reader_unchanged():
     reader = table().to_reader()
     assert api._as_reader(reader) is reader
+
+
+def test_strict_contract_errors_have_stable_python_types_and_context():
+    with pytest.raises(proofframe.ContractError) as caught:
+        proofframe.check(table(), {"columns": {}, "max_findngs": 1})
+
+    assert caught.value.code == "PF_CONTRACT_UNKNOWN_FIELD"
+    assert caught.value.path == "$.max_findngs"
+
+    with pytest.raises(proofframe.ResourceLimitError) as resource:
+        proofframe.check(
+            pa.table({"id": list(range(100))}),
+            {"columns": {"id": {"unique": True}}},
+            max_memory=0,
+            max_temp=0,
+        )
+
+    assert resource.value.code == "PF_RESOURCE_LIMIT"
+    assert resource.value.requested_bytes > resource.value.remaining_bytes
+    assert resource.value.limit_bytes == 0
+
+
+def test_native_fingerprint_releases_the_gil():
+    source = pa.table({"id": pa.array(range(1_000_000), type=pa.int64())})
+    ticks = 0
+    running = threading.Event()
+    running.set()
+
+    def worker() -> None:
+        nonlocal ticks
+        while running.is_set():
+            ticks += 1
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    before = ticks
+    started = time.perf_counter()
+    proofframe.fingerprint(source)
+    finished = time.perf_counter()
+    after = ticks
+    running.clear()
+    thread.join()
+
+    assert finished > started
+    assert after > before, "Python worker made no progress during native fingerprinting"
