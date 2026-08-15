@@ -29,7 +29,7 @@ pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
 pub use execution::{
     CancellationToken, ExecutionOptions, MemoryReservation, ResourceAccount, ResourceLimits,
-    TempReservation, execute_reader,
+    TempReservation, execute_reader, execute_reader_with_fingerprint,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
 
@@ -57,6 +57,8 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatchReader;
 use arrow::util::display::array_value_to_string;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 use regex::Regex;
@@ -85,23 +87,37 @@ pub struct ColumnProfile {
 struct ColumnState {
     null_count: u64,
     non_null_count: u64,
-    distinct: Option<HashSet<Vec<u8>>>,
+    distinct: Option<ExactState>,
     min: Option<f64>,
     max: Option<f64>,
 }
 
 impl ColumnState {
-    fn new(distinct_mode: DistinctMode) -> Self {
-        Self {
+    fn new(
+        distinct_mode: DistinctMode,
+        account: &ResourceAccount,
+        directory: Option<&std::path::Path>,
+    ) -> Result<Self, ProofFrameError> {
+        Ok(Self {
             null_count: 0,
             non_null_count: 0,
             distinct: match distinct_mode {
                 DistinctMode::None => None,
-                DistinctMode::Exact => Some(HashSet::new()),
+                DistinctMode::Exact => Some(ExactState::new(
+                    ValueKind::Bytes,
+                    account.child(
+                        account.limits().max_memory_bytes,
+                        account.limits().max_temp_bytes,
+                    ),
+                    directory
+                        .expect("exact profiling owns a temporary directory")
+                        .to_path_buf(),
+                    None,
+                )?),
             },
             min: None,
             max: None,
-        }
+        })
     }
 }
 
@@ -232,6 +248,12 @@ pub struct FastValidationReport {
     pub mode: &'static str,
     /// Accounted native state and spill activity for release diagnostics.
     pub metrics: ExecutionMetrics,
+    /// Effective hard limits applied to this validation execution.
+    pub resources: ResourceLimits,
+    /// Schema-resolved typed plan identity used for this report.
+    pub compiled_plan_digest: String,
+    /// Arrow schema identity used for plan compilation and every scanned batch.
+    pub schema_digest: String,
 }
 
 struct ValidationOutcome {
@@ -244,6 +266,9 @@ struct ValidationState {
     findings: Vec<Finding>,
     violation_count: u64,
     max_findings: usize,
+    finding_memory: Option<ResourceAccount>,
+    finding_reservations: Vec<MemoryReservation>,
+    resource_error: Option<ProofFrameError>,
 }
 
 impl ValidationState {
@@ -252,13 +277,66 @@ impl ValidationState {
             findings: Vec::new(),
             violation_count: 0,
             max_findings,
+            finding_memory: None,
+            finding_reservations: Vec::new(),
+            resource_error: None,
+        }
+    }
+
+    fn new_accounted(max_findings: usize, account: ResourceAccount) -> Self {
+        Self {
+            finding_memory: Some(account),
+            ..Self::new(max_findings)
         }
     }
 
     fn record(&mut self, finding: Finding) {
         self.violation_count += 1;
         if self.findings.len() < self.max_findings {
+            if !self.reserve_finding(&finding) {
+                return;
+            }
             self.findings.push(finding);
+        }
+    }
+
+    fn reserve_finding(&mut self, finding: &Finding) -> bool {
+        let Some(account) = self.finding_memory.as_ref() else {
+            return true;
+        };
+        if self.resource_error.is_some() {
+            return false;
+        }
+        let vector_growth = if self.findings.len() == self.findings.capacity() {
+            let next = if self.findings.capacity() == 0 {
+                4
+            } else {
+                self.findings.capacity().saturating_mul(2)
+            };
+            next.saturating_sub(self.findings.capacity())
+                .saturating_mul(std::mem::size_of::<Finding>())
+        } else {
+            0
+        };
+        let bytes = vector_growth
+            .saturating_add(finding.column.capacity())
+            .saturating_add(finding.message.capacity()) as u64;
+        match account.try_reserve_memory(bytes) {
+            Ok(reservation) => {
+                self.finding_reservations.push(reservation);
+                true
+            }
+            Err(error) => {
+                self.resource_error = Some(error);
+                false
+            }
+        }
+    }
+
+    fn check_resources(&mut self) -> Result<(), ProofFrameError> {
+        match self.resource_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
@@ -337,6 +415,73 @@ pub struct PiiReport {
     pub truncated: bool,
     /// Bounded list of individual detections.
     pub findings: Vec<PiiFinding>,
+    /// Whether fingerprints are stable under a caller key or unlinkable across runs.
+    pub fingerprint_mode: PiiFingerprintMode,
+    /// Non-secret identifier for key rotation and provenance.
+    pub key_id: String,
+}
+
+/// Linkability policy for redacted PII value fingerprints.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PiiFingerprintMode {
+    Stable,
+    Unlinkable,
+}
+
+/// Secret-bearing scan configuration. The key is deliberately never serializable.
+pub struct PiiFingerprintOptions {
+    mode: PiiFingerprintMode,
+    key: [u8; 32],
+    key_id: String,
+}
+
+impl PiiFingerprintOptions {
+    /// Generate a fresh per-run key so equal values cannot be linked across scans.
+    pub fn unlinkable() -> Result<Self, ProofFrameError> {
+        let mut key = [0_u8; 32];
+        getrandom::fill(&mut key)
+            .map_err(|error| ProofFrameError::InvalidContract(error.to_string()))?;
+        let identifier = blake3::keyed_hash(&key, b"proofframe:pii-key-id:v2\0");
+        let mut key_id = String::with_capacity(20);
+        key_id.push_str("run:");
+        key_id.push_str(&identifier.to_hex()[..16]);
+        Ok(Self {
+            mode: PiiFingerprintMode::Unlinkable,
+            key,
+            key_id,
+        })
+    }
+
+    /// Use a caller-managed 256-bit key for stable fingerprints across runs.
+    pub fn stable(key: [u8; 32], key_id: impl Into<String>) -> Result<Self, ProofFrameError> {
+        let key_id = key_id.into();
+        if key_id.trim().is_empty() {
+            return Err(ProofFrameError::InvalidContract(
+                "stable PII fingerprints require a non-empty key_id".to_string(),
+            ));
+        }
+        Ok(Self {
+            mode: PiiFingerprintMode::Stable,
+            key,
+            key_id,
+        })
+    }
+
+    /// Decode a URL-safe, unpadded base64 32-byte caller key.
+    pub fn stable_base64(key: &str, key_id: impl Into<String>) -> Result<Self, ProofFrameError> {
+        let bytes = URL_SAFE_NO_PAD.decode(key).map_err(|_| {
+            ProofFrameError::InvalidContract(
+                "stable PII fingerprint_key must encode exactly 32 bytes".to_string(),
+            )
+        })?;
+        let key: [u8; 32] = bytes.try_into().map_err(|_| {
+            ProofFrameError::InvalidContract(
+                "stable PII fingerprint_key must encode exactly 32 bytes".to_string(),
+            )
+        })?;
+        Self::stable(key, key_id)
+    }
 }
 
 /// Train/test overlap result that exposes only hashed sample identifiers.
@@ -512,16 +657,27 @@ fn inspect_batches<R>(
     reader: R,
     contract: Option<&Contract>,
     distinct_mode: DistinctMode,
+    resources: ResourceLimits,
 ) -> Result<(Profile, ValidationOutcome), ProofFrameError>
 where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
+    let resource_root = ResourceAccount::root(resources);
+    let distinct_directory = (distinct_mode == DistinctMode::Exact)
+        .then(tempfile::TempDir::new)
+        .transpose()?;
     let mut states = schema
         .fields()
         .iter()
-        .map(|_| ColumnState::new(distinct_mode))
-        .collect::<Vec<_>>();
+        .map(|_| {
+            ColumnState::new(
+                distinct_mode,
+                &resource_root,
+                distinct_directory.as_ref().map(tempfile::TempDir::path),
+            )
+        })
+        .collect::<Result<Vec<_>, ProofFrameError>>()?;
     let mut seen_unique: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
     let mut patterns: HashMap<String, Regex> = HashMap::new();
     let max_findings = contract.map_or(DEFAULT_MAX_FINDINGS, |value| value.max_findings);
@@ -556,6 +712,11 @@ where
     hasher.update(b"pf-fp-body-v1\0");
     for maybe_batch in reader {
         let batch = maybe_batch?;
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during profiling".to_string(),
+            ));
+        }
         for row in 0..batch.num_rows() {
             let global_row = rows + row as u64;
             for (column_index, array) in batch.columns().iter().enumerate() {
@@ -581,7 +742,7 @@ where
                 update_hash(&mut hasher, column_index, array.as_ref(), row)?;
                 let value_key = canonical_value_bytes(array.as_ref(), row)?;
                 if let Some(distinct) = &mut state.distinct {
-                    distinct.insert(value_key.clone());
+                    distinct.insert(ValueRef::Bytes(&value_key), global_row)?;
                 }
                 if let Some(number) = numeric_value(array.as_ref(), row)? {
                     state.min = Some(state.min.map_or(number, |current| current.min(number)));
@@ -666,16 +827,23 @@ where
         .fields()
         .iter()
         .zip(states)
-        .map(|(field, state)| ColumnProfile {
-            name: field.name().clone(),
-            data_type: field.data_type().to_string(),
-            null_count: state.null_count,
-            non_null_count: state.non_null_count,
-            distinct_count: state.distinct.as_ref().map(HashSet::len),
-            min: state.min,
-            max: state.max,
+        .map(|(field, state)| {
+            let distinct_count = state
+                .distinct
+                .map(ExactState::finish)
+                .transpose()?
+                .map(|summary| summary.distinct_count as usize);
+            Ok(ColumnProfile {
+                name: field.name().clone(),
+                data_type: field.data_type().to_string(),
+                null_count: state.null_count,
+                non_null_count: state.non_null_count,
+                distinct_count,
+                min: state.min,
+                max: state.max,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ProofFrameError>>()?;
     Ok((
         Profile {
             rows,
@@ -686,11 +854,11 @@ where
     ))
 }
 
-fn privacy_fingerprint(value: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"proofframe:privacy:v1\0");
+fn privacy_fingerprint(key: &[u8; 32], value: &str) -> String {
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    hasher.update(b"proofframe:privacy:v2\0");
     hasher.update(value.as_bytes());
-    hasher.finalize().to_hex()[..16].to_string()
+    format!("pf-pii-v2:{}", hasher.finalize().to_hex())
 }
 
 fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, ProofFrameError> {
@@ -802,7 +970,7 @@ pub fn profile_reader<R>(reader: R) -> Result<Profile, ProofFrameError>
 where
     R: RecordBatchReader,
 {
-    profile_reader_with_distinct(reader, DistinctMode::Exact)
+    profile_reader_with_distinct(reader, DistinctMode::None)
 }
 
 /// Profile Arrow record batches with configurable exact distinct counting.
@@ -813,7 +981,19 @@ pub fn profile_reader_with_distinct<R>(
 where
     R: RecordBatchReader,
 {
-    inspect_batches(reader, None, distinct_mode).map(|(profile, _)| profile)
+    profile_reader_with_resources(reader, distinct_mode, ResourceLimits::default())
+}
+
+/// Profile with a hard resource budget for optional exact distinct state.
+pub fn profile_reader_with_resources<R>(
+    reader: R,
+    distinct_mode: DistinctMode,
+    resources: ResourceLimits,
+) -> Result<Profile, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    inspect_batches(reader, None, distinct_mode, resources).map(|(profile, _)| profile)
 }
 
 fn fingerprint_batches<R>(reader: R) -> Result<(u64, String), ProofFrameError>
@@ -851,7 +1031,12 @@ pub fn validate_reader<R>(
 where
     R: RecordBatchReader,
 {
-    let (profile, outcome) = inspect_batches(reader, Some(contract), DistinctMode::Exact)?;
+    let (profile, outcome) = inspect_batches(
+        reader,
+        Some(contract),
+        DistinctMode::Exact,
+        ResourceLimits::default(),
+    )?;
     Ok(ValidationReport {
         valid: outcome.violation_count == 0,
         violation_count: outcome.violation_count,
@@ -890,6 +1075,18 @@ pub fn scan_pii_reader<R>(reader: R, max_findings: usize) -> Result<PiiReport, P
 where
     R: RecordBatchReader,
 {
+    scan_pii_reader_with_options(reader, max_findings, &PiiFingerprintOptions::unlinkable()?)
+}
+
+/// Scan for PII using an explicit linkability and key-management policy.
+pub fn scan_pii_reader_with_options<R>(
+    reader: R,
+    max_findings: usize,
+    fingerprint: &PiiFingerprintOptions,
+) -> Result<PiiReport, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
     let schema = reader.schema();
     let detector = pii::detector();
     let mut findings = Vec::new();
@@ -898,6 +1095,11 @@ where
     let mut total_findings = 0_usize;
     for maybe_batch in reader {
         let batch = maybe_batch?;
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during PII scanning".to_string(),
+            ));
+        }
         for row in 0..batch.num_rows() {
             for (column, array) in batch.columns().iter().enumerate() {
                 if array.is_null(row) {
@@ -921,7 +1123,10 @@ where
                             confidence: classification.confidence,
                             column: schema.field(column).name().clone(),
                             row: scanned_rows + row as u64,
-                            value_fingerprint: privacy_fingerprint(value.as_ref()),
+                            value_fingerprint: privacy_fingerprint(
+                                &fingerprint.key,
+                                value.as_ref(),
+                            ),
                         });
                     }
                 }
@@ -936,6 +1141,8 @@ where
         counts_by_kind: counts,
         truncated: total_findings > findings.len(),
         findings,
+        fingerprint_mode: fingerprint.mode,
+        key_id: fingerprint.key_id.clone(),
     })
 }
 
@@ -1032,7 +1239,12 @@ mod tests {
             };
 
             let (_, full_outcome) =
-                inspect_batches(reader_from_batch(batch.clone()), Some(&contract), DistinctMode::Exact)
+                inspect_batches(
+                    reader_from_batch(batch.clone()),
+                    Some(&contract),
+                    DistinctMode::Exact,
+                    ResourceLimits::default(),
+                )
                     .unwrap();
             let fast_report = validate_fast_batches(reader_from_batch(batch), &contract).unwrap();
 

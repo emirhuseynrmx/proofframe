@@ -15,19 +15,26 @@ fn fixture() -> EvidenceV2 {
             fingerprint_digest: [3; 32],
             rows: 42,
         },
-        contract_digest: [5; 32],
+        contract_source_digest: format!("pf-contract-v1:{}", "05".repeat(32)),
+        compiled_plan_digest: format!("pf-plan-v1:{}", "06".repeat(32)),
+        schema_digest: format!("pf-schema-v1:{}", "07".repeat(32)),
         engine: EngineEvidence {
             name: "proofframe".to_string(),
             version: "0.5.0".to_string(),
         },
         execution: ExecutionEvidence {
-            operation: "validate".to_string(),
+            operation: "check".to_string(),
             resources: ResourceLimits::default(),
         },
         result: ResultEvidence {
             valid: true,
             violation_count: 0,
             output_records: 0,
+            truncated: false,
+            result_digest: format!("pf-result-v1:{}", "08".repeat(32)),
+            report_digest: format!("pf-report-v1:{}", "09".repeat(32)),
+            findings_digest: format!("pf-findings-v1:{}", "0a".repeat(32)),
+            metrics_digest: format!("pf-metrics-v1:{}", "0b".repeat(32)),
         },
     }
 }
@@ -39,16 +46,19 @@ fn evidence_digest_binds_every_claimed_execution_dimension() {
     let mut variants = Vec::new();
 
     let mut changed = base.clone();
-    changed.dataset.fingerprint_version = FingerprintVersion::V1;
+    changed.contract_source_digest = format!("pf-contract-v1:{}", "08".repeat(32));
     variants.push(changed);
     let mut changed = base.clone();
-    changed.contract_digest = [7; 32];
+    changed.compiled_plan_digest = format!("pf-plan-v1:{}", "09".repeat(32));
+    variants.push(changed);
+    let mut changed = base.clone();
+    changed.schema_digest = format!("pf-schema-v1:{}", "0a".repeat(32));
     variants.push(changed);
     let mut changed = base.clone();
     changed.execution.resources.max_memory_bytes = 64 * 1024 * 1024;
     variants.push(changed);
     let mut changed = base.clone();
-    changed.result.violation_count = 2;
+    changed.result.result_digest = format!("pf-result-v1:{}", "0c".repeat(32));
     variants.push(changed);
     let mut changed = base.clone();
     changed.engine.version = "0.5.1".to_string();
@@ -57,6 +67,42 @@ fn evidence_digest_binds_every_claimed_execution_dimension() {
     for changed in variants {
         assert_ne!(base_digest, changed.digest().unwrap());
     }
+}
+
+#[test]
+fn evidence_semantics_are_validated_before_signing() {
+    fixture().validate().unwrap();
+
+    let mut inconsistent = fixture();
+    inconsistent.result.violation_count = 1;
+    assert!(inconsistent.validate().is_err());
+
+    let mut legacy_fingerprint = fixture();
+    legacy_fingerprint.dataset.fingerprint_version = FingerprintVersion::V1;
+    assert!(legacy_fingerprint.validate().is_err());
+
+    let mut bad_digest = fixture();
+    bad_digest.contract_source_digest = "hello".to_string();
+    assert!(bad_digest.validate().is_err());
+
+    let mut unsupported_operation = fixture();
+    unsupported_operation.execution.operation = "anything".to_string();
+    assert!(unsupported_operation.validate().is_err());
+
+    let mut excessive_output = fixture();
+    excessive_output.result.valid = false;
+    excessive_output.result.violation_count = 1;
+    excessive_output.result.output_records = 2;
+    assert!(excessive_output.validate().is_err());
+}
+
+#[test]
+fn signing_rejects_semantically_invalid_evidence() {
+    let key = SigningKey::from_bytes(&[31; 32]);
+    let mut evidence = fixture();
+    evidence.result.valid = false;
+
+    assert!(sign_v2(evidence, &key).is_err());
 }
 
 #[test]
@@ -101,6 +147,7 @@ fn tampering_breaks_both_the_evidence_hash_and_signature() {
     let verification = verify_v2(&signed, &TrustPolicy::SignatureOnly).unwrap();
     assert!(!verification.report_hash_matches);
     assert!(!verification.signature_valid);
+    assert!(!verification.schema_supported);
     assert!(!verification.valid);
 }
 

@@ -10,15 +10,18 @@ from typing import Any
 import pyarrow as pa
 
 from ._proofframe import (
+    assemble_evidence_unchecked_arrow,
     check_arrow,
+    check_with_evidence_arrow,
     detect_leakage_arrow,
     diff_arrow,
     fingerprint_arrow,
     generate_signing_keypair,
     profile_arrow,
     scan_pii_arrow,
+    sign_evidence_receipt,
     sign_proof_receipt,
-    verify_proof_receipt,
+    verify_proof_receipt_any,
 )
 
 
@@ -41,11 +44,23 @@ def _as_reader(data: Any) -> pa.RecordBatchReader:
     )
 
 
-def profile(data: Any, *, distinct: str = "exact") -> dict[str, Any]:
+def profile(
+    data: Any,
+    *,
+    distinct: str = "none",
+    max_memory: int = 512 * 1024 * 1024,
+    max_temp: int = 4 * 1024 * 1024 * 1024,
+) -> dict[str, Any]:
     """Return a deterministic profile and BLAKE3 fingerprint for tabular data."""
     if distinct not in {"none", "exact"}:
         raise ValueError("distinct must be 'none' or 'exact'")
-    return profile_arrow(_as_reader(data), distinct)
+    if distinct == "exact":
+        warnings.warn(
+            "exact distinct can spill to disk; configure max_memory and max_temp for the workload",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return profile_arrow(_as_reader(data), distinct, max_memory, max_temp)
 
 
 def fingerprint(data: Any, *, version: str = "v1") -> str:
@@ -69,6 +84,30 @@ def check(
     normalized.setdefault("version", "proofframe.contract.v1")
     row_count_hint = data.num_rows if isinstance(data, (pa.Table, pa.RecordBatch)) else None
     return check_arrow(
+        _as_reader(data),
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")),
+        row_count_hint,
+        max_memory,
+        max_temp,
+        max_output_records,
+        max_samples,
+    )
+
+
+def check_with_evidence(
+    data: Any,
+    contract: Mapping[str, Any],
+    *,
+    max_memory: int = 512 * 1024 * 1024,
+    max_temp: int = 4 * 1024 * 1024 * 1024,
+    max_output_records: int = 100_000,
+    max_samples: int = 100,
+) -> dict[str, Any]:
+    """Validate and fingerprint one Arrow stream in a single native execution."""
+    normalized = dict(contract)
+    normalized.setdefault("version", "proofframe.contract.v1")
+    row_count_hint = data.num_rows if isinstance(data, (pa.Table, pa.RecordBatch)) else None
+    return check_with_evidence_arrow(
         _as_reader(data),
         json.dumps(normalized, sort_keys=True, separators=(",", ":")),
         row_count_hint,
@@ -124,11 +163,26 @@ def diff(
     )
 
 
-def scan_pii(data: Any, *, max_findings: int = 100) -> dict[str, Any]:
-    """Detect common PII classes without returning raw values."""
+def scan_pii(
+    data: Any,
+    *,
+    max_findings: int = 100,
+    fingerprint_mode: str = "unlinkable",
+    fingerprint_key: str | None = None,
+    key_id: str | None = None,
+) -> dict[str, Any]:
+    """Detect PII and emit keyed, non-reversible value fingerprints."""
     if max_findings < 0:
         raise ValueError("max_findings must be non-negative")
-    return scan_pii_arrow(_as_reader(data), max_findings)
+    if fingerprint_mode not in {"stable", "unlinkable"}:
+        raise ValueError("fingerprint_mode must be 'stable' or 'unlinkable'")
+    return scan_pii_arrow(
+        _as_reader(data),
+        max_findings,
+        fingerprint_mode,
+        fingerprint_key,
+        key_id,
+    )
 
 
 def detect_leakage(
@@ -150,13 +204,51 @@ def generate_keypair() -> dict[str, str]:
     return generate_signing_keypair()
 
 
-def sign_receipt(report: Mapping[str, Any], *, private_key: str) -> dict[str, Any]:
-    """Create an RFC 8785-canonicalized, Ed25519-signed proof receipt."""
-    payload = json.dumps(report, sort_keys=True, separators=(",", ":"))
-    return sign_proof_receipt(payload, private_key)
+def assemble_evidence_unchecked(
+    data: Any,
+    contract: Mapping[str, Any],
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Assemble evidence from a caller-supplied report without proving execution identity.
+
+    Prefer :func:`check_with_evidence`. This escape hatch verifies available digests but cannot
+    prove that the mutable report and dataset came from the same validation execution.
+    """
+    normalized = dict(contract)
+    normalized.setdefault("version", "proofframe.contract.v1")
+    return assemble_evidence_unchecked_arrow(
+        _as_reader(data),
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")),
+        json.dumps(report, sort_keys=True, separators=(",", ":")),
+    )
 
 
-def verify_receipt(receipt: Mapping[str, Any]) -> dict[str, bool]:
-    """Verify receipt schema, report hash, and Ed25519 signature."""
+def sign_evidence(evidence: Mapping[str, Any], *, private_key: str) -> dict[str, Any]:
+    """Create an Ed25519-signed V2 receipt over a strict evidence envelope."""
+    payload = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    return sign_evidence_receipt(payload, private_key)
+
+
+def sign_receipt(
+    evidence: Mapping[str, Any],
+    *,
+    private_key: str,
+    receipt_version: str = "v2",
+) -> dict[str, Any]:
+    """Sign V2 evidence by default; pass ``receipt_version='v1'`` only for migration."""
+    if receipt_version == "v2":
+        return sign_evidence(evidence, private_key=private_key)
+    if receipt_version == "v1":
+        payload = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        return sign_proof_receipt(payload, private_key)
+    raise ValueError("receipt_version must be 'v1' or 'v2'")
+
+
+def verify_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    expected_public_key: str | None = None,
+) -> dict[str, bool]:
+    """Verify receipt integrity and, when supplied, the expected signer identity."""
     payload = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
-    return verify_proof_receipt(payload)
+    return verify_proof_receipt_any(payload, expected_public_key)

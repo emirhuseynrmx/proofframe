@@ -16,7 +16,15 @@ import pyarrow as pa
 import pyarrow.csv as arrow_csv
 from pyarrow import parquet
 
-from .api import check, diff, fingerprint, profile, sign_receipt, verify_receipt
+from .api import (
+    check,
+    check_with_evidence,
+    diff,
+    fingerprint,
+    profile,
+    sign_receipt,
+    verify_receipt,
+)
 from .errors import ContractError, ProofFrameError, ResourceLimitError
 
 DEFAULT_BATCH_SIZE = 65_536
@@ -144,18 +152,30 @@ def _parser() -> argparse.ArgumentParser:
     _add_stream_options(diff_parser)
     _add_resource_options(diff_parser)
 
-    sign_parser = commands.add_parser("sign", help="sign a JSON report with Ed25519")
+    evidence_parser = commands.add_parser(
+        "evidence", help="check and fingerprint one stream into Evidence V2"
+    )
+    evidence_parser.add_argument("path")
+    evidence_parser.add_argument("--contract", required=True)
+    evidence_parser.add_argument("--output")
+    _add_stream_options(evidence_parser)
+    _add_resource_options(evidence_parser)
+
+    sign_parser = commands.add_parser("sign", help="sign a V2 evidence envelope with Ed25519")
     sign_parser.add_argument("report")
     sign_parser.add_argument("--private-key", required=True)
+    sign_parser.add_argument("--receipt-version", choices=("v1", "v2"), default="v2")
     sign_parser.add_argument("--output")
 
     verify_parser = commands.add_parser("verify", help="verify a signed JSON receipt")
     verify_parser.add_argument("receipt")
+    verify_parser.add_argument("--expected-public-key")
 
     profile_parser = commands.add_parser("profile", help="deprecated 0.4 profiling alias")
     profile_parser.add_argument("path")
-    profile_parser.add_argument("--distinct", choices=("none", "exact"), default="exact")
+    profile_parser.add_argument("--distinct", choices=("none", "exact"), default="none")
     _add_stream_options(profile_parser)
+    _add_resource_options(profile_parser)
 
     validate_parser = commands.add_parser("validate", help="deprecated alias for check")
     _add_check_arguments(validate_parser)
@@ -231,15 +251,32 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             output_format=args.output_format,
         )
         return result, 0
+    if args.command == "evidence":
+        checked = check_with_evidence(
+            _open_reader(args.path, args.batch_size),
+            _load_mapping(args.contract, "contract"),
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+            max_output_records=args.max_output_records,
+            max_samples=args.max_samples,
+        )
+        result = checked["evidence"]
+        if args.output:
+            _write_json_atomic(args.output, result)
+        return result, 0
     if args.command == "sign":
         report = _load_mapping(args.report, "report")
-        result = sign_receipt(report, private_key=args.private_key)
+        result = sign_receipt(
+            report,
+            private_key=args.private_key,
+            receipt_version=args.receipt_version,
+        )
         if args.output:
             _write_json_atomic(args.output, result)
         return result, 0
     if args.command == "verify":
         receipt = _load_mapping(args.receipt, "receipt")
-        result = verify_receipt(receipt)
+        result = verify_receipt(receipt, expected_public_key=args.expected_public_key)
         return result, 0 if result["valid"] else 1
     if args.command == "profile":
         warnings.warn(
@@ -247,7 +284,12 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             DeprecationWarning,
             stacklevel=2,
         )
-        return profile(_open_reader(args.path, args.batch_size), distinct=args.distinct), 0
+        return profile(
+            _open_reader(args.path, args.batch_size),
+            distinct=args.distinct,
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+        ), 0
     if args.command == "validate":
         warnings.warn(
             "The validate command is retained for 0.5 compatibility; use check.",

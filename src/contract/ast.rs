@@ -36,7 +36,7 @@ pub enum NaNPolicyAst {
 pub enum BoundAst {
     /// A JSON number, preserved by `serde_json::Number` without conversion to `f64`.
     Number(serde_json::Number),
-    /// A textual decimal or timestamp literal.
+    /// A decimal string, or signed integer timestamp ticks in the Arrow field's declared unit.
     Text(String),
 }
 

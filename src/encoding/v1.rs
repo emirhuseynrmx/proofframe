@@ -27,6 +27,11 @@ where
 
     for maybe_batch in reader {
         let batch = maybe_batch?;
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during V1 fingerprinting".to_string(),
+            ));
+        }
         for row in 0..batch.num_rows() {
             for (column, encoder) in plan.encoders.iter().enumerate() {
                 encoder.update_v1(

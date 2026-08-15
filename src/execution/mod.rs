@@ -10,8 +10,9 @@ pub use resource::{
 use arrow::record_batch::RecordBatchReader;
 
 use crate::{
-    CompiledContract, ExactState, ExecutionMetrics, FastValidationReport, Finding, KernelKind,
-    ProofFrameError, ValidationState, ValueKind,
+    CompiledContract, ExactState, ExecutionMetrics, FastValidationReport, Finding, Fingerprint,
+    FingerprintOptions, FingerprintVersion, KernelKind, ProofFrameError, ValidationState,
+    ValueKind, encoding::V2FingerprintState,
 };
 
 /// Execution hints that do not alter contract semantics.
@@ -32,14 +33,52 @@ pub fn execute_reader<R>(
 where
     R: RecordBatchReader,
 {
-    let mut validation = ValidationState::new(plan.max_findings());
-    for name in plan.missing_required() {
-        record_lazy(&mut validation, "required", name, None, || {
-            format!("Required column `{name}` is missing")
-        });
-    }
+    execute_reader_inner(reader, plan, options, false).map(|(report, _)| report)
+}
 
+/// Execute validation and compute the V2 dataset fingerprint from the same batch traversal.
+pub fn execute_reader_with_fingerprint<R>(
+    reader: R,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+) -> Result<(FastValidationReport, Fingerprint), ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    let (report, fingerprint) = execute_reader_inner(reader, plan, options, true)?;
+    fingerprint
+        .map(|fingerprint| (report, fingerprint))
+        .ok_or_else(|| {
+            ProofFrameError::InvalidReceipt("V2 fingerprint state was not created".into())
+        })
+}
+
+fn execute_reader_inner<R>(
+    reader: R,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    fingerprint: bool,
+) -> Result<(FastValidationReport, Option<Fingerprint>), ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    let reader_schema = reader.schema();
+    if reader_schema.as_ref() != plan.schema() {
+        return Err(ProofFrameError::SchemaMismatch(
+            "reader schema differs from the schema used to compile the contract".to_string(),
+        ));
+    }
     let resource_root = ResourceAccount::root(options.resources);
+    let mut fingerprint = fingerprint
+        .then(|| {
+            V2FingerprintState::new(
+                reader_schema.as_ref(),
+                &FingerprintOptions::new(FingerprintVersion::V2),
+            )
+        })
+        .transpose()?;
+    let finding_limit = plan.max_findings().min(options.resources.max_samples);
+    let mut validation = ValidationState::new_accounted(finding_limit, resource_root.clone());
     let has_unique = plan.columns().iter().any(|column| column.rules().unique());
     let unique_directory = has_unique.then(tempfile::TempDir::new).transpose()?;
     let mut unique_states = plan
@@ -69,6 +108,14 @@ where
     for maybe_batch in reader {
         options.cancellation.check()?;
         let batch = maybe_batch?;
+        if batch.schema().as_ref() != plan.schema() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed after contract compilation".to_string(),
+            ));
+        }
+        if let Some(state) = fingerprint.as_mut() {
+            state.update(&batch)?;
+        }
         for (plan_index, column) in plan.columns().iter().enumerate() {
             let array = batch.column(column.column_index());
             kernels::scan_column(
@@ -78,6 +125,7 @@ where
                 &mut validation,
                 unique_states[plan_index].as_mut(),
             )?;
+            validation.check_resources()?;
         }
         rows += batch.num_rows() as u64;
     }
@@ -100,12 +148,13 @@ where
                 Some(duplicate.duplicate_row),
                 || "Duplicate value detected".to_string(),
             );
+            validation.check_resources()?;
         }
         validation.violation_count += summary.duplicate_count.saturating_sub(sampled);
     }
 
     let outcome = validation.finish();
-    Ok(FastValidationReport {
+    let report = FastValidationReport {
         valid: outcome.violation_count == 0,
         violation_count: outcome.violation_count,
         truncated: outcome.truncated,
@@ -119,7 +168,11 @@ where
             exact_runs,
             capacity_growth_events: 0,
         },
-    })
+        resources: options.resources,
+        compiled_plan_digest: plan.compiled_plan_digest()?,
+        schema_digest: plan.schema_digest()?,
+    };
+    Ok((report, fingerprint.map(V2FingerprintState::finish)))
 }
 
 fn exact_kind(kernel: &KernelKind) -> ValueKind {
@@ -154,13 +207,14 @@ pub(crate) fn record_lazy(
     row: Option<u64>,
     message: impl FnOnce() -> String,
 ) {
-    validation.violation_count += 1;
     if validation.findings.len() < validation.max_findings {
-        validation.findings.push(Finding {
+        validation.record(Finding {
             rule,
             column: column.to_string(),
             row,
             message: message(),
         });
+    } else {
+        validation.violation_count += 1;
     }
 }

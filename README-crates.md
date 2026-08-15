@@ -42,7 +42,8 @@ assert_eq!(report.valid, report.violation_count == 0);
 
 Compilation resolves column indices, converts exact source bounds to Arrow-native values, compiles
 regular expressions, and selects a kernel once. Unknown fields and rule/type mismatches fail before
-the first batch is consumed.
+the first batch is consumed. Timestamp bounds are signed integer ticks in the Arrow field's unit,
+encoded as JSON numbers or decimal strings.
 
 ## Fingerprint protocol
 
@@ -63,10 +64,16 @@ with the digest.
 `ExecutionOptions` carries memory and temporary-storage limits plus cooperative cancellation. Exact
 uniqueness uses a hierarchical account, spills sorted checksummed runs when necessary, and returns
 peak memory, peak temporary bytes, spill bytes, and run counts. Findings are sampled independently
-from the exact violation count.
+from the exact violation count and capped by both contract `max_findings` and resource `max_samples`.
 
 Keyed diff and leakage APIs expose their own options and share the same fail-closed resource model.
 Partition headers and record lengths are validated before allocation.
+Legacy profile exact-distinct state uses the same spill engine; `profile_reader` defaults to no
+distinct state and callers opt in with `profile_reader_with_resources`.
+
+Evidence V2 carries separate `pf-contract-v1`, `pf-plan-v1`, and `pf-schema-v1` digests. Receipt V2
+signatures should be verified with `TrustPolicy::ExpectedKey` or `TrustStore` when signer identity is
+security-relevant.
 
 ## Compatibility
 

@@ -157,6 +157,11 @@ fn collect_identities<R: RecordBatchReader>(
     for batch in reader {
         cancellation.check()?;
         let batch = batch?;
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during leakage scanning".to_string(),
+            ));
+        }
         for row in 0..batch.num_rows() {
             let mut hasher = blake3::Hasher::new();
             hasher.update(if full_row {

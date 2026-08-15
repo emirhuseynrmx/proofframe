@@ -133,3 +133,10 @@ where
 }
 
 pub(crate) use v1::fingerprint_v1;
+pub(crate) use v2::V2FingerprintState;
+
+pub(crate) fn canonical_schema_digest(
+    schema: &arrow::datatypes::Schema,
+) -> Result<[u8; 32], ProofFrameError> {
+    v2::fingerprint_schema(schema, &BTreeSet::new()).map(|digest| *digest.as_bytes())
+}

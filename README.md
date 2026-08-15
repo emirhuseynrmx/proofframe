@@ -80,6 +80,8 @@ assert report["violation_count"] == 2
 
 `violation_count` is exact even when the `findings` sample is truncated. Missing required columns
 and incompatible rule/type combinations are rejected during compilation, before rows are scanned.
+Timestamp bounds are signed integer ticks in the Arrow field's declared unit, supplied as JSON
+numbers or decimal strings; contract V1 does not parse ISO-8601 timestamp strings.
 
 Pandas, Polars, PyArrow tables, record batches, readers, and Arrow C Stream providers are accepted.
 Inputs that expose a stream stay streaming; the CLI does not construct a full table for CSV or
@@ -98,6 +100,34 @@ Python compatibility default for 0.5; the CLI defaults new work to V2:
 ```bash
 proofframe fingerprint data.parquet --fingerprint-version v2
 ```
+
+`profile()` is a compatibility operation and defaults to `distinct="none"`. Exact cardinality is
+explicit and uses the bounded spill engine:
+
+```python
+profile = pf.profile(table, distinct="exact", max_memory=64 << 20, max_temp=1 << 30)
+```
+
+## Evidence and receipts
+
+```python
+checked = pf.check_with_evidence(table, contract, max_samples=20)
+report = checked["report"]
+evidence = checked["evidence"]
+keys = pf.generate_keypair()
+receipt = pf.sign_evidence(evidence, private_key=keys["private_key"])
+verification = pf.verify_receipt(receipt, expected_public_key=keys["public_key"])
+assert verification["valid"]
+```
+
+`check_with_evidence` validates and fingerprints each Arrow batch in the same native execution.
+Evidence V2 separately binds canonical contract source (`pf-contract-v1`), compiled typed plan
+(`pf-plan-v1`), and Arrow schema (`pf-schema-v1`). `sign_receipt(..., receipt_version="v1")` exists
+only for migration; normal Python and CLI signing defaults to V2.
+
+PII findings use keyed 256-bit fingerprints. The default scan key is random per run and unlinkable.
+For stable correlation, pass a URL-safe base64 32-byte `fingerprint_key` and a non-secret `key_id`;
+the key is never returned or embedded in evidence.
 
 ## Exact diff with bounded output
 
@@ -125,6 +155,9 @@ before allocation.
 proofframe check data.parquet --contract contract.json --max-memory 256MiB --max-temp 2GiB
 proofframe diff old.parquet new.parquet --key order_id --output changes.jsonl
 proofframe fingerprint data.csv --fingerprint-version v2
+proofframe evidence data.parquet --contract contract.json --output evidence.json
+proofframe sign evidence.json --private-key "$PROOFFRAME_PRIVATE_KEY"
+proofframe verify receipt.json --expected-public-key "$PROOFFRAME_PUBLIC_KEY"
 ```
 
 Exit codes are stable:
@@ -145,6 +178,9 @@ file, flush and `fsync`, then an atomic replace.
 `validate()` and `profile()` remain migration shims for the 0.5 line. `validate()` delegates to
 `check()` and no longer creates an implicit profile. New code should call `check()` and
 `fingerprint()` separately.
+
+Release tags are publishable only after CI on that exact commit emits the release-evidence artifact.
+The Rust package path is checked with `cargo publish --dry-run --locked` before registry publishing.
 
 See [the 0.4 to 0.5 migration guide](docs/migration-0.4-to-0.5.md) for API and serialized-contract
 changes. Rust API details are in [README-crates.md](README-crates.md).

@@ -3,7 +3,7 @@ use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 
 use super::{DuplicateSample, ExactSummary, F64Bits, FixedRecord, OwnedValue, ValueKind};
 use crate::{
@@ -16,9 +16,10 @@ const HEADER_BYTES: u64 = 60;
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const VERIFY_BUFFER_BYTES: usize = 4 * 1024;
 const MERGE_BUFFER_BYTES: usize = 256;
+const CHECKSUM_OFFSET: u64 = 28;
 
 pub(super) struct RunMeta {
-    file: NamedTempFile,
+    path: TempPath,
     kind: ValueKind,
     records: u64,
     payload_bytes: u64,
@@ -30,6 +31,10 @@ pub(super) struct RunMeta {
 impl RunMeta {
     pub(super) fn total_bytes(&self) -> u64 {
         HEADER_BYTES + self.payload_bytes
+    }
+
+    fn open(&self) -> Result<File, ProofFrameError> {
+        Ok(File::open(&self.path)?)
     }
 }
 
@@ -198,8 +203,9 @@ fn write_run(
     write_payload(&mut writer)?;
     writer.flush()?;
     writer.get_ref().sync_data()?;
+    drop(writer);
     Ok(RunMeta {
-        file,
+        path: file.into_temp_path(),
         kind: spec.kind,
         records: spec.records,
         payload_bytes: spec.payload_bytes,
@@ -207,6 +213,150 @@ fn write_run(
         checksum: spec.checksum,
         _temp: reservation,
     })
+}
+
+pub(super) fn compact(
+    runs: &[RunMeta],
+    account: &ResourceAccount,
+    directory: &std::path::Path,
+    cancellation: &CancellationToken,
+) -> Result<RunMeta, ProofFrameError> {
+    let first = runs
+        .first()
+        .ok_or_else(|| corrupt("Exact run compaction requires at least one run"))?;
+    if runs.iter().any(|run| run.kind != first.kind) {
+        return Err(corrupt(
+            "Exact run compaction mixed incompatible value kinds",
+        ));
+    }
+    for run in runs {
+        verify_payload(run, cancellation)?;
+    }
+
+    let records = runs.iter().try_fold(0_u64, |total, run| {
+        total
+            .checked_add(run.records)
+            .ok_or_else(|| corrupt("Exact compacted run record count overflowed u64"))
+    })?;
+    let payload_bytes = runs.iter().try_fold(0_u64, |total, run| {
+        total
+            .checked_add(run.payload_bytes)
+            .ok_or_else(|| corrupt("Exact compacted run payload overflowed u64"))
+    })?;
+    let total_bytes = HEADER_BYTES
+        .checked_add(payload_bytes)
+        .ok_or_else(|| corrupt("Exact compacted run size overflowed u64"))?;
+    let max_record_bytes = runs
+        .iter()
+        .map(|run| run.max_record_bytes)
+        .max()
+        .unwrap_or(0);
+    let reservation = account.try_reserve_temp(total_bytes)?;
+    let _merge_memory = account.try_reserve_memory(merge_memory_bytes(runs)?)?;
+    let file = NamedTempFile::new_in(directory)?;
+    let mut writer = BufWriter::new(file.reopen()?);
+    writer.write_all(&MAGIC)?;
+    writer.write_all(&VERSION.to_le_bytes())?;
+    writer.write_all(&[first.kind.tag(), 0])?;
+    writer.write_all(&records.to_le_bytes())?;
+    writer.write_all(&payload_bytes.to_le_bytes())?;
+    writer.write_all(&[0_u8; 32])?;
+
+    let mut cursors = runs
+        .iter()
+        .map(RunCursor::open)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::with_capacity(cursors.len());
+    for (run, cursor) in cursors.iter_mut().enumerate() {
+        if let Some((value, row)) = cursor.next()? {
+            heap.push(Reverse(MergeEntry { value, row, run }));
+        }
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut written_records = 0_u64;
+    let mut written_payload = 0_u64;
+    while let Some(Reverse(entry)) = heap.pop() {
+        if written_records & 0x0fff == 0 {
+            cancellation.check()?;
+        }
+        written_payload = written_payload
+            .checked_add(write_owned_record(
+                &mut writer,
+                &mut hasher,
+                &entry.value,
+                entry.row,
+            )?)
+            .ok_or_else(|| corrupt("Exact compacted run payload overflowed u64"))?;
+        written_records += 1;
+        if let Some((value, row)) = cursors[entry.run].next()? {
+            heap.push(Reverse(MergeEntry {
+                value,
+                row,
+                run: entry.run,
+            }));
+        }
+    }
+    if written_records != records || written_payload != payload_bytes {
+        return Err(corrupt("Exact compacted run length changed during merge"));
+    }
+
+    let checksum = *hasher.finalize().as_bytes();
+    writer.flush()?;
+    writer.seek(SeekFrom::Start(CHECKSUM_OFFSET))?;
+    writer.write_all(&checksum)?;
+    writer.flush()?;
+    writer.get_ref().sync_data()?;
+    drop(writer);
+    Ok(RunMeta {
+        path: file.into_temp_path(),
+        kind: first.kind,
+        records,
+        payload_bytes,
+        max_record_bytes,
+        checksum,
+        _temp: reservation,
+    })
+}
+
+fn write_owned_record(
+    writer: &mut impl Write,
+    hasher: &mut blake3::Hasher,
+    value: &OwnedValue,
+    row: u64,
+) -> Result<u64, ProofFrameError> {
+    match value {
+        OwnedValue::I64(value) => write_fixed_parts(writer, hasher, &value.to_le_bytes(), row),
+        OwnedValue::U64(value) | OwnedValue::F64(value) => {
+            write_fixed_parts(writer, hasher, &value.to_le_bytes(), row)
+        }
+        OwnedValue::Bytes(value) => {
+            let length = u32::try_from(value.len())
+                .map_err(|_| corrupt("Exact compacted byte value exceeds u32"))?;
+            let length_bytes = length.to_le_bytes();
+            let row_bytes = row.to_le_bytes();
+            writer.write_all(&length_bytes)?;
+            writer.write_all(value)?;
+            writer.write_all(&row_bytes)?;
+            hasher.update(&length_bytes);
+            hasher.update(value);
+            hasher.update(&row_bytes);
+            Ok(12 + u64::from(length))
+        }
+    }
+}
+
+fn write_fixed_parts(
+    writer: &mut impl Write,
+    hasher: &mut blake3::Hasher,
+    value: &[u8; 8],
+    row: u64,
+) -> Result<u64, ProofFrameError> {
+    let row = row.to_le_bytes();
+    writer.write_all(value)?;
+    writer.write_all(&row)?;
+    hasher.update(value);
+    hasher.update(&row);
+    Ok(16)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -293,6 +443,8 @@ pub(super) fn merge(
         metrics: super::ExactMetrics {
             runs: runs.len() as u64,
             spill_bytes: runs.iter().map(RunMeta::total_bytes).sum(),
+            compactions: 0,
+            max_merge_fan_in: runs.len() as u64,
             peak_memory_bytes: account.peak_memory_used(),
             peak_temp_bytes: account.peak_temp_used(),
         },
@@ -465,7 +617,7 @@ struct RunCursor {
 
 impl RunCursor {
     fn open(run: &RunMeta) -> Result<Self, ProofFrameError> {
-        let mut file = run.file.reopen()?;
+        let mut file = run.open()?;
         file.seek(SeekFrom::Start(0))?;
         if file.metadata()?.len() != HEADER_BYTES + run.payload_bytes {
             return Err(corrupt("Exact run length does not match its header"));
@@ -568,7 +720,7 @@ impl RunCursor {
 }
 
 fn verify_payload(run: &RunMeta, cancellation: &CancellationToken) -> Result<(), ProofFrameError> {
-    let mut file = run.file.reopen()?;
+    let mut file = run.open()?;
     if file.metadata()?.len() != HEADER_BYTES + run.payload_bytes {
         return Err(corrupt("Exact run length does not match its header"));
     }

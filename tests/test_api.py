@@ -1,3 +1,4 @@
+import base64
 import json
 import subprocess
 import sys
@@ -14,8 +15,10 @@ def users(ids=(1, 2, 3), emails=("a@example.com", "b@example.com", "c@example.co
 
 
 def test_profile_is_deterministic():
-    first = proofframe.profile(users())
-    second = proofframe.profile(users())
+    with pytest.warns(RuntimeWarning, match="exact distinct"):
+        first = proofframe.profile(users(), distinct="exact")
+    with pytest.warns(RuntimeWarning, match="exact distinct"):
+        second = proofframe.profile(users(), distinct="exact")
     assert first["rows"] == 3
     assert first["fingerprint"].startswith("pf-fp-v1:")
     assert first["fingerprint"] == second["fingerprint"]
@@ -50,13 +53,25 @@ def test_fingerprint_is_invariant_to_batch_segmentation():
 
 
 def test_profile_can_skip_exact_distinct_counts():
-    report = proofframe.profile(users(), distinct="none")
+    report = proofframe.profile(users())
 
     assert report["fingerprint"] == proofframe.fingerprint(users())
     assert [column["distinct_count"] for column in report["columns"]] == [None, None, None]
 
     with pytest.raises(ValueError, match="distinct"):
         proofframe.profile(users(), distinct="approximate")
+
+
+def test_exact_profile_accepts_hard_resource_limits():
+    with pytest.warns(RuntimeWarning, match="exact distinct"):
+        report = proofframe.profile(
+            pa.table({"id": list(range(20_000))}),
+            distinct="exact",
+            max_memory=64 * 1024,
+            max_temp=32 * 1024 * 1024,
+        )
+
+    assert report["columns"][0]["distinct_count"] == 20_000
 
 
 def test_real_polars_dataframe_uses_arrow_path():
@@ -183,8 +198,44 @@ def test_pii_findings_are_redacted():
     report = proofframe.scan_pii(pa.table({"contact": [raw_email, "not pii"]}))
     assert report["detected"] is True
     assert report["counts_by_kind"] == {"email": 1}
-    assert report["findings"][0]["value_fingerprint"]
+    assert report["findings"][0]["value_fingerprint"].startswith("pf-pii-v2:")
+    assert len(report["findings"][0]["value_fingerprint"]) == len("pf-pii-v2:") + 64
     assert raw_email not in json.dumps(report)
+    assert report["fingerprint_mode"] == "unlinkable"
+
+
+def test_pii_fingerprints_support_unlinkable_and_caller_keyed_modes():
+    source = pa.table({"contact": ["person@example.com"]})
+    first = proofframe.scan_pii(source)
+    second = proofframe.scan_pii(source)
+    assert first["findings"][0]["value_fingerprint"] != second["findings"][0]["value_fingerprint"]
+
+    key = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
+    stable_a = proofframe.scan_pii(
+        source,
+        fingerprint_mode="stable",
+        fingerprint_key=key,
+        key_id="customer-pii-key-2026",
+    )
+    stable_b = proofframe.scan_pii(
+        source,
+        fingerprint_mode="stable",
+        fingerprint_key=key,
+        key_id="customer-pii-key-2026",
+    )
+    assert stable_a["findings"][0]["value_fingerprint"] == stable_b["findings"][0][
+        "value_fingerprint"
+    ]
+    assert stable_a["key_id"] == "customer-pii-key-2026"
+    assert key not in json.dumps(stable_a)
+
+    with pytest.raises(ValueError, match="32 bytes"):
+        proofframe.scan_pii(
+            source,
+            fingerprint_mode="stable",
+            fingerprint_key="too-short",
+            key_id="broken",
+        )
 
 
 def test_numeric_pii_matches_are_low_confidence_without_context():
@@ -239,15 +290,80 @@ def test_fast_unique_handles_signed_and_large_integer_domains():
     ]
 
 
-def test_signed_receipt_detects_tampering():
+def test_v2_evidence_receipt_detects_tampering():
     keys = proofframe.generate_keypair()
-    receipt = proofframe.sign_receipt({"valid": True, "rows": 3}, private_key=keys["private_key"])
-    assert receipt["public_key"] == keys["public_key"]
-    assert proofframe.verify_receipt(receipt)["valid"] is True
-    receipt["report"]["rows"] = 4
-    verification = proofframe.verify_receipt(receipt)
+    contract = {
+        "version": "proofframe.contract.v1",
+        "columns": {"id": {"required": True}},
+    }
+    evidence = proofframe.check_with_evidence(users(), contract)["evidence"]
+    assert evidence["schema"] == "proofframe.evidence.v2"
+    assert evidence["contract_source_digest"].startswith("pf-contract-v1:")
+    assert evidence["compiled_plan_digest"].startswith("pf-plan-v1:")
+    assert evidence["schema_digest"].startswith("pf-schema-v1:")
+
+    receipt = proofframe.sign_evidence(evidence, private_key=keys["private_key"])
+    assert receipt["unsigned"]["public_key"] == keys["public_key"]
+    assert (
+        proofframe.verify_receipt(receipt, expected_public_key=keys["public_key"])["valid"]
+        is True
+    )
+    receipt["unsigned"]["evidence"]["result"]["violation_count"] = 4
+    verification = proofframe.verify_receipt(receipt, expected_public_key=keys["public_key"])
     assert verification["valid"] is False
     assert verification["report_hash_matches"] is False
+
+
+def test_check_with_evidence_binds_result_and_fingerprint_in_one_reader_pass():
+    contract = {
+        "version": "proofframe.contract.v1",
+        "columns": {"id": {"unique": True}},
+    }
+    source = pa.RecordBatchReader.from_batches(
+        pa.schema([("id", pa.int64())]),
+        [pa.record_batch({"id": [1, 1]})],
+    )
+
+    checked = proofframe.check_with_evidence(source, contract)
+
+    assert checked["report"]["valid"] is False
+    assert checked["report"]["violation_count"] == 1
+    assert checked["evidence"]["dataset"]["rows"] == 2
+    assert checked["evidence"]["result"]["valid"] is False
+    assert checked["evidence"]["result"]["violation_count"] == 1
+    assert checked["evidence"]["result"]["output_records"] == 1
+    assert checked["evidence"]["result"]["truncated"] is False
+    assert checked["evidence"]["result"]["result_digest"].startswith("pf-result-v1:")
+    assert checked["evidence"]["result"]["report_digest"].startswith("pf-report-v1:")
+    assert checked["evidence"]["result"]["findings_digest"].startswith("pf-findings-v1:")
+    assert checked["evidence"]["result"]["metrics_digest"].startswith("pf-metrics-v1:")
+
+
+def test_v1_receipt_requires_explicit_opt_in():
+    keys = proofframe.generate_keypair()
+    receipt = proofframe.sign_receipt(
+        {"valid": True, "rows": 3},
+        private_key=keys["private_key"],
+        receipt_version="v1",
+    )
+    assert receipt["schema"] == "proofframe.receipt.v1"
+    assert proofframe.verify_receipt(receipt)["legacy"] is True
+
+
+def test_evidence_builder_rejects_a_report_from_another_contract():
+    source = users()
+    checked_contract = {
+        "version": "proofframe.contract.v1",
+        "columns": {"id": {"required": True}},
+    }
+    different_contract = {
+        "version": "proofframe.contract.v1",
+        "columns": {"score": {"min": 0.5}},
+    }
+    report = proofframe.check(source, checked_contract)
+
+    with pytest.raises(proofframe.ReceiptError, match="digest does not match"):
+        proofframe.assemble_evidence_unchecked(source, different_contract, report)
 
 
 def test_cli_profiles_csv(tmp_path):

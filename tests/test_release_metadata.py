@@ -16,3 +16,16 @@ def test_rust_and_python_versions_match_release() -> None:
 def test_release_tag_must_match_exact_pep440_and_semver_version(tag: str) -> None:
     with pytest.raises(ValueError):
         verify_versions(ROOT, tag)
+
+
+def test_publish_is_gated_by_exact_tag_commit_ci_evidence() -> None:
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    publish = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+
+    assert "cargo publish --dry-run --locked" in ci
+    assert "release-evidence-${{ github.sha }}" in ci
+    assert "uses: ./.github/workflows/publish.yml" in ci
+    assert "workflow_call:" in publish
+    assert "release-evidence-${{ inputs.sha }}" in publish
+    assert "ref: ${{ inputs.sha }}" in publish
+    assert "ref: ${{ needs.gate.outputs.sha }}" in publish

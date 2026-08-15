@@ -50,6 +50,31 @@ fn fixed_width_state_spills_and_finds_cross_run_duplicates_exactly() {
 }
 
 #[test]
+fn exact_runs_are_compacted_with_bounded_merge_fan_in() {
+    let directory = TempDir::new().unwrap();
+    let account = ResourceAccount::root(limits(16 * 1024, 64 * 1024 * 1024, 0));
+    let mut state = ExactState::new(
+        ValueKind::I64,
+        account,
+        directory.path().to_path_buf(),
+        Some(50_001),
+    )
+    .unwrap();
+    for row in 0..50_000_u64 {
+        state.insert(ValueRef::I64(row as i64), row).unwrap();
+    }
+    state.insert(ValueRef::I64(17), 50_000).unwrap();
+
+    let summary = state.finish().unwrap();
+
+    assert_eq!(summary.distinct_count, 50_000);
+    assert_eq!(summary.duplicate_count, 1);
+    assert!(summary.metrics.compactions > 0);
+    assert!(summary.metrics.max_merge_fan_in <= 32);
+    assert!(summary.metrics.runs <= 32);
+}
+
+#[test]
 fn float_and_byte_equality_use_full_canonical_values() {
     let directory = TempDir::new().unwrap();
     let account = ResourceAccount::root(limits(4 * 1024, 1024 * 1024, 8));

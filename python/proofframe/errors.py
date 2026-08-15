@@ -3,7 +3,10 @@
 from ._proofframe import (
     ContractError,
     CorruptDataError,
+    ProofFrameArrowError,
+    ProofFrameCorruptDataError,
     ProofFrameError,
+    ProofFrameIoError,
     ReceiptError,
     ResourceLimitError,
     SchemaError,
@@ -12,7 +15,10 @@ from ._proofframe import (
 __all__ = [
     "ContractError",
     "CorruptDataError",
+    "ProofFrameArrowError",
+    "ProofFrameCorruptDataError",
     "ProofFrameError",
+    "ProofFrameIoError",
     "ReceiptError",
     "ResourceLimitError",
     "SchemaError",

@@ -183,3 +183,12 @@ def test_native_fingerprint_releases_the_gil():
 
     assert finished > started
     assert after > before, "Python worker made no progress during native fingerprinting"
+
+
+def test_native_io_arrow_and_corruption_errors_are_distinct_classes():
+    assert issubclass(proofframe.ProofFrameIoError, proofframe.ProofFrameError)
+    assert issubclass(proofframe.ProofFrameArrowError, proofframe.ProofFrameError)
+    assert issubclass(proofframe.ProofFrameCorruptDataError, proofframe.ProofFrameError)
+    assert proofframe.CorruptDataError is proofframe.ProofFrameCorruptDataError
+    assert proofframe.ProofFrameIoError is not proofframe.ProofFrameArrowError
+    assert proofframe.ProofFrameArrowError is not proofframe.ProofFrameCorruptDataError

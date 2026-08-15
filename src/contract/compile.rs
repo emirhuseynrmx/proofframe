@@ -211,21 +211,24 @@ impl ColumnPlan {
 /// Contract execution IR compiled in Arrow schema order.
 #[derive(Debug, Clone)]
 pub struct CompiledContract {
+    schema: Schema,
     columns: Vec<ColumnPlan>,
-    missing_required: Vec<String>,
     max_findings: usize,
 }
 
 impl CompiledContract {
     /// Resolve and type-check a syntax tree before any record batch is scanned.
     pub fn compile(contract: &ContractAst, schema: &Schema) -> Result<Self, ProofFrameError> {
-        let mut missing_required = Vec::new();
         for (name, rules) in &contract.columns {
             if schema.index_of(name).is_ok() {
                 continue;
             }
             if rules.required {
-                missing_required.push(name.clone());
+                return Err(ProofFrameError::contract(
+                    ErrorCode::MissingColumn,
+                    format!("Required contract column `{name}` is absent from the Arrow schema"),
+                    Some(column_path(name)),
+                ));
             } else if has_value_rules(rules) {
                 return Err(ProofFrameError::contract(
                     ErrorCode::MissingColumn,
@@ -254,8 +257,8 @@ impl CompiledContract {
         }
 
         Ok(Self {
+            schema: schema.clone(),
             columns,
-            missing_required,
             max_findings: contract.max_findings,
         })
     }
@@ -266,13 +269,160 @@ impl CompiledContract {
     }
 
     #[must_use]
-    pub fn missing_required(&self) -> &[String] {
-        &self.missing_required
+    pub const fn schema(&self) -> &Schema {
+        &self.schema
     }
 
     #[must_use]
     pub const fn max_findings(&self) -> usize {
         self.max_findings
+    }
+
+    /// Domain-separated digest of the Arrow schema used during compilation.
+    pub fn schema_digest(&self) -> Result<String, ProofFrameError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"proofframe:schema:v1\0");
+        hasher.update(&crate::encoding::canonical_schema_digest(&self.schema)?);
+        Ok(tagged_digest("pf-schema-v1:", hasher.finalize()))
+    }
+
+    /// Domain-separated digest of the schema-resolved execution plan.
+    pub fn compiled_plan_digest(&self) -> Result<String, ProofFrameError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"proofframe:compiled-plan:v1\0");
+        hasher.update(&crate::encoding::canonical_schema_digest(&self.schema)?);
+        hasher.update(&(self.max_findings as u64).to_le_bytes());
+        for column in &self.columns {
+            hasher.update(&(column.column_index as u64).to_le_bytes());
+            hash_part(&mut hasher, column.field.name().as_bytes());
+            hash_kernel(&mut hasher, &column.kernel);
+            let rules = &column.rules;
+            hasher.update(&[
+                u8::from(rules.required),
+                u8::from(rules.not_null),
+                u8::from(rules.unique),
+                u8::from(rules.validate_nan),
+                match rules.nan {
+                    NaNPolicy::Reject => 0,
+                    NaNPolicy::Allow => 1,
+                },
+            ]);
+            hash_optional_bound(&mut hasher, rules.min.as_ref());
+            hash_optional_bound(&mut hasher, rules.max.as_ref());
+            hash_optional_part(
+                &mut hasher,
+                rules
+                    .pattern
+                    .as_ref()
+                    .map(|value| value.as_str().as_bytes()),
+            );
+            if let Some(allowed) = rules.allowed.as_deref() {
+                hasher.update(&[1]);
+                let mut values = allowed.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+                values.sort_unstable();
+                hasher.update(&(values.len() as u64).to_le_bytes());
+                for value in values {
+                    hash_part(&mut hasher, value.as_bytes());
+                }
+            } else {
+                hasher.update(&[0]);
+            }
+        }
+        Ok(tagged_digest("pf-plan-v1:", hasher.finalize()))
+    }
+}
+
+fn tagged_digest(prefix: &str, digest: blake3::Hash) -> String {
+    let hex = digest.to_hex();
+    let mut output = String::with_capacity(prefix.len() + hex.len());
+    output.push_str(prefix);
+    output.push_str(hex.as_str());
+    output
+}
+
+fn hash_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn hash_optional_part(hasher: &mut blake3::Hasher, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(bytes) => {
+            hasher.update(&[1]);
+            hash_part(hasher, bytes);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_kernel(hasher: &mut blake3::Hasher, kernel: &KernelKind) {
+    let tag = match kernel {
+        KernelKind::Boolean => 0,
+        KernelKind::I8 => 1,
+        KernelKind::I16 => 2,
+        KernelKind::I32 => 3,
+        KernelKind::I64 => 4,
+        KernelKind::U8 => 5,
+        KernelKind::U16 => 6,
+        KernelKind::U32 => 7,
+        KernelKind::U64 => 8,
+        KernelKind::F32 => 9,
+        KernelKind::F64 => 10,
+        KernelKind::Date32 => 11,
+        KernelKind::Date64 => 12,
+        KernelKind::Decimal128 { .. } => 13,
+        KernelKind::Timestamp(_) => 14,
+        KernelKind::Utf8 => 15,
+        KernelKind::LargeUtf8 => 16,
+        KernelKind::Binary => 17,
+        KernelKind::LargeBinary => 18,
+        KernelKind::Nested => 19,
+        KernelKind::NullOnly => 20,
+    };
+    hasher.update(&[tag]);
+    match kernel {
+        KernelKind::Decimal128 { precision, scale } => {
+            hasher.update(&[*precision, *scale as u8]);
+        }
+        KernelKind::Timestamp(unit) => hash_part(hasher, format!("{unit:?}").as_bytes()),
+        _ => {}
+    }
+}
+
+fn hash_optional_bound(hasher: &mut blake3::Hasher, bound: Option<&TypedBound>) {
+    let Some(bound) = bound else {
+        hasher.update(&[0]);
+        return;
+    };
+    hasher.update(&[1]);
+    match bound {
+        TypedBound::I64(value) => {
+            hasher.update(&[0]);
+            hasher.update(&value.to_le_bytes());
+        }
+        TypedBound::U64(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_le_bytes());
+        }
+        TypedBound::F32(value) => {
+            hasher.update(&[2]);
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        TypedBound::F64(value) => {
+            hasher.update(&[3]);
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        TypedBound::Decimal128 { value, scale } => {
+            hasher.update(&[4, *scale as u8]);
+            hasher.update(&value.to_le_bytes());
+        }
+        TypedBound::Timestamp { value, unit } => {
+            hasher.update(&[5]);
+            hasher.update(&value.to_le_bytes());
+            hash_part(hasher, format!("{unit:?}").as_bytes());
+        }
     }
 }
 

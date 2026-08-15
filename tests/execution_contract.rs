@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::error::ArrowError;
+use arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use proofframe::{
     CancellationToken, ColumnContract, CompiledContract, Contract, ContractAst, ErrorCode,
-    ExecutionOptions, execute_reader, validate_fast_reader,
+    ExecutionOptions, ResourceLimits, execute_reader, validate_fast_reader,
 };
 
 use support::reader_from_batches;
@@ -96,27 +97,57 @@ fn compiled_kernels_preserve_rule_and_row_semantics() {
 }
 
 #[test]
-fn missing_required_columns_are_reported_before_scanning() {
-    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+fn resource_sample_limit_bounds_retained_validation_findings() {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![Arc::new(Int64Array::from(vec![1_i64, 2])) as ArrayRef],
+        vec![Arc::new(Int64Array::from(vec![None, None, None, None, None])) as ArrayRef],
     )
     .unwrap();
-    let plan = compile(r#"{"missing":{"required":true}}"#, schema.as_ref());
-
-    let report = execute_reader(
-        reader_from_batches(vec![batch]),
-        &plan,
-        &ExecutionOptions::default(),
+    let ast = ContractAst::from_json(
+        r#"{"version":"proofframe.contract.v1","columns":{"id":{"not_null":true}},"max_findings":1000000}"#,
     )
     .unwrap();
+    let plan = CompiledContract::compile(&ast, schema.as_ref()).unwrap();
+    let options = ExecutionOptions {
+        resources: ResourceLimits {
+            max_samples: 3,
+            ..ResourceLimits::default()
+        },
+        ..ExecutionOptions::default()
+    };
 
-    assert!(!report.valid);
-    assert_eq!(report.rows, 2);
-    assert_eq!(report.findings[0].rule, "required");
-    assert_eq!(report.findings[0].column, "missing");
-    assert_eq!(report.findings[0].row, None);
+    let report = execute_reader(reader_from_batches(vec![batch]), &plan, &options).unwrap();
+
+    assert_eq!(report.violation_count, 5);
+    assert_eq!(report.findings.len(), 3);
+    assert!(report.truncated);
+    assert!(report.metrics.peak_memory_bytes > 0);
+}
+
+#[test]
+fn schema_changing_reader_fails_closed_without_indexing_the_batch() {
+    let advertised = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let changed = Arc::new(Schema::new(vec![Field::new(
+        "other",
+        DataType::Utf8,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        changed,
+        vec![Arc::new(StringArray::from(vec!["not-an-integer"])) as ArrayRef],
+    )
+    .unwrap();
+    let reader = RecordBatchIterator::new(
+        vec![Ok::<RecordBatch, ArrowError>(batch)].into_iter(),
+        advertised.clone(),
+    );
+    let plan = compile(r#"{"id":{"not_null":true}}"#, advertised.as_ref());
+
+    let error = execute_reader(reader, &plan, &ExecutionOptions::default())
+        .expect_err("a stream batch must match the schema used to compile the plan");
+
+    assert_eq!(error.code(), ErrorCode::SchemaMismatch);
 }
 
 #[test]

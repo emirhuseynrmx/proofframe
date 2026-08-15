@@ -10,10 +10,11 @@ trust. The compatibility shims are intended to make the transition observable, n
 | `validate(data, contract)` | `check(data, contract)` | `validate` delegates to `check` and emits `DeprecationWarning` |
 | `include_profile=True/False` | Separate `check` and `profile`/`fingerprint` calls | The argument is accepted but no implicit profile is built |
 | Permissive contract mapping | `proofframe.contract.v1` | `check` inserts the version when absent; unknown fields are rejected |
-| Generic native exception | Typed `ContractError`, `SchemaError`, `ResourceLimitError`, `CorruptDataError`, `ReceiptError` | All derive from `ProofFrameError` and carry stable `PF_*` codes |
+| Generic native exception | Typed `ContractError`, `SchemaError`, `ResourceLimitError`, `ProofFrameIoError`, `ProofFrameArrowError`, `ProofFrameCorruptDataError`, `ReceiptError` | `CorruptDataError` remains an alias; all carry stable `PF_*` codes |
 | `fingerprint(data)` | `fingerprint(data, version="v1"|"v2")` | Python defaults to V1 for this release; select V2 explicitly for new stored proofs |
 | Unbounded result assumptions | `max_memory`, `max_temp`, `max_output_records`, `max_samples` | Limits fail closed; exact counts are independent from samples |
-| `profile` as part of validation | `profile` as an explicit compatibility operation | Prefer the cheapest operation that answers the question |
+| `profile` as part of validation | `profile(..., distinct="none")` compatibility operation | Exact distinct is opt-in, spill-backed, and resource-limited |
+| V1 report signing | `check_with_evidence`, `sign_evidence`, `verify_receipt(expected_public_key=...)` | Check and fingerprint now share one execution; V1 requires `receipt_version="v1"` |
 
 Do not compare V1 and V2 digests. Persist the fingerprint version next to every stored digest.
 
@@ -60,7 +61,7 @@ rather than comparing a serialized report byte-for-byte across versions.
 Evidence V2 binds these identities in one strict envelope:
 
 - dataset fingerprint version, digest, and row count;
-- contract digest;
+- canonical source contract, compiled plan, and Arrow schema digests;
 - engine name and version;
 - operation and resource limits;
 - validity, exact violation count, and output count.

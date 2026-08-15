@@ -13,6 +13,8 @@ keywords = ["arrow", "data-quality", "dataframe", "validation", "fingerprint"]
 categories = ["data-structures", "development-tools", "science"]
 include = [
   "/src/**",
+  "/tests/*.rs",
+  "/tests/support/**",
   "/docs/**",
   "/examples/**",
   "/Cargo.toml",

@@ -134,7 +134,7 @@ where
         &account,
     )?;
     let limits = PartitionLimits {
-        max_record_bytes: MAX_PARTITION_RECORD_BYTES,
+        max_record_bytes: MAX_PARTITION_RECORD_BYTES.min(options.resources.max_memory_bytes),
         max_columns: u32::try_from(column_names.len())
             .map_err(|_| ProofFrameError::CorruptData("Diff schema exceeds u32 columns".into()))?,
     };
@@ -199,6 +199,11 @@ fn partition_rows<R: RecordBatchReader>(
     for batch in reader {
         cancellation.check()?;
         let batch = batch?;
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during diff partitioning".to_string(),
+            ));
+        }
         for row in 0..batch.num_rows() {
             let (key, display_key) = diff_key(&batch, &key_indexes, row)?;
             let values = batch
@@ -221,6 +226,8 @@ fn partition_rows<R: RecordBatchReader>(
                     values,
                     hash,
                 },
+                MAX_PARTITION_RECORD_BYTES.min(account.limits().max_memory_bytes),
+                |bytes| account.try_reserve_memory(bytes),
                 |bytes| temp.reserve_additional(bytes),
             )?;
             row_count = row_count
@@ -266,10 +273,10 @@ fn process_partition(
     let mut seen_after = BTreeSet::new();
     let mut reader = PartitionReader::open(after_path, schema_digest, limits)?;
     while let Some((key, entry)) = reader.next()? {
+        memory.reserve_additional(key.len() as u64 + 64)?;
         if !seen_after.insert(key.clone()) {
             return Err(ProofFrameError::DuplicateKey(entry.display_key));
         }
-        memory.reserve_additional(key.len() as u64 + 64)?;
         if let Some(before_entry) = before_rows.get(&key) {
             if before_entry.hash != entry.hash {
                 let needs_columns = accumulator.needs_changed_detail();
@@ -314,6 +321,10 @@ struct Accumulator {
     sink: Option<AtomicSink>,
     output_limit: u64,
     output_records: u64,
+    sample_account: ResourceAccount,
+    added_memory: Vec<MemoryReservation>,
+    removed_memory: Vec<MemoryReservation>,
+    changed_memory: Vec<MemoryReservation>,
 }
 
 impl Accumulator {
@@ -341,6 +352,10 @@ impl Accumulator {
                 .transpose()?,
             output_limit: account.limits().max_output_records,
             output_records: 0,
+            sample_account: account.clone(),
+            added_memory: Vec::with_capacity(sample_limit.min(1024)),
+            removed_memory: Vec::with_capacity(sample_limit.min(1024)),
+            changed_memory: Vec::with_capacity(sample_limit.min(1024)),
         })
     }
 
@@ -351,14 +366,36 @@ impl Accumulator {
     fn added(&mut self, key: String, temp: &mut TempLedger) -> Result<(), ProofFrameError> {
         self.added_count += 1;
         self.emit("added", &key, None, temp)?;
-        retain_string(&mut self.added, key, self.sample_limit);
+        if should_retain_string(&self.added, &key, self.sample_limit) {
+            let reservation = self
+                .sample_account
+                .try_reserve_memory(estimated_string_sample_bytes(&key))?;
+            retain_string(
+                &mut self.added,
+                &mut self.added_memory,
+                key,
+                reservation,
+                self.sample_limit,
+            );
+        }
         Ok(())
     }
 
     fn removed(&mut self, key: String, temp: &mut TempLedger) -> Result<(), ProofFrameError> {
         self.removed_count += 1;
         self.emit("removed", &key, None, temp)?;
-        retain_string(&mut self.removed, key, self.sample_limit);
+        if should_retain_string(&self.removed, &key, self.sample_limit) {
+            let reservation = self
+                .sample_account
+                .try_reserve_memory(estimated_string_sample_bytes(&key))?;
+            retain_string(
+                &mut self.removed,
+                &mut self.removed_memory,
+                key,
+                reservation,
+                self.sample_limit,
+            );
+        }
         Ok(())
     }
 
@@ -370,11 +407,19 @@ impl Accumulator {
     ) -> Result<(), ProofFrameError> {
         self.changed_count += 1;
         self.emit("changed", &key, Some(&columns), temp)?;
-        retain_changed(
-            &mut self.changed,
-            ChangedRow { key, columns },
-            self.sample_limit,
-        );
+        if should_retain_changed(&self.changed, &key, self.sample_limit) {
+            let value = ChangedRow { key, columns };
+            let reservation = self
+                .sample_account
+                .try_reserve_memory(estimated_changed_sample_bytes(&value))?;
+            retain_changed(
+                &mut self.changed,
+                &mut self.changed_memory,
+                value,
+                reservation,
+                self.sample_limit,
+            );
+        }
         Ok(())
     }
 
@@ -429,30 +474,67 @@ impl Accumulator {
     }
 }
 
-fn retain_string(samples: &mut Vec<String>, value: String, limit: usize) {
-    if limit == 0 {
-        return;
-    }
+fn retain_string(
+    samples: &mut Vec<String>,
+    reservations: &mut Vec<MemoryReservation>,
+    value: String,
+    reservation: MemoryReservation,
+    limit: usize,
+) {
     let position = samples
         .binary_search(&value)
         .unwrap_or_else(|position| position);
     samples.insert(position, value);
+    reservations.insert(position, reservation);
     if samples.len() > limit {
         samples.pop();
+        reservations.pop();
     }
 }
 
-fn retain_changed(samples: &mut Vec<ChangedRow>, value: ChangedRow, limit: usize) {
-    if limit == 0 {
-        return;
-    }
+fn retain_changed(
+    samples: &mut Vec<ChangedRow>,
+    reservations: &mut Vec<MemoryReservation>,
+    value: ChangedRow,
+    reservation: MemoryReservation,
+    limit: usize,
+) {
     let position = samples
         .binary_search_by(|item| item.key.cmp(&value.key))
         .unwrap_or_else(|position| position);
     samples.insert(position, value);
+    reservations.insert(position, reservation);
     if samples.len() > limit {
         samples.pop();
+        reservations.pop();
     }
+}
+
+fn should_retain_string(samples: &[String], value: &str, limit: usize) -> bool {
+    limit != 0
+        && (samples.len() < limit || samples.last().is_some_and(|last| value < last.as_str()))
+}
+
+fn should_retain_changed(samples: &[ChangedRow], key: &str, limit: usize) -> bool {
+    limit != 0
+        && (samples.len() < limit || samples.last().is_some_and(|last| key < last.key.as_str()))
+}
+
+fn estimated_string_sample_bytes(value: &String) -> u64 {
+    (std::mem::size_of::<String>() + std::mem::size_of::<MemoryReservation>() + value.capacity())
+        as u64
+}
+
+fn estimated_changed_sample_bytes(value: &ChangedRow) -> u64 {
+    let columns = value
+        .columns
+        .iter()
+        .map(|column| std::mem::size_of::<String>() + column.capacity())
+        .sum::<usize>();
+    (std::mem::size_of::<ChangedRow>()
+        + std::mem::size_of::<MemoryReservation>()
+        + value.key.capacity()
+        + columns) as u64
 }
 
 fn schema_signature(schema: &Schema) -> Vec<ColumnSchema> {

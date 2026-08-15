@@ -1,0 +1,86 @@
+import io
+import tarfile
+import zipfile
+
+import pytest
+
+from scripts.source_artifacts import ArchiveHygieneError, verify_source_archive
+
+
+def _zip(entries: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return output.getvalue()
+
+
+def _sdist(entries: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, content in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("builder,suffix", [(_zip, ".zip"), (_sdist, ".tar.gz")])
+def test_source_archive_accepts_one_clean_release_root(tmp_path, builder, suffix):
+    artifact = tmp_path / f"proofframe-0.5.0{suffix}"
+    artifact.write_bytes(
+        builder(
+            {
+                "proofframe-0.5.0/Cargo.toml": b"[package]\nname='proofframe'\n",
+                "proofframe-0.5.0/pyproject.toml": b"[project]\nname='proofframe'\n",
+                "proofframe-0.5.0/src/lib.rs": b"pub fn check() {}\n",
+                "proofframe-0.5.0/python/proofframe/__init__.py": b"__version__='0.5.0'\n",
+            }
+        )
+    )
+
+    verify_source_archive(artifact, expected_root="proofframe-0.5.0")
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "proofframe-0.5.0/.coverage",
+        "proofframe-0.5.0/python/proofframe/_proofframe.pyd",
+        "proofframe-0.5.0/target/release/proofframe.pdb",
+        "proofframe-0.5.0/__pycache__/api.pyc",
+    ],
+)
+def test_source_archive_rejects_generated_or_native_files(tmp_path, bad_name):
+    artifact = tmp_path / "proofframe-0.5.0.zip"
+    artifact.write_bytes(
+        _zip(
+            {
+                "proofframe-0.5.0/Cargo.toml": b"ok",
+                "proofframe-0.5.0/pyproject.toml": b"ok",
+                "proofframe-0.5.0/src/lib.rs": b"ok",
+                "proofframe-0.5.0/python/proofframe/__init__.py": b"ok",
+                bad_name: b"generated",
+            }
+        )
+    )
+
+    with pytest.raises(ArchiveHygieneError):
+        verify_source_archive(artifact, expected_root="proofframe-0.5.0")
+
+
+def test_source_archive_rejects_local_absolute_path_leaks(tmp_path):
+    artifact = tmp_path / "proofframe-0.5.0.zip"
+    artifact.write_bytes(
+        _zip(
+            {
+                "proofframe-0.5.0/Cargo.toml": b"ok",
+                "proofframe-0.5.0/pyproject.toml": b"ok",
+                "proofframe-0.5.0/src/lib.rs": b'const BUILD: &str = "C:\\\\Users\\\\emirh\\\\repo";',
+                "proofframe-0.5.0/python/proofframe/__init__.py": b"ok",
+            }
+        )
+    )
+
+    with pytest.raises(ArchiveHygieneError, match="local absolute path"):
+        verify_source_archive(artifact, expected_root="proofframe-0.5.0")

@@ -3,7 +3,7 @@ import json
 import pyarrow as pa
 import pyarrow.csv as arrow_csv
 import pytest
-from proofframe import cli
+from proofframe import cli, generate_keypair
 from pyarrow import parquet
 
 
@@ -123,3 +123,48 @@ def test_atomic_json_writer_never_publishes_a_partial_target(tmp_path):
         cli._write_json_atomic(output, {"invalid": object()})
     assert not output.exists()
     assert not list(tmp_path.glob(".receipt.json.*.tmp"))
+
+
+def test_cli_evidence_sign_and_verify_defaults_to_v2(tmp_path, capsys):
+    data_path = tmp_path / "data.parquet"
+    contract_path = tmp_path / "contract.json"
+    evidence_path = tmp_path / "evidence.json"
+    receipt_path = tmp_path / "receipt.json"
+    parquet.write_table(pa.table({"id": [1, 2, 3]}), data_path)
+    _contract(contract_path, {"id": {"required": True}})
+
+    cli.main(
+        [
+            "evidence",
+            str(data_path),
+            "--contract",
+            str(contract_path),
+            "--output",
+            str(evidence_path),
+        ]
+    )
+    evidence = json.loads(capsys.readouterr().out)
+    assert evidence["schema"] == "proofframe.evidence.v2"
+
+    keys = generate_keypair()
+    cli.main(
+        [
+            "sign",
+            str(evidence_path),
+            "--private-key",
+            keys["private_key"],
+            "--output",
+            str(receipt_path),
+        ]
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["schema"] == "proofframe.receipt.v2"
+    cli.main(
+        [
+            "verify",
+            str(receipt_path),
+            "--expected-public-key",
+            keys["public_key"],
+        ]
+    )
+    assert json.loads(capsys.readouterr().out)["valid"] is True

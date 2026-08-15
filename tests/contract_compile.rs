@@ -160,15 +160,52 @@ fn invalid_regex_and_reversed_bounds_fail_during_compilation() {
 }
 
 #[test]
-fn required_missing_columns_become_deterministic_schema_findings() {
+fn required_missing_columns_fail_compilation_deterministically() {
     let schema = Schema::empty();
     let ast = contract_with_columns(r#"{"z":{"required":true},"a":{"required":true}}"#);
 
-    let plan = CompiledContract::compile(&ast, &schema)
-        .expect("missing required columns are validation findings, not parser failures");
+    let error = CompiledContract::compile(&ast, &schema)
+        .expect_err("a missing required column must fail before a row is scanned");
 
-    assert_eq!(plan.missing_required(), ["a", "z"]);
-    assert!(plan.columns().is_empty());
+    assert_eq!(error.code(), ErrorCode::MissingColumn);
+    assert_eq!(error.path(), Some("$.columns.a"));
+}
+
+#[test]
+fn source_plan_and_schema_digests_are_separate_versioned_contracts() {
+    let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+    let source =
+        r#"{"version":"proofframe.contract.v1","columns":{"id":{"min":0}},"max_findings":8}"#;
+    let ast = ContractAst::from_json(source).unwrap();
+    let plan = CompiledContract::compile(&ast, &schema).unwrap();
+
+    let source_digest = proofframe::evidence::contract_source_digest(source).unwrap();
+    assert!(source_digest.starts_with("pf-contract-v1:"));
+    assert!(
+        plan.compiled_plan_digest()
+            .unwrap()
+            .starts_with("pf-plan-v1:")
+    );
+    assert!(plan.schema_digest().unwrap().starts_with("pf-schema-v1:"));
+    assert_ne!(
+        source_digest[15..],
+        plan.compiled_plan_digest().unwrap()[11..]
+    );
+    assert_ne!(
+        plan.compiled_plan_digest().unwrap()[11..],
+        plan.schema_digest().unwrap()[13..]
+    );
+}
+
+#[test]
+fn contract_source_digest_preserves_integer_literals_outside_f64_precision() {
+    let source =
+        r#"{"version":"proofframe.contract.v1","columns":{"id":{"max":18446744073709551615}}}"#;
+
+    let digest = proofframe::evidence::contract_source_digest(source)
+        .expect("valid exact integer contracts must have a canonical digest");
+
+    assert!(digest.starts_with("pf-contract-v1:"));
 }
 
 #[test]

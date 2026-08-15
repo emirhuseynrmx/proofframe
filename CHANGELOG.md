@@ -1,5 +1,15 @@
 # Changelog
 
+- Added `check_with_evidence`, which validates and fingerprints the same Arrow batches in one
+  execution; the caller-supplied report assembler is now explicitly named
+  `assemble_evidence_unchecked`.
+- Evidence V2 now binds canonical result, full report, findings, and metrics digests and validates
+  semantic consistency before signing.
+- Exact spill runs now use bounded 32-way hierarchical compaction and close write handles before
+  merge fan-in.
+- Release source ZIP and sdist artifacts are checked for generated binaries, local paths, unsafe
+  members, and incomplete source trees.
+
 ## 0.5.0
 
 - Added a strict, versioned contract AST and schema compiler. Unknown fields, out-of-range bounds,
@@ -10,10 +20,17 @@
   batch-invariance, differential, and allocation tests.
 - Hardened exact keyed diff with versioned partition headers, schema binding, checksums, pre-allocation
   length caps, bounded samples, atomic full-output sinks, and corruption tests.
-- Added Evidence V2 and Receipt V2. Dataset, contract, engine, resource limits, and result are bound;
-  cryptographic validity and signer trust are reported separately.
-- Changed PII and leakage evidence to return only domain-separated logical fingerprints with bounded
-  exact intersection state.
+- Added Evidence V2 and Receipt V2 as the default Python/CLI signing path. Dataset, canonical
+  contract source, compiled plan, Arrow schema, engine, resource limits, and result are bound;
+  cryptographic validity and signer trust are reported separately. V1 signing is explicit opt-in.
+- Changed PII evidence to full 256-bit keyed BLAKE3 with unlinkable per-run and caller-keyed stable
+  modes. Secrets are never serialized; reports expose only mode and key ID.
+- Routed exact profile distinct state through the bounded spill operator and changed the profile
+  default to `distinct="none"`.
+- Capped validation findings by both contract and resource sample limits, charged retained finding
+  memory, rejected schema-changing Arrow batches, and made missing required columns compile errors.
+- Split Python I/O, Arrow, and persisted-corruption exceptions while preserving stable error codes.
+- Gated publishing on exact-tag CI evidence and added `cargo publish --dry-run --locked`.
 - Replaced the Python JSON-string round trip with native dictionaries, stable typed exceptions, Arrow
   C Stream preference, and GIL-detached native scans.
 - Made CSV/Parquet CLI paths streaming, added atomic output, and fixed exit codes 0–4.

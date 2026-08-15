@@ -12,6 +12,7 @@ const MAX_FIXED_RECORDS_PER_SEGMENT: usize = 1 << 25;
 const DEFAULT_BYTE_RECORDS_PER_SEGMENT: usize = 16_384;
 const MAX_BYTE_RECORDS_PER_SEGMENT: usize = 1 << 24;
 const ASSUMED_BYTES_PER_VALUE: usize = 32;
+const MAX_MERGE_FAN_IN: usize = 32;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ValueKind {
@@ -62,6 +63,8 @@ pub struct DuplicateSample {
 pub struct ExactMetrics {
     pub runs: u64,
     pub spill_bytes: u64,
+    pub compactions: u64,
+    pub max_merge_fan_in: u64,
     pub peak_memory_bytes: u64,
     pub peak_temp_bytes: u64,
 }
@@ -98,6 +101,8 @@ pub struct ExactState {
     account: ResourceAccount,
     directory: PathBuf,
     cancellation: CancellationToken,
+    compactions: u64,
+    max_merge_fan_in: u64,
     _sample_memory: MemoryReservation,
 }
 
@@ -158,48 +163,46 @@ impl ExactState {
             account,
             directory,
             cancellation,
+            compactions: 0,
+            max_merge_fan_in: 0,
             _sample_memory: sample_memory,
         })
     }
 
     pub fn insert(&mut self, value: ValueRef<'_>, row: u64) -> Result<(), ProofFrameError> {
+        let needs_spill = match (&self.storage, value) {
+            (Storage::I64(store), ValueRef::I64(_)) => fixed_store_is_full(store),
+            (Storage::U64(store), ValueRef::U64(_)) => fixed_store_is_full(store),
+            (Storage::F64(store), ValueRef::F64(_)) => fixed_store_is_full(store),
+            (Storage::Bytes(store), ValueRef::Bytes(value)) => byte_store_is_full(store, value),
+            _ => {
+                return Err(ProofFrameError::CorruptData(
+                    "Value kind does not match the exact-state plan".into(),
+                ));
+            }
+        };
+        if needs_spill {
+            self.spill_current()?;
+            self.compact_runs_if_needed()?;
+        }
         match (&mut self.storage, value) {
-            (Storage::I64(store), ValueRef::I64(value)) => insert_fixed(
-                store,
-                value,
-                row,
-                &self.account,
-                &self.directory,
-                &mut self.runs,
-            ),
-            (Storage::U64(store), ValueRef::U64(value)) => insert_fixed(
-                store,
-                value,
-                row,
-                &self.account,
-                &self.directory,
-                &mut self.runs,
-            ),
-            (Storage::F64(store), ValueRef::F64(value)) => insert_fixed(
-                store,
-                F64Bits(value),
-                row,
-                &self.account,
-                &self.directory,
-                &mut self.runs,
-            ),
-            (Storage::Bytes(store), ValueRef::Bytes(value)) => insert_bytes(
-                store,
-                value,
-                row,
-                &self.account,
-                &self.directory,
-                &mut self.runs,
-            ),
+            (Storage::I64(store), ValueRef::I64(value)) => {
+                insert_fixed(store, value, row, &self.account)
+            }
+            (Storage::U64(store), ValueRef::U64(value)) => {
+                insert_fixed(store, value, row, &self.account)
+            }
+            (Storage::F64(store), ValueRef::F64(value)) => {
+                insert_fixed(store, F64Bits(value), row, &self.account)
+            }
+            (Storage::Bytes(store), ValueRef::Bytes(value)) => {
+                insert_bytes(store, value, row, &self.account)
+            }
             _ => Err(ProofFrameError::CorruptData(
                 "Value kind does not match the exact-state plan".into(),
             )),
-        }
+        }?;
+        self.compact_runs_if_needed()
     }
 
     pub fn finish(mut self) -> Result<ExactSummary, ProofFrameError> {
@@ -233,11 +236,19 @@ impl ExactState {
             };
         }
         self.seal()?;
-        run::merge(&self.runs, &self.account, &self.cancellation)
+        let mut summary = run::merge(&self.runs, &self.account, &self.cancellation)?;
+        summary.metrics.compactions = self.compactions;
+        summary.metrics.max_merge_fan_in = self.max_merge_fan_in.max(self.runs.len() as u64);
+        Ok(summary)
     }
 
     fn seal(&mut self) -> Result<(), ProofFrameError> {
         self.cancellation.check()?;
+        self.spill_current()?;
+        self.compact_runs_if_needed()
+    }
+
+    fn spill_current(&mut self) -> Result<(), ProofFrameError> {
         match &mut self.storage {
             Storage::I64(store) => {
                 spill_fixed(store, &self.account, &self.directory, &mut self.runs)?
@@ -251,6 +262,21 @@ impl ExactState {
             Storage::Bytes(store) => {
                 spill_bytes(store, &self.account, &self.directory, &mut self.runs)?
             }
+        }
+        Ok(())
+    }
+
+    fn compact_runs_if_needed(&mut self) -> Result<(), ProofFrameError> {
+        while self.runs.len() > MAX_MERGE_FAN_IN {
+            self.cancellation.check()?;
+            let inputs = self.runs.drain(..MAX_MERGE_FAN_IN).collect::<Vec<_>>();
+            let compacted =
+                run::compact(&inputs, &self.account, &self.directory, &self.cancellation)?;
+            self.max_merge_fan_in = self
+                .max_merge_fan_in
+                .max(u64::try_from(inputs.len()).unwrap_or(u64::MAX));
+            self.compactions = self.compactions.saturating_add(1);
+            self.runs.insert(0, compacted);
         }
         Ok(())
     }
@@ -312,26 +338,21 @@ fn insert_fixed<T: FixedValue>(
     value: T,
     row: u64,
     account: &ResourceAccount,
-    directory: &std::path::Path,
-    runs: &mut Vec<RunMeta>,
 ) -> Result<(), ProofFrameError> {
-    if store
-        .segment
-        .as_ref()
-        .is_some_and(|segment| segment.records.len() == segment.capacity)
-    {
-        spill_fixed(store, account, directory, runs)?;
-    }
     if store.segment.is_none() {
         store.segment = Some(allocate_fixed_segment(store.desired_capacity, account)?);
     }
+    let segment = store.segment.as_mut().expect("segment was allocated");
+    debug_assert!(segment.records.len() < segment.capacity);
+    segment.records.push(FixedRecord { value, row });
+    Ok(())
+}
+
+fn fixed_store_is_full<T>(store: &FixedStore<T>) -> bool {
     store
         .segment
-        .as_mut()
-        .expect("segment was allocated")
-        .records
-        .push(FixedRecord { value, row });
-    Ok(())
+        .as_ref()
+        .is_some_and(|segment| segment.records.len() == segment.capacity)
 }
 
 fn allocate_fixed_segment<T>(
@@ -534,8 +555,6 @@ fn insert_bytes(
     value: &[u8],
     row: u64,
     account: &ResourceAccount,
-    directory: &std::path::Path,
-    runs: &mut Vec<RunMeta>,
 ) -> Result<(), ProofFrameError> {
     let value_length = u32::try_from(value.len()).map_err(|_| ProofFrameError::ResourceLimit {
         resource: "single exact value",
@@ -543,13 +562,6 @@ fn insert_bytes(
         used: 0,
         limit: u64::from(u32::MAX),
     })?;
-    let full = store.segment.as_ref().is_some_and(|segment| {
-        segment.records.len() == segment.record_capacity
-            || value.len() > segment.byte_capacity - segment.arena.len()
-    });
-    if full {
-        spill_bytes(store, account, directory, runs)?;
-    }
     if store.segment.is_none() {
         store.segment = Some(allocate_byte_segment(
             store.desired_records,
@@ -558,6 +570,8 @@ fn insert_bytes(
         )?);
     }
     let segment = store.segment.as_mut().expect("segment was allocated");
+    debug_assert!(segment.records.len() < segment.record_capacity);
+    debug_assert!(value.len() <= segment.byte_capacity - segment.arena.len());
     let offset = u32::try_from(segment.arena.len()).expect("byte capacity fits u32");
     segment.arena.extend_from_slice(value);
     segment.records.push(ByteIndex {
@@ -566,6 +580,13 @@ fn insert_bytes(
         row,
     });
     Ok(())
+}
+
+fn byte_store_is_full(store: &ByteStore, value: &[u8]) -> bool {
+    store.segment.as_ref().is_some_and(|segment| {
+        segment.records.len() == segment.record_capacity
+            || value.len() > segment.byte_capacity - segment.arena.len()
+    })
 }
 
 fn allocate_byte_segment(

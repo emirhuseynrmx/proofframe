@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use arrow::record_batch::RecordBatchReader;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 use super::plan::EncodingPlan;
 use super::scratch::Scratch;
@@ -16,52 +16,84 @@ where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
-    let plan = EncodingPlan::for_schema(schema.as_ref())?;
-    let schema_digest = fingerprint_schema(schema.as_ref(), options.metadata_keys())?;
-    let mut columns = Vec::with_capacity(plan.encoders.len());
-    for column in 0..plan.encoders.len() {
-        let mut state = blake3::Hasher::new();
-        state.update(b"pf-fp-v2-column\0");
-        state.update(&(column as u64).to_le_bytes());
-        columns.push(state);
-    }
-
-    let mut rows = 0_u64;
-    let mut scratch = Scratch::default();
+    let mut state = V2FingerprintState::new(schema.as_ref(), options)?;
     for maybe_batch in reader {
         let batch = maybe_batch?;
-        for (column, encoder) in plan.encoders.iter().enumerate() {
+        state.update(&batch)?;
+    }
+    Ok(state.finish())
+}
+
+pub(crate) struct V2FingerprintState {
+    schema: Schema,
+    schema_digest: blake3::Hash,
+    plan: EncodingPlan,
+    columns: Vec<blake3::Hasher>,
+    rows: u64,
+    scratch: Scratch,
+}
+
+impl V2FingerprintState {
+    pub(crate) fn new(
+        schema: &Schema,
+        options: &FingerprintOptions,
+    ) -> Result<Self, ProofFrameError> {
+        let plan = EncodingPlan::for_schema(schema)?;
+        let schema_digest = fingerprint_schema(schema, options.metadata_keys())?;
+        let mut columns = Vec::with_capacity(plan.encoders.len());
+        for column in 0..plan.encoders.len() {
+            let mut state = blake3::Hasher::new();
+            state.update(b"pf-fp-v2-column\0");
+            state.update(&(column as u64).to_le_bytes());
+            columns.push(state);
+        }
+        Ok(Self {
+            schema: schema.clone(),
+            schema_digest,
+            plan,
+            columns,
+            rows: 0,
+            scratch: Scratch::default(),
+        })
+    }
+
+    pub(crate) fn update(&mut self, batch: &RecordBatch) -> Result<(), ProofFrameError> {
+        if batch.schema().as_ref() != &self.schema {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during V2 fingerprinting".to_string(),
+            ));
+        }
+        for (column, encoder) in self.plan.encoders.iter().enumerate() {
             let array = batch.column(column);
             for row in 0..batch.num_rows() {
                 encoder.update_v2(
-                    &mut columns[column],
+                    &mut self.columns[column],
                     array.as_ref(),
                     row,
-                    &mut scratch.bytes,
+                    &mut self.scratch.bytes,
                 )?;
             }
         }
-        rows += batch.num_rows() as u64;
+        self.rows = self.rows.saturating_add(batch.num_rows() as u64);
+        Ok(())
     }
 
-    let mut root = blake3::Hasher::new();
-    root.update(b"pf-fp-v2\0");
-    root.update(schema_digest.as_bytes());
-    root.update(&rows.to_le_bytes());
-    root.update(&(columns.len() as u64).to_le_bytes());
-    for (column, state) in columns.into_iter().enumerate() {
-        root.update(&(column as u64).to_le_bytes());
-        root.update(state.finalize().as_bytes());
+    pub(crate) fn finish(self) -> Fingerprint {
+        let mut root = blake3::Hasher::new();
+        root.update(b"pf-fp-v2\0");
+        root.update(self.schema_digest.as_bytes());
+        root.update(&self.rows.to_le_bytes());
+        root.update(&(self.columns.len() as u64).to_le_bytes());
+        for (column, state) in self.columns.into_iter().enumerate() {
+            root.update(&(column as u64).to_le_bytes());
+            root.update(state.finalize().as_bytes());
+        }
+        let digest = root.finalize();
+        Fingerprint::new(FingerprintVersion::V2, *digest.as_bytes(), self.rows)
     }
-    let digest = root.finalize();
-    Ok(Fingerprint::new(
-        FingerprintVersion::V2,
-        *digest.as_bytes(),
-        rows,
-    ))
 }
 
-fn fingerprint_schema(
+pub(super) fn fingerprint_schema(
     schema: &Schema,
     metadata_keys: &BTreeSet<String>,
 ) -> Result<blake3::Hash, ProofFrameError> {

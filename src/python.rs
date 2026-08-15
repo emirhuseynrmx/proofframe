@@ -12,18 +12,26 @@ use pyo3::types::{PyDict, PyList, PyModule};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::evidence::{
+    DatasetEvidence, EngineEvidence, EvidenceSchema, EvidenceV2, ExecutionEvidence, ResultEvidence,
+    contract_source_digest, validation_findings_digest, validation_metrics_digest,
+    validation_report_digest, validation_result_digest,
+};
 use crate::{
     CompiledContract, ContractAst, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
-    ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions, ProofFrameError,
-    ResourceLimits, detect_leakage_with_options, diff_readers_with_options, execute_reader,
-    fingerprint_reader_with_options, profile_reader_with_distinct, scan_pii_reader,
+    ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions,
+    PiiFingerprintOptions, ProofFrameError, ResourceLimits, detect_leakage_with_options,
+    diff_readers_with_options, execute_reader, execute_reader_with_fingerprint,
+    fingerprint_reader_with_options, profile_reader_with_resources, scan_pii_reader_with_options,
 };
 
 create_exception!(proofframe, ProofFrameException, PyValueError);
 create_exception!(proofframe, ContractError, ProofFrameException);
 create_exception!(proofframe, SchemaError, ProofFrameException);
 create_exception!(proofframe, ResourceLimitError, ProofFrameException);
-create_exception!(proofframe, CorruptDataError, ProofFrameException);
+create_exception!(proofframe, ProofFrameCorruptDataError, ProofFrameException);
+create_exception!(proofframe, ProofFrameIoError, ProofFrameException);
+create_exception!(proofframe, ProofFrameArrowError, ProofFrameException);
 create_exception!(proofframe, ReceiptError, ProofFrameException);
 
 const DEFAULT_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
@@ -32,14 +40,27 @@ const DEFAULT_OUTPUT_RECORDS: u64 = 100_000;
 const DEFAULT_SAMPLES: usize = 100;
 
 #[pyfunction]
-#[pyo3(signature = (source, distinct="exact"))]
+#[pyo3(signature = (
+    source,
+    distinct="none",
+    max_memory_bytes=DEFAULT_MEMORY_BYTES,
+    max_temp_bytes=DEFAULT_TEMP_BYTES
+))]
 fn profile_arrow(
     py: Python<'_>,
     source: PyArrowType<ArrowArrayStreamReader>,
     distinct: &str,
+    max_memory_bytes: u64,
+    max_temp_bytes: u64,
 ) -> PyResult<Py<PyAny>> {
     let distinct = DistinctMode::from_name(distinct).map_err(|error| map_error(py, error))?;
-    let result = py.detach(move || profile_reader_with_distinct(source.0, distinct));
+    let resources = limits(
+        max_memory_bytes,
+        max_temp_bytes,
+        DEFAULT_OUTPUT_RECORDS,
+        DEFAULT_SAMPLES,
+    );
+    let result = py.detach(move || profile_reader_with_resources(source.0, distinct, resources));
     result
         .map_err(|error| map_error(py, error))
         .and_then(|report| serialize_to_python(py, &report))
@@ -94,6 +115,7 @@ fn check_arrow(
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
         let schema = source.0.schema();
+        let contract_source_digest = contract_source_digest(&contract_json)?;
         let ast = ContractAst::from_json(&contract_json)?;
         let plan = CompiledContract::compile(&ast, schema.as_ref())?;
         let options = ExecutionOptions {
@@ -106,11 +128,172 @@ fn check_arrow(
             ),
             cancellation: crate::CancellationToken::new(),
         };
-        execute_reader(source.0, &plan, &options)
+        execute_reader(source.0, &plan, &options).map(|report| (report, contract_source_digest))
     });
     result
         .map_err(|error| map_error(py, error))
-        .and_then(|report| serialize_to_python(py, &report))
+        .and_then(|(report, source_digest)| {
+            serialize_check_report_to_python(py, &report, source_digest)
+        })
+}
+
+#[pyfunction]
+fn assemble_evidence_unchecked_arrow(
+    py: Python<'_>,
+    source: PyArrowType<ArrowArrayStreamReader>,
+    contract_json: String,
+    report_json: String,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || {
+        let schema = source.0.schema();
+        let ast = ContractAst::from_json(&contract_json)?;
+        let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+        let source_digest = contract_source_digest(&contract_json)?;
+        let compiled_plan_digest = plan.compiled_plan_digest()?;
+        let schema_digest = plan.schema_digest()?;
+        let fingerprint = fingerprint_reader_with_options(
+            source.0,
+            &FingerprintOptions::new(FingerprintVersion::V2),
+        )?;
+        let report: Value = serde_json::from_str(&report_json)?;
+        let report_rows = report_u64(&report, "rows")?;
+        if report_rows != fingerprint.rows() {
+            return Err(ProofFrameError::InvalidReceipt(format!(
+                "Evidence data has {} rows but the validation report claims {report_rows}",
+                fingerprint.rows()
+            )));
+        }
+        let resources: ResourceLimits =
+            serde_json::from_value(report.get("resources").cloned().ok_or_else(|| {
+                ProofFrameError::InvalidReceipt(
+                    "Validation report is missing `resources`".to_string(),
+                )
+            })?)?;
+        let output_records = report
+            .get("findings")
+            .and_then(Value::as_array)
+            .map_or(0, |findings| findings.len() as u64);
+        require_report_digest(&report, "contract_source_digest", &source_digest)?;
+        require_report_digest(&report, "compiled_plan_digest", &compiled_plan_digest)?;
+        require_report_digest(&report, "schema_digest", &schema_digest)?;
+        let evidence = EvidenceV2 {
+            schema: EvidenceSchema::V2,
+            dataset: DatasetEvidence {
+                fingerprint_version: FingerprintVersion::V2,
+                fingerprint_digest: *fingerprint.digest(),
+                rows: fingerprint.rows(),
+            },
+            contract_source_digest: source_digest,
+            compiled_plan_digest,
+            schema_digest,
+            engine: EngineEvidence {
+                name: "proofframe".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            execution: ExecutionEvidence {
+                operation: "check".to_string(),
+                resources,
+            },
+            result: ResultEvidence {
+                valid: report_bool(&report, "valid")?,
+                violation_count: report_u64(&report, "violation_count")?,
+                output_records,
+                truncated: report_bool(&report, "truncated")?,
+                result_digest: validation_result_digest(&report)?,
+                report_digest: validation_report_digest(&report)?,
+                findings_digest: validation_findings_digest(&report)?,
+                metrics_digest: validation_metrics_digest(&report)?,
+            },
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|evidence| serialize_to_python(py, &evidence))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source,
+    contract_json,
+    row_count_hint=None,
+    max_memory_bytes=DEFAULT_MEMORY_BYTES,
+    max_temp_bytes=DEFAULT_TEMP_BYTES,
+    max_output_records=DEFAULT_OUTPUT_RECORDS,
+    max_samples=DEFAULT_SAMPLES
+))]
+#[allow(clippy::too_many_arguments)]
+fn check_with_evidence_arrow(
+    py: Python<'_>,
+    source: PyArrowType<ArrowArrayStreamReader>,
+    contract_json: String,
+    row_count_hint: Option<u64>,
+    max_memory_bytes: u64,
+    max_temp_bytes: u64,
+    max_output_records: u64,
+    max_samples: usize,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || {
+        let schema = source.0.schema();
+        let source_digest = contract_source_digest(&contract_json)?;
+        let ast = ContractAst::from_json(&contract_json)?;
+        let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+        let options = ExecutionOptions {
+            row_count_hint,
+            resources: limits(
+                max_memory_bytes,
+                max_temp_bytes,
+                max_output_records,
+                max_samples,
+            ),
+            cancellation: crate::CancellationToken::new(),
+        };
+        let (report, fingerprint) = execute_reader_with_fingerprint(source.0, &plan, &options)?;
+        let mut report_value = serde_json::to_value(&report)?;
+        let report_object = report_value.as_object_mut().ok_or_else(|| {
+            ProofFrameError::InvalidReceipt("Validation report is not a JSON object".into())
+        })?;
+        report_object.insert(
+            "contract_source_digest".to_string(),
+            Value::String(source_digest.clone()),
+        );
+        let output_records = report.findings.len() as u64;
+        let evidence = EvidenceV2 {
+            schema: EvidenceSchema::V2,
+            dataset: DatasetEvidence {
+                fingerprint_version: FingerprintVersion::V2,
+                fingerprint_digest: *fingerprint.digest(),
+                rows: fingerprint.rows(),
+            },
+            contract_source_digest: source_digest,
+            compiled_plan_digest: report.compiled_plan_digest.clone(),
+            schema_digest: report.schema_digest.clone(),
+            engine: EngineEvidence {
+                name: "proofframe".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            execution: ExecutionEvidence {
+                operation: "check".to_string(),
+                resources: report.resources,
+            },
+            result: ResultEvidence {
+                valid: report.valid,
+                violation_count: report.violation_count,
+                output_records,
+                truncated: report.truncated,
+                result_digest: validation_result_digest(&report_value)?,
+                report_digest: validation_report_digest(&report_value)?,
+                findings_digest: validation_findings_digest(&report_value)?,
+                metrics_digest: validation_metrics_digest(&report_value)?,
+            },
+        };
+        evidence.validate()?;
+        Ok(serde_json::json!({"report": report_value, "evidence": evidence}))
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|value| value_to_python(py, value))
 }
 
 #[pyfunction]
@@ -237,13 +420,62 @@ fn diff_arrow(
 }
 
 #[pyfunction]
-#[pyo3(signature = (source, max_findings=100))]
+#[pyo3(signature = (
+    source,
+    max_findings=100,
+    fingerprint_mode="unlinkable",
+    fingerprint_key=None,
+    key_id=None
+))]
 fn scan_pii_arrow(
     py: Python<'_>,
     source: PyArrowType<ArrowArrayStreamReader>,
     max_findings: usize,
+    fingerprint_mode: &str,
+    fingerprint_key: Option<String>,
+    key_id: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    let result = py.detach(move || scan_pii_reader(source.0, max_findings));
+    let fingerprint = match fingerprint_mode {
+        "unlinkable" => {
+            if fingerprint_key.is_some() || key_id.is_some() {
+                return Err(map_error(
+                    py,
+                    ProofFrameError::InvalidContract(
+                        "unlinkable PII mode does not accept fingerprint_key or key_id".to_string(),
+                    ),
+                ));
+            }
+            PiiFingerprintOptions::unlinkable().map_err(|error| map_error(py, error))?
+        }
+        "stable" => {
+            let key = fingerprint_key.ok_or_else(|| {
+                map_error(
+                    py,
+                    ProofFrameError::InvalidContract(
+                        "stable PII mode requires a 32-byte fingerprint_key".to_string(),
+                    ),
+                )
+            })?;
+            let key_id = key_id.ok_or_else(|| {
+                map_error(
+                    py,
+                    ProofFrameError::InvalidContract("stable PII mode requires key_id".to_string()),
+                )
+            })?;
+            PiiFingerprintOptions::stable_base64(&key, key_id)
+                .map_err(|error| map_error(py, error))?
+        }
+        other => {
+            return Err(map_error(
+                py,
+                ProofFrameError::InvalidContract(format!(
+                    "Unsupported PII fingerprint_mode `{other}`; expected stable or unlinkable"
+                )),
+            ));
+        }
+    };
+    let result =
+        py.detach(move || scan_pii_reader_with_options(source.0, max_findings, &fingerprint));
     result
         .map_err(|error| map_error(py, error))
         .and_then(|report| serialize_to_python(py, &report))
@@ -302,11 +534,71 @@ fn sign_proof_receipt(
 }
 
 #[pyfunction]
+fn sign_evidence_receipt(
+    py: Python<'_>,
+    evidence_json: String,
+    private_key: String,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || crate::receipt::sign_v2_json(&evidence_json, &private_key));
+    let json = result.map_err(|error| map_error(py, error))?;
+    json_text_to_python(py, &json)
+}
+
+#[pyfunction]
 fn verify_proof_receipt(py: Python<'_>, receipt_json: String) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || crate::receipt::verify_json(&receipt_json));
     result
         .map_err(|error| map_error(py, error))
         .and_then(|verification| serialize_to_python(py, &verification))
+}
+
+#[pyfunction]
+#[pyo3(signature = (receipt_json, expected_public_key=None))]
+fn verify_proof_receipt_any(
+    py: Python<'_>,
+    receipt_json: String,
+    expected_public_key: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || {
+        crate::receipt::verify_json_with_expected_key(&receipt_json, expected_public_key.as_deref())
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|verification| serialize_to_python(py, &verification))
+}
+
+fn report_u64(report: &Value, field: &str) -> Result<u64, ProofFrameError> {
+    report.get(field).and_then(Value::as_u64).ok_or_else(|| {
+        ProofFrameError::InvalidReceipt(format!(
+            "Validation report field `{field}` must be an unsigned integer"
+        ))
+    })
+}
+
+fn report_bool(report: &Value, field: &str) -> Result<bool, ProofFrameError> {
+    report.get(field).and_then(Value::as_bool).ok_or_else(|| {
+        ProofFrameError::InvalidReceipt(format!(
+            "Validation report field `{field}` must be a boolean"
+        ))
+    })
+}
+
+fn require_report_digest(
+    report: &Value,
+    field: &str,
+    expected: &str,
+) -> Result<(), ProofFrameError> {
+    let observed = report.get(field).and_then(Value::as_str).ok_or_else(|| {
+        ProofFrameError::InvalidReceipt(format!(
+            "Validation report field `{field}` must be a digest string"
+        ))
+    })?;
+    if observed != expected {
+        return Err(ProofFrameError::InvalidReceipt(format!(
+            "Validation report `{field}` digest does not match the supplied data contract"
+        )));
+    }
+    Ok(())
 }
 
 fn limits(memory: u64, temp: u64, output: u64, samples: usize) -> ResourceLimits {
@@ -327,6 +619,23 @@ fn json_text_to_python(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
 fn serialize_to_python<T: Serialize>(py: Python<'_>, value: &T) -> PyResult<Py<PyAny>> {
     let value =
         serde_json::to_value(value).map_err(|error| map_error(py, ProofFrameError::Json(error)))?;
+    value_to_python(py, value)
+}
+
+fn serialize_check_report_to_python<T: Serialize>(
+    py: Python<'_>,
+    report: &T,
+    contract_source_digest: String,
+) -> PyResult<Py<PyAny>> {
+    let mut value = serde_json::to_value(report)
+        .map_err(|error| map_error(py, ProofFrameError::Json(error)))?;
+    value
+        .as_object_mut()
+        .expect("serialized validation reports are JSON objects")
+        .insert(
+            "contract_source_digest".to_string(),
+            Value::String(contract_source_digest),
+        );
     value_to_python(py, value)
 }
 
@@ -390,9 +699,9 @@ fn map_error(py: Python<'_>, error: ProofFrameError) -> PyErr {
             SchemaError::new_err(message)
         }
         ErrorCode::ResourceLimit => ResourceLimitError::new_err(message),
-        ErrorCode::CorruptPartition | ErrorCode::Io | ErrorCode::Arrow => {
-            CorruptDataError::new_err(message)
-        }
+        ErrorCode::CorruptPartition => ProofFrameCorruptDataError::new_err(message),
+        ErrorCode::Io => ProofFrameIoError::new_err(message),
+        ErrorCode::Arrow => ProofFrameArrowError::new_err(message),
         ErrorCode::ReceiptInvalid
         | ErrorCode::ReceiptInvalidSignature
         | ErrorCode::ReceiptUntrustedSigner => ReceiptError::new_err(message),
@@ -431,6 +740,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(check_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(check_with_evidence_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(assemble_evidence_unchecked_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_fast_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;
@@ -438,7 +749,9 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(detect_leakage_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(generate_signing_keypair, module)?)?;
     module.add_function(wrap_pyfunction!(sign_proof_receipt, module)?)?;
+    module.add_function(wrap_pyfunction!(sign_evidence_receipt, module)?)?;
     module.add_function(wrap_pyfunction!(verify_proof_receipt, module)?)?;
+    module.add_function(wrap_pyfunction!(verify_proof_receipt_any, module)?)?;
     module.add(
         "ProofFrameError",
         module.py().get_type::<ProofFrameException>(),
@@ -450,8 +763,20 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<ResourceLimitError>(),
     )?;
     module.add(
+        "ProofFrameCorruptDataError",
+        module.py().get_type::<ProofFrameCorruptDataError>(),
+    )?;
+    module.add(
         "CorruptDataError",
-        module.py().get_type::<CorruptDataError>(),
+        module.py().get_type::<ProofFrameCorruptDataError>(),
+    )?;
+    module.add(
+        "ProofFrameIoError",
+        module.py().get_type::<ProofFrameIoError>(),
+    )?;
+    module.add(
+        "ProofFrameArrowError",
+        module.py().get_type::<ProofFrameArrowError>(),
     )?;
     module.add("ReceiptError", module.py().get_type::<ReceiptError>())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

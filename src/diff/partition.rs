@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use crate::ProofFrameError;
+use crate::{MemoryReservation, ProofFrameError};
 
 pub(super) const PARTITIONS: usize = 64;
 pub(super) const WRITER_BUFFER_BYTES: usize = 8 * 1024;
@@ -32,6 +32,7 @@ pub(super) struct PartitionWriter {
     payload_bytes: u64,
     hasher: blake3::Hasher,
     scratch: Vec<u8>,
+    scratch_memory: Vec<MemoryReservation>,
 }
 
 impl PartitionWriter {
@@ -45,6 +46,7 @@ impl PartitionWriter {
             payload_bytes: 0,
             hasher: blake3::Hasher::new(),
             scratch: Vec::new(),
+            scratch_memory: Vec::new(),
         })
     }
 
@@ -52,8 +54,27 @@ impl PartitionWriter {
         &mut self,
         key: &[u8],
         entry: &RowEntry,
+        max_record_bytes: u64,
+        reserve_memory: impl FnOnce(u64) -> Result<MemoryReservation, ProofFrameError>,
         reserve_temp: impl FnOnce(u64) -> Result<(), ProofFrameError>,
     ) -> Result<(), ProofFrameError> {
+        let required = encoded_record_bytes(key, entry)?;
+        if required > max_record_bytes {
+            return Err(ProofFrameError::ResourceLimit {
+                resource: "diff partition record bytes",
+                requested: required,
+                used: 0,
+                limit: max_record_bytes,
+            });
+        }
+        let required =
+            usize::try_from(required).map_err(|_| corrupt("Diff record length exceeds usize"))?;
+        if required > self.scratch.capacity() {
+            let additional = required - self.scratch.capacity();
+            let reservation = reserve_memory(additional as u64)?;
+            self.scratch.reserve_exact(additional);
+            self.scratch_memory.push(reservation);
+        }
         self.scratch.clear();
         encode_bytes(&mut self.scratch, key)?;
         encode_bytes(&mut self.scratch, entry.display_key.as_bytes())?;
@@ -104,6 +125,26 @@ impl PartitionWriter {
         self.writer.get_ref().sync_data()?;
         Ok(())
     }
+}
+
+fn encoded_record_bytes(key: &[u8], entry: &RowEntry) -> Result<u64, ProofFrameError> {
+    let mut bytes = 8_u64
+        .checked_add(key.len() as u64)
+        .and_then(|value| value.checked_add(8))
+        .and_then(|value| value.checked_add(entry.display_key.len() as u64))
+        .and_then(|value| value.checked_add(32 + 4))
+        .ok_or_else(|| corrupt("Diff record length overflowed"))?;
+    for value in &entry.values {
+        bytes = bytes
+            .checked_add(8)
+            .and_then(|current| {
+                value.as_ref().map_or(Some(current), |value| {
+                    current.checked_add(value.len() as u64)
+                })
+            })
+            .ok_or_else(|| corrupt("Diff record length overflowed"))?;
+    }
+    Ok(bytes)
 }
 
 pub(super) struct PartitionReader {
@@ -394,6 +435,8 @@ mod tests {
                     values: vec![Some(b"value".to_vec())],
                     hash: [9_u8; 32],
                 },
+                1024,
+                |bytes| account.try_reserve_memory(bytes),
                 |bytes| {
                     reservations.push(account.try_reserve_temp(bytes)?);
                     Ok(())
@@ -473,5 +516,32 @@ mod tests {
             reader.next().unwrap_err().code(),
             ErrorCode::CorruptPartition
         );
+    }
+
+    #[test]
+    fn writer_rejects_oversized_records_before_growing_scratch() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("oversized.pfpart");
+        let mut writer = PartitionWriter::create(&path, [1; 32]).unwrap();
+        let account = ResourceAccount::root(ResourceLimits::default());
+        let entry = RowEntry {
+            display_key: "large".to_string(),
+            values: vec![Some(vec![7; 4096])],
+            hash: [2; 32],
+        };
+
+        let error = writer
+            .write_record(
+                b"key",
+                &entry,
+                64,
+                |bytes| account.try_reserve_memory(bytes),
+                |_| Ok(()),
+            )
+            .expect_err("the writer-side record limit must run before scratch allocation");
+
+        assert_eq!(error.code(), ErrorCode::ResourceLimit);
+        assert_eq!(writer.scratch.capacity(), 0);
+        assert_eq!(account.peak_memory_used(), 0);
     }
 }

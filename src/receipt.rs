@@ -220,15 +220,36 @@ pub fn sign_v2(
     })
 }
 
+/// Deserialize and sign a strict V2 evidence envelope.
+pub fn sign_v2_json(evidence_json: &str, private_key: &str) -> Result<String, ProofFrameError> {
+    let evidence: EvidenceV2 = serde_json::from_str(evidence_json)?;
+    let signing = SigningKey::from_bytes(&decode_exact(private_key, "private key")?);
+    Ok(serde_json::to_string(&sign_v2(evidence, &signing)?)?)
+}
+
+/// Verify V2 or legacy V1 JSON with an optional expected signer key.
+pub fn verify_json_with_expected_key(
+    receipt_json: &str,
+    expected_public_key: Option<&str>,
+) -> Result<ReceiptVerification, ProofFrameError> {
+    let trust = match expected_public_key {
+        Some(key) => TrustPolicy::ExpectedKey(decode_public_key(key)?),
+        None => TrustPolicy::SignatureOnly,
+    };
+    verify_json_with_policy(receipt_json, &trust)
+}
+
 /// Verify cryptographic integrity independently from the caller's signer-trust policy.
 pub fn verify_v2(
     receipt: &SignedReceiptV2,
     trust: &TrustPolicy,
 ) -> Result<ReceiptVerification, ProofFrameError> {
+    let evidence_semantics_valid = receipt.unsigned.evidence.validate().is_ok();
     let schema_supported = receipt.schema == ReceiptSchema::V2
         && receipt.unsigned.schema == ReceiptSchema::V2
-        && receipt.unsigned.algorithm == "Ed25519";
-    let expected_hash = receipt.unsigned.evidence.digest()?;
+        && receipt.unsigned.algorithm == "Ed25519"
+        && evidence_semantics_valid;
+    let expected_hash = receipt.unsigned.evidence.digest_unchecked()?;
     let report_hash_matches = expected_hash == receipt.unsigned.evidence_hash;
     let public = decode_public_key(&receipt.unsigned.public_key)?;
     let signature = Signature::from_bytes(&decode_exact(&receipt.signature, "signature")?);

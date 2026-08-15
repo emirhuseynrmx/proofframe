@@ -29,12 +29,42 @@ pub(super) struct AtomicSink {
     _memory: crate::MemoryReservation,
     account: ResourceAccount,
     scratch_memory: Vec<crate::MemoryReservation>,
+    fault: Option<FaultPoint>,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum FaultPoint {
+    TempCreate,
+    NoSpace,
+    PartialWrite(usize),
+    Interrupted,
+    Flush,
+    Sync,
+    Persist,
 }
 
 impl AtomicSink {
     pub(super) fn new(
         output: &DiffOutput,
         account: &ResourceAccount,
+    ) -> Result<Self, ProofFrameError> {
+        Self::new_inner(output, account, None)
+    }
+
+    #[cfg(test)]
+    fn new_with_fault(
+        output: &DiffOutput,
+        account: &ResourceAccount,
+        fault: FaultPoint,
+    ) -> Result<Self, ProofFrameError> {
+        Self::new_inner(output, account, Some(fault))
+    }
+
+    fn new_inner(
+        output: &DiffOutput,
+        account: &ResourceAccount,
+        fault: Option<FaultPoint>,
     ) -> Result<Self, ProofFrameError> {
         let target = match output {
             DiffOutput::JsonLines(path) | DiffOutput::ArrowIpc(path) => path.clone(),
@@ -49,13 +79,15 @@ impl AtomicSink {
                 "Diff output parent directory does not exist",
             )));
         }
+        if matches!(fault, Some(FaultPoint::TempCreate)) {
+            return Err(injected_io("temporary file creation"));
+        }
         let temporary = NamedTempFile::new_in(parent)?;
+        let file = DurableFile::new(temporary.reopen()?, fault);
         let writer = match output {
-            DiffOutput::JsonLines(_) => {
-                SinkWriter::Json(BufWriter::with_capacity(8 * 1024, temporary.reopen()?))
-            }
+            DiffOutput::JsonLines(_) => SinkWriter::Json(BufWriter::with_capacity(8 * 1024, file)),
             DiffOutput::ArrowIpc(_) => {
-                SinkWriter::Arrow(FileWriter::try_new(temporary.reopen()?, &event_schema())?)
+                SinkWriter::Arrow(FileWriter::try_new(file, &event_schema())?)
             }
         };
         Ok(Self {
@@ -66,6 +98,7 @@ impl AtomicSink {
             _memory: account.try_reserve_memory(8 * 1024 + 1024)?,
             account: account.clone(),
             scratch_memory: Vec::new(),
+            fault,
         })
     }
 
@@ -138,6 +171,9 @@ impl AtomicSink {
             }
         }
         let temporary = self.temporary.take().expect("sink is unfinished");
+        if matches!(self.fault, Some(FaultPoint::Persist)) {
+            return Err(injected_io("atomic persist"));
+        }
         temporary
             .persist(&self.target)
             .map_err(|error| ProofFrameError::Io(error.error))?;
@@ -146,8 +182,114 @@ impl AtomicSink {
 }
 
 enum SinkWriter {
-    Json(BufWriter<File>),
-    Arrow(FileWriter<File>),
+    Json(BufWriter<DurableFile>),
+    Arrow(FileWriter<DurableFile>),
+}
+
+enum DurableFile {
+    Normal(File),
+    #[cfg(test)]
+    Faulting {
+        file: File,
+        point: FaultPoint,
+        partial_write_started: bool,
+    },
+}
+
+impl DurableFile {
+    fn new(file: File, fault: Option<FaultPoint>) -> Self {
+        #[cfg(test)]
+        if let Some(point) = fault {
+            return Self::Faulting {
+                file,
+                point,
+                partial_write_started: false,
+            };
+        }
+        let _ = fault;
+        Self::Normal(file)
+    }
+
+    fn sync_data(&self) -> std::io::Result<()> {
+        match self {
+            Self::Normal(file) => file.sync_data(),
+            #[cfg(test)]
+            Self::Faulting { file, point, .. } => {
+                if matches!(point, FaultPoint::Sync) {
+                    return Err(injected_io_error("data sync"));
+                }
+                file.sync_data()
+            }
+        }
+    }
+}
+
+impl Write for DurableFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Normal(file) => file.write(buffer),
+            #[cfg(test)]
+            Self::Faulting {
+                file,
+                point: FaultPoint::PartialWrite(limit),
+                partial_write_started,
+            } => {
+                if *partial_write_started {
+                    return Err(injected_io_error("partial write continuation"));
+                }
+                *partial_write_started = true;
+                file.write(&buffer[..buffer.len().min(*limit)])
+            }
+            #[cfg(test)]
+            Self::Faulting {
+                point: FaultPoint::NoSpace,
+                ..
+            } => Err(std::io::Error::other(
+                "injected ENOSPC: no space left on device",
+            )),
+            #[cfg(test)]
+            Self::Faulting {
+                point: FaultPoint::Interrupted,
+                partial_write_started,
+                ..
+            } => {
+                if !*partial_write_started {
+                    *partial_write_started = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "injected transient interrupted write",
+                    ));
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "injected terminal interruption",
+                ))
+            }
+            #[cfg(test)]
+            Self::Faulting { file, .. } => file.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Normal(file) => file.flush(),
+            #[cfg(test)]
+            Self::Faulting { file, point, .. } => {
+                if matches!(point, FaultPoint::Flush) {
+                    return Err(injected_io_error("flush"));
+                }
+                file.flush()
+            }
+        }
+    }
+}
+
+fn injected_io(stage: &str) -> ProofFrameError {
+    ProofFrameError::Io(injected_io_error(stage))
+}
+
+fn injected_io_error(stage: &str) -> std::io::Error {
+    std::io::Error::other(format!("injected storage fault during {stage}"))
 }
 
 fn event_schema() -> Arc<Schema> {
@@ -174,5 +316,50 @@ impl Write for CountingWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AtomicSink, DiffEvent, FaultPoint};
+    use crate::{DiffOutput, ErrorCode, ResourceAccount, ResourceLimits};
+    use tempfile::TempDir;
+
+    #[test]
+    fn storage_faults_never_publish_a_partial_diff() {
+        for fault in [
+            FaultPoint::TempCreate,
+            FaultPoint::NoSpace,
+            FaultPoint::PartialWrite(7),
+            FaultPoint::Interrupted,
+            FaultPoint::Flush,
+            FaultPoint::Sync,
+            FaultPoint::Persist,
+        ] {
+            let directory = TempDir::new().unwrap();
+            let target = directory.path().join("diff.jsonl");
+            let output = DiffOutput::JsonLines(target.clone());
+            let account = ResourceAccount::root(ResourceLimits::default());
+            let result =
+                AtomicSink::new_with_fault(&output, &account, fault).and_then(|mut sink| {
+                    sink.write(
+                        &DiffEvent {
+                            kind: "changed",
+                            key: "invoice-42",
+                            columns: None,
+                        },
+                        |_| Ok(()),
+                    )?;
+                    sink.finish()
+                });
+
+            let error = result.expect_err("the injected storage fault must be observed");
+            assert_eq!(error.code(), ErrorCode::Io);
+            assert!(
+                !target.exists(),
+                "fault {fault:?} published a partial target"
+            );
+            assert_eq!(directory.path().read_dir().unwrap().count(), 0);
+        }
     }
 }
