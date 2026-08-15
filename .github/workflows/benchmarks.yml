@@ -34,7 +34,6 @@ jobs:
           toolchain: "1.85"
           components: rustfmt, clippy
       - run: python -m pip install ".[dev,benchmark]"
-      - run: maturin develop --release --locked
       - name: Measure release cases
         shell: bash
         run: |

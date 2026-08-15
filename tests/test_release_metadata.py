@@ -29,3 +29,10 @@ def test_publish_is_gated_by_exact_tag_commit_ci_evidence() -> None:
     assert "release-evidence-${{ inputs.sha }}" in publish
     assert "ref: ${{ inputs.sha }}" in publish
     assert "ref: ${{ needs.gate.outputs.sha }}" in publish
+
+
+def test_ci_installs_built_wheels_without_assuming_an_activated_virtualenv() -> None:
+    workflows = (ROOT / ".github/workflows").glob("*.yml")
+    for workflow in workflows:
+        source = workflow.read_text(encoding="utf-8")
+        assert "maturin develop" not in source, workflow.name

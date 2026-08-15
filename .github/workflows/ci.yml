@@ -67,7 +67,11 @@ jobs:
         with:
           toolchain: "1.85"
       - run: python -m pip install maturin pytest pytest-cov ruff twine pyarrow pandas polars
-      - run: maturin develop --release --locked
+      - name: Build and install the native wheel
+        run: |
+          mkdir -p target/ci-wheel
+          maturin build --release --locked --out target/ci-wheel --compatibility pypi
+          python -m pip install --no-deps --force-reinstall target/ci-wheel/*.whl
       - run: ruff check python tests benchmarks scripts
       - run: python -m pytest -q --basetemp target/pytest-coverage --cov=proofframe --cov-report=term-missing --cov-report=xml --cov-fail-under=85
       - name: Build and inspect source distributions
@@ -127,7 +131,6 @@ jobs:
         with:
           toolchain: "1.85"
       - run: python -m pip install ".[dev,benchmark]"
-      - run: maturin develop --release --locked
       - run: >-
           python benchmarks/release_gate.py
           --rows 100000
