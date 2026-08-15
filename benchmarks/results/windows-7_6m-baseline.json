@@ -1,0 +1,37 @@
+{
+  "methodology": {
+    "rows": 7600000,
+    "source": "Existing local baseline supplied before 0.4.0-alpha.4 optimization work",
+    "timing_scope": "large in-memory Arrow/Python benchmark; raw repeat timings were not captured for this historical run",
+    "note": "Use benchmarks/rule_matrix.py for new rule-by-rule runs with raw samples, peak RSS, schema, versions, and rule metadata."
+  },
+  "environment": {
+    "platform": "Windows local development machine",
+    "versions": {
+      "proofframe": "0.4.0a3"
+    }
+  },
+  "results": {
+    "validation": {
+      "median_seconds": 8.82,
+      "rows_per_second": 861678.0045351474,
+      "samples_seconds": [],
+      "peak_rss_bytes": null,
+      "rules": ["historical validation baseline"]
+    },
+    "arrow_validation": {
+      "median_seconds": 8.66,
+      "rows_per_second": 877598.1524249422,
+      "samples_seconds": [],
+      "peak_rss_bytes": null,
+      "rules": ["historical Arrow validation baseline"]
+    },
+    "full_profile": {
+      "median_seconds": 47.47,
+      "rows_per_second": 160101.11649462818,
+      "samples_seconds": [],
+      "peak_rss_bytes": null,
+      "rules": ["historical full profile baseline", "fingerprint", "exact distinct"]
+    }
+  }
+}

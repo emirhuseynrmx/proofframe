@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+      - run: python -m pip install maturin pytest pytest-cov ruff pandas polars pyarrow
+      - run: maturin build --release --out dist
+      - run: python -m pip install --no-index --find-links dist --no-deps --pre proofframe
+      - run: pytest -q
+      - run: ruff check python tests benchmarks
+      - run: cargo fmt --check
+      - run: cargo test --all-targets --all-features
+      - run: cargo package --allow-dirty
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+      - run: python -m pip install maturin pytest pytest-cov pandas polars pyarrow
+      - run: maturin build --release --out dist
+      - run: python -m pip install --no-index --find-links dist --no-deps --pre proofframe
+      - run: pytest -q --cov=proofframe --cov-report=term-missing --cov-report=xml --cov-fail-under=85
+      - uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          flags: python
+          fail_ci_if_error: true
+          use_oidc: true

@@ -1,0 +1,19 @@
+coverage:
+  # Keep hosted coverage gates aligned with pyproject.toml and CI.
+  precision: 2
+  round: down
+  range: "85...100"
+  status:
+    project:
+      default:
+        target: 85%
+        threshold: 1%
+    patch:
+      default:
+        # Rust/core-heavy patches are gated by cargo test/clippy; keep
+        # the hosted Python patch signal useful without blocking releases.
+        target: 60%
+
+comment:
+  layout: "reach,diff,flags,files"
+  require_changes: true

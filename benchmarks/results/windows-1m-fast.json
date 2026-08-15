@@ -1,0 +1,66 @@
+{
+  "methodology": {
+    "dataset": "in-memory pandas DataFrame; int64 id and float64 score",
+    "rows": 1000000,
+    "rules": [
+      "id not null",
+      "id unique",
+      "0 <= score <= 1"
+    ],
+    "warmups": 1,
+    "repeats": 7,
+    "timing_scope": "rules-only validation; imports, setup, and conversion excluded"
+  },
+  "environment": {
+    "python": "3.12.13",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "versions": {
+      "proofframe": "0.4.0a1",
+      "pandera": "0.32.1",
+      "great_expectations": "1.19.0",
+      "pandas": "3.0.3",
+      "pyarrow": "25.0.0"
+    }
+  },
+  "results": {
+    "proofframe": {
+      "samples_seconds": [
+        0.015298500002245419,
+        0.015642800004570745,
+        0.01585150000755675,
+        0.016221199999563396,
+        0.017381699988618493,
+        0.017922600003657863,
+        0.020798300000024028
+      ],
+      "median_seconds": 0.016221199999563396,
+      "rows_per_second": 61647720.26896381
+    },
+    "pandera": {
+      "samples_seconds": [
+        0.03397489999770187,
+        0.03453480001189746,
+        0.03757169999880716,
+        0.03251119999913499,
+        0.0319139999919571,
+        0.03502239999943413,
+        0.03257819999998901
+      ],
+      "median_seconds": 0.03397489999770187,
+      "rows_per_second": 29433493.55164083
+    },
+    "great_expectations": {
+      "samples_seconds": [
+        0.12595950000104494,
+        0.15682349998678546,
+        0.15957400000479538,
+        0.12832090001029428,
+        0.11995059999753721,
+        0.13648970000213012,
+        0.14483859999745619
+      ],
+      "median_seconds": 0.13648970000213012,
+      "rows_per_second": 7326560.172558028
+    }
+  }
+}

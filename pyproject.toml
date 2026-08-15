@@ -1,0 +1,66 @@
+[build-system]
+requires = ["maturin>=1.11,<2"]
+build-backend = "maturin"
+
+[project]
+name = "proofframe"
+version = "0.4.0a5"
+description = "Rust-native data contracts, canonical fingerprints, and proof receipts for DataFrames."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Emir Huseyin Inci" }]
+keywords = ["data-quality", "dataframe", "arrow", "parquet", "pandas", "polars"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = ["pyarrow>=15"]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2"]
+polars = ["polars>=1"]
+dev = [
+  "maturin>=1.11",
+  "pytest>=8",
+  "pytest-cov>=7",
+  "ruff>=0.15",
+  "twine>=6",
+  "pandas>=2",
+  "polars>=1",
+]
+benchmark = ["pandas>=2", "pandera>=0.26", "great-expectations>=1.8", "psutil>=6"]
+
+[project.scripts]
+proofframe = "proofframe.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/emirhuseynrmx/proofframe"
+Issues = "https://github.com/emirhuseynrmx/proofframe/issues"
+Changelog = "https://github.com/emirhuseynrmx/proofframe/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+python-source = "python"
+module-name = "proofframe._proofframe"
+features = ["python", "pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["proofframe"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
