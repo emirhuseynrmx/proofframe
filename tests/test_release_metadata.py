@@ -24,10 +24,14 @@ def test_publish_is_gated_by_exact_tag_commit_ci_evidence() -> None:
 
     assert "cargo publish --dry-run --locked" in ci
     assert "release-evidence-${{ github.sha }}" in ci
-    assert "uses: ./.github/workflows/publish.yml" in ci
-    assert "workflow_call:" in publish
-    assert "release-evidence-${{ inputs.sha }}" in publish
-    assert "ref: ${{ inputs.sha }}" in publish
+    assert "uses: ./.github/workflows/publish.yml" not in ci
+    assert "workflow_run:" in publish
+    assert 'workflows: ["CI"]' in publish
+    assert "github.event.workflow_run.conclusion == 'success'" in publish
+    assert "release-evidence-${{ github.event.workflow_run.head_sha }}" in publish
+    assert "run-id: ${{ github.event.workflow_run.id }}" in publish
+    assert "github-token: ${{ secrets.GITHUB_TOKEN }}" in publish
+    assert "ref: ${{ github.event.workflow_run.head_sha }}" in publish
     assert "ref: ${{ needs.gate.outputs.sha }}" in publish
 
 
