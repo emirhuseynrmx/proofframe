@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use crate::{CancellationToken, MemoryReservation, ProofFrameError, ResourceAccount};
 use run::{FixedValue, RunMeta};
 
-const FIXED_RECORDS_PER_SEGMENT: usize = 4096;
-const BYTE_RECORDS_PER_SEGMENT: usize = 1024;
+const DEFAULT_FIXED_RECORDS_PER_SEGMENT: usize = 65_536;
+const MAX_FIXED_RECORDS_PER_SEGMENT: usize = 1 << 25;
+const DEFAULT_BYTE_RECORDS_PER_SEGMENT: usize = 16_384;
+const MAX_BYTE_RECORDS_PER_SEGMENT: usize = 1 << 24;
 const ASSUMED_BYTES_PER_VALUE: usize = 32;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -96,6 +98,7 @@ pub struct ExactState {
     account: ResourceAccount,
     directory: PathBuf,
     cancellation: CancellationToken,
+    _sample_memory: MemoryReservation,
 }
 
 impl ExactState {
@@ -127,22 +130,35 @@ impl ExactState {
                 "Exact-state temporary directory does not exist",
             )));
         }
-        let hinted = row_count_hint
-            .and_then(|rows| usize::try_from(rows).ok())
-            .unwrap_or(FIXED_RECORDS_PER_SEGMENT)
-            .max(1);
+        let hinted = row_count_hint.and_then(|rows| usize::try_from(rows).ok());
         let storage = match kind {
-            ValueKind::I64 => Storage::I64(FixedStore::new(hinted)),
-            ValueKind::U64 => Storage::U64(FixedStore::new(hinted)),
-            ValueKind::F64 => Storage::F64(FixedStore::new(hinted)),
-            ValueKind::Bytes => Storage::Bytes(ByteStore::new(hinted)),
+            ValueKind::I64 => Storage::I64(FixedStore::new(
+                hinted.unwrap_or(DEFAULT_FIXED_RECORDS_PER_SEGMENT),
+            )),
+            ValueKind::U64 => Storage::U64(FixedStore::new(
+                hinted.unwrap_or(DEFAULT_FIXED_RECORDS_PER_SEGMENT),
+            )),
+            ValueKind::F64 => Storage::F64(FixedStore::new(
+                hinted.unwrap_or(DEFAULT_FIXED_RECORDS_PER_SEGMENT),
+            )),
+            ValueKind::Bytes => Storage::Bytes(ByteStore::new(
+                hinted.unwrap_or(DEFAULT_BYTE_RECORDS_PER_SEGMENT),
+            )),
         };
+        let sample_bytes = account
+            .limits()
+            .max_samples
+            .checked_mul(std::mem::size_of::<DuplicateSample>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| ProofFrameError::CorruptData("Exact sample size overflowed".into()))?;
+        let sample_memory = account.try_reserve_memory(sample_bytes)?;
         Ok(Self {
             storage,
             runs: Vec::new(),
             account,
             directory,
             cancellation,
+            _sample_memory: sample_memory,
         })
     }
 
@@ -187,6 +203,35 @@ impl ExactState {
     }
 
     pub fn finish(mut self) -> Result<ExactSummary, ProofFrameError> {
+        if self.runs.is_empty() {
+            let max_samples = self.account.limits().max_samples;
+            return match self.storage {
+                Storage::I64(segment) => finish_fixed_in_memory(
+                    segment.segment,
+                    &self.account,
+                    max_samples,
+                    &self.cancellation,
+                ),
+                Storage::U64(segment) => finish_fixed_in_memory(
+                    segment.segment,
+                    &self.account,
+                    max_samples,
+                    &self.cancellation,
+                ),
+                Storage::F64(segment) => finish_fixed_in_memory(
+                    segment.segment,
+                    &self.account,
+                    max_samples,
+                    &self.cancellation,
+                ),
+                Storage::Bytes(segment) => finish_bytes_in_memory(
+                    segment.segment,
+                    &self.account,
+                    max_samples,
+                    &self.cancellation,
+                ),
+            };
+        }
         self.seal()?;
         run::merge(&self.runs, &self.account, &self.cancellation)
     }
@@ -257,7 +302,7 @@ impl<T> FixedStore<T> {
     fn new(hinted: usize) -> Self {
         Self {
             segment: None,
-            desired_capacity: hinted.clamp(1, FIXED_RECORDS_PER_SEGMENT),
+            desired_capacity: hinted.clamp(1, MAX_FIXED_RECORDS_PER_SEGMENT),
         }
     }
 }
@@ -366,8 +411,121 @@ impl ByteStore {
     fn new(hinted: usize) -> Self {
         Self {
             segment: None,
-            desired_records: hinted.clamp(1, BYTE_RECORDS_PER_SEGMENT),
+            desired_records: hinted.clamp(1, MAX_BYTE_RECORDS_PER_SEGMENT),
         }
+    }
+}
+
+fn finish_fixed_in_memory<T: FixedValue>(
+    segment: Option<FixedSegment<T>>,
+    account: &ResourceAccount,
+    max_samples: usize,
+    cancellation: &CancellationToken,
+) -> Result<ExactSummary, ProofFrameError> {
+    let Some(mut segment) = segment else {
+        return Ok(empty_summary(account));
+    };
+    segment.records.sort_unstable_by(|left, right| {
+        left.value.cmp(&right.value).then(left.row.cmp(&right.row))
+    });
+    let mut distinct_count = 0_u64;
+    let mut duplicate_count = 0_u64;
+    let mut duplicate_samples = Vec::with_capacity(max_samples);
+    let mut previous: Option<usize> = None;
+    for index in 0..segment.records.len() {
+        if index & 0x0fff == 0 {
+            cancellation.check()?;
+        }
+        let record = &segment.records[index];
+        let duplicate_of = previous
+            .filter(|previous_index| segment.records[*previous_index].value == record.value);
+        if let Some(previous_index) = duplicate_of {
+            duplicate_count += 1;
+            if duplicate_samples.len() < max_samples {
+                duplicate_samples.push(DuplicateSample {
+                    first_row: segment.records[previous_index].row,
+                    duplicate_row: record.row,
+                });
+            }
+        } else {
+            distinct_count += 1;
+            previous = Some(index);
+        }
+    }
+    Ok(ExactSummary {
+        distinct_count,
+        duplicate_count,
+        duplicate_samples,
+        metrics: ExactMetrics {
+            peak_memory_bytes: account.peak_memory_used(),
+            peak_temp_bytes: account.peak_temp_used(),
+            ..ExactMetrics::default()
+        },
+    })
+}
+
+fn finish_bytes_in_memory(
+    segment: Option<ByteSegment>,
+    account: &ResourceAccount,
+    max_samples: usize,
+    cancellation: &CancellationToken,
+) -> Result<ExactSummary, ProofFrameError> {
+    let Some(mut segment) = segment else {
+        return Ok(empty_summary(account));
+    };
+    let arena = &segment.arena;
+    segment.records.sort_unstable_by(|left, right| {
+        left.value(arena)
+            .cmp(right.value(arena))
+            .then(left.row.cmp(&right.row))
+    });
+    let mut distinct_count = 0_u64;
+    let mut duplicate_count = 0_u64;
+    let mut duplicate_samples = Vec::with_capacity(max_samples);
+    let mut previous: Option<usize> = None;
+    for index in 0..segment.records.len() {
+        if index & 0x0fff == 0 {
+            cancellation.check()?;
+        }
+        let record = &segment.records[index];
+        let duplicate_of = previous.filter(|previous_index| {
+            segment.records[*previous_index].value(arena) == record.value(arena)
+        });
+        if let Some(previous_index) = duplicate_of {
+            duplicate_count += 1;
+            if duplicate_samples.len() < max_samples {
+                duplicate_samples.push(DuplicateSample {
+                    first_row: segment.records[previous_index].row,
+                    duplicate_row: record.row,
+                });
+            }
+        } else {
+            distinct_count += 1;
+            previous = Some(index);
+        }
+    }
+    Ok(ExactSummary {
+        distinct_count,
+        duplicate_count,
+        duplicate_samples,
+        metrics: ExactMetrics {
+            peak_memory_bytes: account.peak_memory_used(),
+            peak_temp_bytes: account.peak_temp_used(),
+            ..ExactMetrics::default()
+        },
+    })
+}
+
+fn empty_summary(account: &ResourceAccount) -> ExactSummary {
+    ExactSummary {
+        distinct_count: 0,
+        duplicate_count: 0,
+        duplicate_samples: Vec::new(),
+        metrics: ExactMetrics {
+            peak_memory_bytes: account.peak_memory_used(),
+            peak_temp_bytes: account.peak_temp_used(),
+            ..ExactMetrics::default()
+        },
     }
 }
 

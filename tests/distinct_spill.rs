@@ -145,6 +145,11 @@ fn compiled_unique_execution_uses_the_bounded_exact_state() {
     assert_eq!(report.violation_count, 1);
     assert_eq!(report.findings[0].rule, "unique");
     assert_eq!(report.findings[0].row, Some(rows));
+    assert!(report.metrics.exact_runs > 1);
+    assert!(report.metrics.spill_bytes > 0);
+    assert!(report.metrics.peak_memory_bytes <= 32 * 1024);
+    assert!(report.metrics.peak_temp_bytes <= 8 * 1024 * 1024);
+    assert_eq!(report.metrics.capacity_growth_events, 0);
 }
 
 #[test]

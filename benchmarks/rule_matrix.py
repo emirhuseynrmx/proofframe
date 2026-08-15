@@ -14,17 +14,15 @@ import platform
 import statistics
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import proofframe
 import psutil
 import pyarrow as pa
-
-import proofframe
 
 
 def build_table(rows: int) -> pa.Table:
@@ -38,31 +36,17 @@ def build_table(rows: int) -> pa.Table:
     )
 
 
-def monitor_peak_rss(stop: threading.Event, peak: list[int], interval: float = 0.01) -> None:
-    process = psutil.Process()
-    while not stop.is_set():
-        peak[0] = max(peak[0], process.memory_info().rss)
-        time.sleep(interval)
-    peak[0] = max(peak[0], process.memory_info().rss)
-
-
 def timed(run: Callable[[], Any], *, warmups: int, repeats: int) -> tuple[list[float], int, int]:
     for _ in range(warmups):
         run()
     samples: list[float] = []
     baseline_rss = psutil.Process().memory_info().rss
-    peak_rss = 0
+    peak_rss = baseline_rss
     for _ in range(repeats):
-        stop = threading.Event()
-        peak = [baseline_rss]
-        thread = threading.Thread(target=monitor_peak_rss, args=(stop, peak), daemon=True)
-        thread.start()
         started = time.perf_counter()
         run()
         samples.append(time.perf_counter() - started)
-        stop.set()
-        thread.join()
-        peak_rss = max(peak_rss, peak[0])
+        peak_rss = max(peak_rss, psutil.Process().memory_info().rss)
     return samples, baseline_rss, peak_rss
 
 
@@ -152,8 +136,25 @@ def run_isolated_case(case: str, rows: int, warmups: int, repeats: int) -> dict[
         "--repeats",
         str(repeats),
     ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    return json.loads(result.stdout)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    sampled_peak = 0
+    observed = psutil.Process(process.pid)
+    while process.poll() is None:
+        try:
+            sampled_peak = max(sampled_peak, observed.memory_info().rss)
+        except psutil.Error:
+            pass
+        time.sleep(0.005)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(f"benchmark worker failed ({process.returncode}): {stderr}")
+    result = json.loads(stdout)
+    result["peak_rss_bytes"] = max(sampled_peak, result["peak_rss_bytes"])
+    result["peak_rss_delta_bytes"] = max(
+        0, result["peak_rss_bytes"] - result["baseline_rss_bytes"]
+    )
+    result["rss_method"] = "parent process sampling at 5 ms"
+    return result
 
 
 def main() -> None:

@@ -1,0 +1,25 @@
+{
+  "dataset_slug": "mczielinski/bitcoin-historical-data",
+  "source_file": "btcusd_1-min_data.csv",
+  "source_sha256": "bf38ee982b0486a08e2c2ceddb2ad588725aafc26c3dd6f043edb4ce4913231a",
+  "rows": 7645034,
+  "synthetic_row_duplication": false,
+  "normalized_schema": [
+    "timestamp: timestamp[s]",
+    "open: float64",
+    "high: float64",
+    "low: float64",
+    "close: float64",
+    "volume: float64"
+  ],
+  "normalization": {
+    "timestamp": "cast to timestamp[s]",
+    "ohlcv": "cast to float64 with safe=false",
+    "timed_region_excludes": [
+      "file ingestion",
+      "schema normalization",
+      "Arrow construction"
+    ]
+  },
+  "provenance": "ProofFrame 0.4.0a5 Kaggle benchmark snapshot supplied with the 0.5 engineering review"
+}

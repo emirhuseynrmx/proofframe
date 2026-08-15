@@ -3,9 +3,8 @@ from __future__ import annotations
 import argparse
 import time
 
-import pyarrow as pa
-
 import proofframe
+import pyarrow as pa
 
 
 def main() -> None:
@@ -17,7 +16,7 @@ def main() -> None:
         {
             "id": pa.array(range(args.rows), type=pa.int64()),
             "score": pa.array((index / args.rows for index in range(args.rows)), type=pa.float64()),
-            "bucket": pa.array((f"b{index % 100}" for index in range(args.rows))),
+            "bucket": pa.array(f"b{index % 100}" for index in range(args.rows)),
         }
     )
     started = time.perf_counter()

@@ -11,17 +11,16 @@ import json
 import platform
 import statistics
 import time
+from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
-from typing import Callable
 
 import great_expectations as gx
 import numpy as np
 import pandas as pd
 import pandera.pandas as pa
-import pyarrow as arrow
-
 import proofframe
+import pyarrow as arrow
 
 
 def timed(run: Callable[[], object], *, warmups: int, repeats: int) -> list[float]:

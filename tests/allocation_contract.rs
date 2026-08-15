@@ -1,8 +1,8 @@
 mod support;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::cell::Cell;
+use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -16,13 +16,28 @@ use support::reader_from_batches;
 
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static REALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    static TRACKING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static REALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn measure<T>(run: impl FnOnce() -> T) -> (T, usize, usize) {
+    ALLOCATIONS.with(|count| count.set(0));
+    REALLOCATIONS.with(|count| count.set(0));
+    TRACKING.with(|tracking| tracking.set(true));
+    let result = run();
+    TRACKING.with(|tracking| tracking.set(false));
+    let allocations = ALLOCATIONS.with(Cell::get);
+    let reallocations = REALLOCATIONS.with(Cell::get);
+    (result, allocations, reallocations)
+}
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        if TRACKING.try_with(Cell::get).unwrap_or(false) {
+            let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+        }
         // SAFETY: the request is forwarded unchanged to the process allocator.
         unsafe { System.alloc(layout) }
     }
@@ -33,7 +48,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        if TRACKING.try_with(Cell::get).unwrap_or(false) {
+            let _ = REALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+        }
         // SAFETY: the pointer and layout came from the process allocator and the
         // requested size is forwarded unchanged.
         unsafe { System.realloc(pointer, layout, new_size) }
@@ -42,7 +59,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[test]
 fn pii_utf8_no_match_path_does_not_allocate_per_cell() {
-    let _measurement_guard = ALLOCATION_TEST_LOCK.lock().unwrap();
     const ROWS: usize = 100_000;
     let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
     let warmup = RecordBatch::try_new(
@@ -61,11 +77,7 @@ fn pii_utf8_no_match_path_does_not_allocate_per_cell() {
     .unwrap();
     let reader = reader_from_batches(vec![batch]);
 
-    ALLOCATIONS.store(0, Ordering::SeqCst);
-    REALLOCATIONS.store(0, Ordering::SeqCst);
-    let report = scan_pii_reader(reader, 2).unwrap();
-    let allocations = ALLOCATIONS.load(Ordering::SeqCst);
-    let reallocations = REALLOCATIONS.load(Ordering::SeqCst);
+    let (report, allocations, reallocations) = measure(|| scan_pii_reader(reader, 2).unwrap());
 
     assert_eq!(report.finding_count, 0);
     assert!(
@@ -80,7 +92,6 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 
 #[test]
 fn primitive_fingerprint_allocations_are_constant_after_setup() {
-    let _measurement_guard = ALLOCATION_TEST_LOCK.lock().unwrap();
     const ROWS: usize = 100_000;
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(
@@ -90,11 +101,7 @@ fn primitive_fingerprint_allocations_are_constant_after_setup() {
     .unwrap();
     let reader = reader_from_batches(vec![batch]);
 
-    ALLOCATIONS.store(0, Ordering::SeqCst);
-    REALLOCATIONS.store(0, Ordering::SeqCst);
-    let digest = fingerprint_reader(reader).unwrap();
-    let allocations = ALLOCATIONS.load(Ordering::SeqCst);
-    let reallocations = REALLOCATIONS.load(Ordering::SeqCst);
+    let (digest, allocations, reallocations) = measure(|| fingerprint_reader(reader).unwrap());
 
     assert!(digest.starts_with("pf-fp-v1:"));
     assert!(
@@ -109,7 +116,6 @@ fn primitive_fingerprint_allocations_are_constant_after_setup() {
 
 #[test]
 fn primitive_range_validation_allocations_are_constant_after_setup() {
-    let _measurement_guard = ALLOCATION_TEST_LOCK.lock().unwrap();
     const ROWS: usize = 100_000;
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(
@@ -124,11 +130,8 @@ fn primitive_range_validation_allocations_are_constant_after_setup() {
     let plan = CompiledContract::compile(&ast, schema.as_ref()).unwrap();
     let reader = reader_from_batches(vec![batch]);
 
-    ALLOCATIONS.store(0, Ordering::SeqCst);
-    REALLOCATIONS.store(0, Ordering::SeqCst);
-    let report = execute_reader(reader, &plan, &ExecutionOptions::default()).unwrap();
-    let allocations = ALLOCATIONS.load(Ordering::SeqCst);
-    let reallocations = REALLOCATIONS.load(Ordering::SeqCst);
+    let (report, allocations, reallocations) =
+        measure(|| execute_reader(reader, &plan, &ExecutionOptions::default()).unwrap());
 
     assert!(report.valid);
     assert!(

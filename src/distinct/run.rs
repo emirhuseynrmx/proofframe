@@ -239,7 +239,7 @@ pub(super) fn merge(
     for run in runs {
         verify_payload(run, cancellation)?;
     }
-    let merge_bytes = merge_memory_bytes(runs, account.limits().max_samples)?;
+    let merge_bytes = merge_memory_bytes(runs)?;
     let _merge_memory = account.try_reserve_memory(merge_bytes)?;
     let mut cursors = runs
         .iter()
@@ -254,7 +254,7 @@ pub(super) fn merge(
 
     let mut distinct_count = 0_u64;
     let mut duplicate_count = 0_u64;
-    let mut duplicate_samples = Vec::with_capacity(account.limits().max_samples.min(1024));
+    let mut duplicate_samples = Vec::with_capacity(account.limits().max_samples);
     let mut previous: Option<(OwnedValue, u64)> = None;
     let mut iterations = 0_u64;
     while let Some(Reverse(entry)) = heap.pop() {
@@ -387,7 +387,7 @@ impl UniqueMerge {
         for run in runs {
             verify_payload(run, cancellation)?;
         }
-        let memory = account.try_reserve_memory(merge_memory_bytes(runs, 0)?)?;
+        let memory = account.try_reserve_memory(merge_memory_bytes(runs)?)?;
         let mut cursors = runs
             .iter()
             .map(RunCursor::open)
@@ -434,7 +434,7 @@ impl UniqueMerge {
     }
 }
 
-fn merge_memory_bytes(runs: &[RunMeta], max_samples: usize) -> Result<u64, ProofFrameError> {
+fn merge_memory_bytes(runs: &[RunMeta]) -> Result<u64, ProofFrameError> {
     let cursor_bytes = runs.iter().try_fold(0_u64, |total, run| {
         let fixed = MERGE_BUFFER_BYTES
             .checked_add(std::mem::size_of::<RunCursor>())
@@ -451,13 +451,8 @@ fn merge_memory_bytes(runs: &[RunMeta], max_samples: usize) -> Result<u64, Proof
         .map(|run| run.max_record_bytes)
         .max()
         .unwrap_or(0);
-    let sample_bytes = max_samples
-        .checked_mul(std::mem::size_of::<DuplicateSample>())
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| ProofFrameError::CorruptData("Exact sample size overflowed".into()))?;
     cursor_bytes
         .checked_add(retained_value_bytes)
-        .and_then(|value| value.checked_add(sample_bytes))
         .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))
 }
 

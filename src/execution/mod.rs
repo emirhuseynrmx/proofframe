@@ -10,8 +10,8 @@ pub use resource::{
 use arrow::record_batch::RecordBatchReader;
 
 use crate::{
-    CompiledContract, ExactState, FastValidationReport, Finding, KernelKind, ProofFrameError,
-    ValidationState, ValueKind,
+    CompiledContract, ExactState, ExecutionMetrics, FastValidationReport, Finding, KernelKind,
+    ProofFrameError, ValidationState, ValueKind,
 };
 
 /// Execution hints that do not alter contract semantics.
@@ -82,11 +82,15 @@ where
         rows += batch.num_rows() as u64;
     }
 
+    let mut spill_bytes = 0_u64;
+    let mut exact_runs = 0_u64;
     for (column, state) in plan.columns().iter().zip(unique_states) {
         let Some(state) = state else {
             continue;
         };
         let summary = state.finish()?;
+        spill_bytes = spill_bytes.saturating_add(summary.metrics.spill_bytes);
+        exact_runs = exact_runs.saturating_add(summary.metrics.runs);
         let sampled = summary.duplicate_samples.len() as u64;
         for duplicate in summary.duplicate_samples {
             record_lazy(
@@ -108,6 +112,13 @@ where
         findings: outcome.findings,
         rows,
         mode: "rules_only",
+        metrics: ExecutionMetrics {
+            peak_memory_bytes: resource_root.peak_memory_used(),
+            peak_temp_bytes: resource_root.peak_temp_used(),
+            spill_bytes,
+            exact_runs,
+            capacity_growth_events: 0,
+        },
     })
 }
 

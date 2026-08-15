@@ -188,6 +188,21 @@ pub struct ValidationReport {
     pub profile: Profile,
 }
 
+/// Accounted engine state for a compiled validation execution.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ExecutionMetrics {
+    /// Peak bytes reserved from the operation memory budget.
+    pub peak_memory_bytes: u64,
+    /// Peak bytes reserved from the operation temporary-storage budget.
+    pub peak_temp_bytes: u64,
+    /// Checksummed exact-state bytes written to temporary runs.
+    pub spill_bytes: u64,
+    /// Number of sorted exact-state runs merged during finalization.
+    pub exact_runs: u64,
+    /// Unplanned `Vec` capacity growths in prepared engine buffers.
+    pub capacity_growth_events: u64,
+}
+
 /// Rules-only validation result that skips profiling and fingerprinting.
 #[derive(Debug, Serialize)]
 pub struct FastValidationReport {
@@ -203,6 +218,8 @@ pub struct FastValidationReport {
     pub rows: u64,
     /// Evaluation mode identifier (`rules_only`).
     pub mode: &'static str,
+    /// Accounted native state and spill activity for release diagnostics.
+    pub metrics: ExecutionMetrics,
 }
 
 struct ValidationOutcome {
