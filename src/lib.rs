@@ -19,7 +19,10 @@ pub use contract::{
 };
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
-pub use execution::{ExecutionOptions, execute_reader};
+pub use execution::{
+    CancellationToken, ExecutionOptions, MemoryReservation, ResourceAccount, ResourceLimits,
+    TempReservation, execute_reader,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;

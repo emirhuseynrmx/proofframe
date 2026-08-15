@@ -6,8 +6,8 @@ use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array}
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use proofframe::{
-    ColumnContract, CompiledContract, Contract, ContractAst, ExecutionOptions, execute_reader,
-    validate_fast_reader,
+    CancellationToken, ColumnContract, CompiledContract, Contract, ContractAst, ErrorCode,
+    ExecutionOptions, execute_reader, validate_fast_reader,
 };
 
 use support::reader_from_batches;
@@ -150,4 +150,29 @@ fn legacy_fast_api_uses_the_compiled_nan_policy() {
     assert_eq!(report.violation_count, 1);
     assert_eq!(report.findings[0].rule, "nan");
     assert_eq!(report.findings[0].row, Some(0));
+}
+
+#[test]
+fn execution_checks_cancellation_before_scanning_a_batch() {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![1_i64])) as ArrayRef],
+    )
+    .unwrap();
+    let plan = compile(r#"{"id":{"not_null":true}}"#, schema.as_ref());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = execute_reader(
+        reader_from_batches(vec![batch]),
+        &plan,
+        &ExecutionOptions {
+            cancellation,
+            ..ExecutionOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), ErrorCode::Cancelled);
 }

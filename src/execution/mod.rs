@@ -1,6 +1,11 @@
 //! Schema-compiled, column-oriented validation execution.
 
 mod kernels;
+mod resource;
+
+pub use resource::{
+    CancellationToken, MemoryReservation, ResourceAccount, ResourceLimits, TempReservation,
+};
 
 use arrow::record_batch::RecordBatchReader;
 
@@ -14,13 +19,15 @@ use crate::{
 pub struct ExecutionOptions {
     /// Exact row count when the caller knows it without consuming the stream.
     pub row_count_hint: Option<u64>,
+    pub resources: ResourceLimits,
+    pub cancellation: CancellationToken,
 }
 
 /// Execute a compiled contract without reparsing or performing rule-map lookups.
 pub fn execute_reader<R>(
     reader: R,
     plan: &CompiledContract,
-    _options: &ExecutionOptions,
+    options: &ExecutionOptions,
 ) -> Result<FastValidationReport, ProofFrameError>
 where
     R: RecordBatchReader,
@@ -37,6 +44,7 @@ where
         .collect::<Vec<Option<UniqueState>>>();
     let mut rows = 0_u64;
     for maybe_batch in reader {
+        options.cancellation.check()?;
         let batch = maybe_batch?;
         for (plan_index, column) in plan.columns().iter().enumerate() {
             let array = batch.column(column.column_index());

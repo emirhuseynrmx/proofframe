@@ -116,6 +116,21 @@ pub enum ProofFrameError {
     /// A proof receipt was malformed or failed a structural check.
     #[error("{0}")]
     InvalidReceipt(String),
+
+    /// An operation requested more memory, temporary storage, or output than allowed.
+    #[error(
+        "Resource limit exceeded for {resource}: requested {requested} with {used} used and {limit} allowed"
+    )]
+    ResourceLimit {
+        resource: &'static str,
+        requested: u64,
+        used: u64,
+        limit: u64,
+    },
+
+    /// A cooperative cancellation token stopped the operation.
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 impl ProofFrameError {
@@ -147,6 +162,8 @@ impl ProofFrameError {
             Self::DuplicateKey(_) => ErrorCode::DuplicateKey,
             Self::NoKeyColumns => ErrorCode::NoKeyColumns,
             Self::InvalidReceipt(_) => ErrorCode::ReceiptInvalid,
+            Self::ResourceLimit { .. } => ErrorCode::ResourceLimit,
+            Self::Cancelled => ErrorCode::Cancelled,
         }
     }
 
