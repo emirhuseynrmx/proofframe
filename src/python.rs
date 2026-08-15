@@ -1,5 +1,7 @@
 //! Typed, non-blocking Python boundary.
 
+use std::path::PathBuf;
+
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::pyarrow::PyArrowType;
 use arrow::record_batch::RecordBatchReader;
@@ -11,10 +13,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    CompiledContract, ContractAst, DiffOptions, DistinctMode, ErrorCode, ExecutionOptions,
-    LeakageOptions, ProofFrameError, ResourceLimits, detect_leakage_with_options,
-    diff_readers_with_options, execute_reader, fingerprint_reader, profile_reader_with_distinct,
-    scan_pii_reader,
+    CompiledContract, ContractAst, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
+    ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions, ProofFrameError,
+    ResourceLimits, detect_leakage_with_options, diff_readers_with_options, execute_reader,
+    fingerprint_reader_with_options, profile_reader_with_distinct, scan_pii_reader,
 };
 
 create_exception!(proofframe, ProofFrameException, PyValueError);
@@ -44,12 +46,29 @@ fn profile_arrow(
 }
 
 #[pyfunction]
+#[pyo3(signature = (source, version="v1"))]
 fn fingerprint_arrow(
     py: Python<'_>,
     source: PyArrowType<ArrowArrayStreamReader>,
+    version: &str,
 ) -> PyResult<String> {
-    py.detach(move || fingerprint_reader(source.0))
-        .map_err(|error| map_error(py, error))
+    let version = match version {
+        "v1" | "pf-fp-v1" => FingerprintVersion::V1,
+        "v2" | "pf-fp-v2" => FingerprintVersion::V2,
+        other => {
+            return Err(map_error(
+                py,
+                ProofFrameError::InvalidContract(format!(
+                    "Unsupported fingerprint version `{other}`; expected v1 or v2"
+                )),
+            ));
+        }
+    };
+    py.detach(move || {
+        fingerprint_reader_with_options(source.0, &FingerprintOptions::new(version))
+            .map(|fingerprint| fingerprint.to_tagged_string())
+    })
+    .map_err(|error| map_error(py, error))
 }
 
 #[pyfunction]
@@ -168,7 +187,9 @@ fn validate_fast_arrow(
     max_memory_bytes=DEFAULT_MEMORY_BYTES,
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
-    max_samples=DEFAULT_SAMPLES
+    max_samples=DEFAULT_SAMPLES,
+    output_path=None,
+    output_format="jsonl"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn diff_arrow(
@@ -180,7 +201,24 @@ fn diff_arrow(
     max_temp_bytes: u64,
     max_output_records: u64,
     max_samples: usize,
+    output_path: Option<String>,
+    output_format: &str,
 ) -> PyResult<Py<PyAny>> {
+    let output = match (output_path, output_format) {
+        (None, _) => None,
+        (Some(path), "jsonl") => Some(DiffOutput::JsonLines(PathBuf::from(path))),
+        (Some(path), "arrow") | (Some(path), "ipc") => {
+            Some(DiffOutput::ArrowIpc(PathBuf::from(path)))
+        }
+        (Some(_), other) => {
+            return Err(map_error(
+                py,
+                ProofFrameError::InvalidContract(format!(
+                    "Unsupported diff output format `{other}`; expected jsonl or arrow"
+                )),
+            ));
+        }
+    };
     let options = DiffOptions {
         resources: limits(
             max_memory_bytes,
@@ -189,7 +227,7 @@ fn diff_arrow(
             max_samples,
         ),
         max_samples,
-        output: None,
+        output,
         cancellation: crate::CancellationToken::new(),
     };
     let result = py.detach(move || diff_readers_with_options(before.0, after.0, &keys, &options));

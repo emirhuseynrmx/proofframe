@@ -63,7 +63,7 @@ users = pa.table({
     "score": [0.91, 1.40, 0.73],
 })
 
-report = pf.validate(users, {
+report = pf.check(users, {
     "columns": {
         "id": {"required": True, "unique": True},
         "email": {"not_null": True, "pattern": r"^[^@]+@[^@]+$"},
@@ -77,18 +77,9 @@ for finding in report["findings"]:
 ```
 
 ProofFrame reports the duplicate ID, null email, malformed email, and out-of-range score with their
-row numbers. The same pass returns `valid`, `violation_count`, `truncated`, a content fingerprint,
-and a per-column profile.
-
-For production validation gates, prefer the typed fast path:
-
-```python
-gate = pf.validate(users, contract, include_profile=False)
-```
-
-That path keeps bounded row evidence and `violation_count`, but skips profile, fingerprint, and
-exact distinct state. The default `include_profile=True` path is useful when you want validation and
-a profile/fingerprint artifact from the same scan, but it is intentionally heavier.
+row numbers. `check` compiles the strict contract once, executes typed column kernels, and returns
+bounded findings plus the exact `violation_count`. The 0.4 `validate` name remains as a deprecated
+compatibility alias during the 0.5 release line.
 
 ## Dataset fingerprints
 
@@ -167,21 +158,26 @@ keys are generated locally and are never embedded in receipts. Store them in a s
 in source control. To avoid ambiguous JSON number canonicalization, integers outside the I-JSON safe
 range are rejected.
 
-## CLI
+## Streaming CLI
 
-ProofFrame reads CSV and Parquet files:
+ProofFrame opens CSV and Parquet as Arrow record-batch streams; it does not call the full-table
+`read_csv` or `read_table` APIs:
 
 ```bash
-proofframe profile users.parquet
-proofframe validate users.parquet --contract examples/contract.json
-proofframe diff yesterday.parquet today.parquet --key tenant_id --key user_id
+proofframe check users.parquet --contract examples/contract.json --max-memory 512MiB
+proofframe fingerprint users.parquet --fingerprint-version v2 --batch-size 65536
+proofframe diff yesterday.parquet today.parquet \
+  --key tenant_id --key user_id --output changes.jsonl --max-temp 4GiB
+proofframe sign report.json --private-key "$PROOFFRAME_PRIVATE_KEY" --output receipt.json
+proofframe verify receipt.json
 ```
 
-Every command prints stable JSON and uses exit-safe parsing, making it suitable for CI, agents, and
-data pipeline gates.
+`profile` and `validate` remain as migration aliases and emit `DeprecationWarning`. Diff summary
+samples are bounded by `--max-samples`; full change events go to an atomic JSONL or Arrow IPC sink.
+All primary operations accept explicit batch/resource limits where the operator owns bounded state.
 
-`proofframe validate` exits with `0` for valid data, `1` for contract violations, `2` for input or
-configuration errors, and `3` for unexpected internal failures.
+Exit codes are stable: `0` success, `1` a negative contract/signature verdict, `2` usage or contract
+configuration error, `3` engine/input corruption, and `4` resource exhaustion.
 
 ## Contract format
 

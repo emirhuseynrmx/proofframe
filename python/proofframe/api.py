@@ -48,9 +48,11 @@ def profile(data: Any, *, distinct: str = "exact") -> dict[str, Any]:
     return profile_arrow(_as_reader(data), distinct)
 
 
-def fingerprint(data: Any) -> str:
+def fingerprint(data: Any, *, version: str = "v1") -> str:
     """Return only the canonical dataset fingerprint without profile or distinct state."""
-    return fingerprint_arrow(_as_reader(data))
+    if version not in {"v1", "v2"}:
+        raise ValueError("version must be 'v1' or 'v2'")
+    return fingerprint_arrow(_as_reader(data), version)
 
 
 def check(
@@ -95,10 +97,31 @@ def validate(
     return check(data, contract, **options)
 
 
-def diff(before: Any, after: Any, *, keys: str | Sequence[str]) -> dict[str, Any]:
+def diff(
+    before: Any,
+    after: Any,
+    *,
+    keys: str | Sequence[str],
+    max_memory: int = 512 * 1024 * 1024,
+    max_temp: int = 4 * 1024 * 1024 * 1024,
+    max_output_records: int = 100_000,
+    max_samples: int = 100,
+    output: str | None = None,
+    output_format: str = "jsonl",
+) -> dict[str, Any]:
     """Return added, removed, and column-level changed rows by stable key."""
     key_list = [keys] if isinstance(keys, str) else list(keys)
-    return diff_arrow(_as_reader(before), _as_reader(after), key_list)
+    return diff_arrow(
+        _as_reader(before),
+        _as_reader(after),
+        key_list,
+        max_memory,
+        max_temp,
+        max_output_records,
+        max_samples,
+        output,
+        output_format,
+    )
 
 
 def scan_pii(data: Any, *, max_findings: int = 100) -> dict[str, Any]:
