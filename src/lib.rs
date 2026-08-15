@@ -6,11 +6,13 @@
 //! enough to publish as an alpha: `pf-fp-v1` canonical dataset fingerprints, disk-backed exact
 //! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
+mod contract;
 mod error;
 mod pii;
 pub mod receipt;
 
-pub use error::ProofFrameError;
+pub use contract::{BoundAst, ContractAst, ContractVersion, NaNPolicyAst, RuleAst};
+pub use error::{ErrorCode, ProofFrameError};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
