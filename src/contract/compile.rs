@@ -125,6 +125,7 @@ pub struct CompiledRules {
     pub(crate) min: Option<TypedBound>,
     pub(crate) max: Option<TypedBound>,
     pub(crate) nan: NaNPolicy,
+    pub(crate) validate_nan: bool,
     pub(crate) pattern: Option<Regex>,
     pub(crate) allowed: Option<Arc<HashSet<Box<str>, RandomState>>>,
 }
@@ -158,6 +159,11 @@ impl CompiledRules {
     #[must_use]
     pub const fn nan(&self) -> NaNPolicy {
         self.nan
+    }
+
+    #[must_use]
+    pub const fn validates_nan(&self) -> bool {
+        self.validate_nan
     }
 
     #[must_use]
@@ -368,6 +374,7 @@ fn compile_rules(
         min,
         max,
         nan: source.nan.into(),
+        validate_nan: source.nan.is_some() || source.min.is_some() || source.max.is_some(),
         pattern,
         allowed,
     })

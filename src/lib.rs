@@ -9,6 +9,7 @@
 mod contract;
 mod encoding;
 mod error;
+mod execution;
 mod pii;
 pub mod receipt;
 
@@ -18,6 +19,7 @@ pub use contract::{
 };
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
+pub use execution::{ExecutionOptions, execute_reader};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -1216,82 +1218,6 @@ fn check_unique_timestamp(
     unreachable!("type fixed from schema");
 }
 
-fn check_range(
-    array: &dyn Array,
-    rule: &ColumnContract,
-    column: &str,
-    row_offset: u64,
-    validation: &mut ValidationState,
-) -> Result<(), ProofFrameError> {
-    macro_rules! check_native {
-        ($ty:ty, $convert:expr) => {
-            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
-                for row in 0..values.len() {
-                    if values.is_valid(row) {
-                        let number = $convert(values.value(row));
-                        push_range_findings(
-                            number,
-                            rule,
-                            column,
-                            row_offset + row as u64,
-                            validation,
-                        );
-                    }
-                }
-                return Ok(());
-            }
-        };
-    }
-    check_native!(Float64Array, |value: f64| value);
-    check_native!(Float32Array, |value: f32| f64::from(value));
-    check_native!(Int8Array, |value: i8| f64::from(value));
-    check_native!(Int16Array, |value: i16| f64::from(value));
-    check_native!(Int32Array, |value: i32| f64::from(value));
-    check_native!(Int64Array, |value: i64| value as f64);
-    check_native!(UInt8Array, |value: u8| f64::from(value));
-    check_native!(UInt16Array, |value: u16| f64::from(value));
-    check_native!(UInt32Array, |value: u32| f64::from(value));
-    check_native!(UInt64Array, |value: u64| value as f64);
-    check_native!(TimestampSecondArray, |value: i64| value as f64);
-    check_native!(TimestampMillisecondArray, |value: i64| value as f64);
-    check_native!(TimestampMicrosecondArray, |value: i64| value as f64);
-    check_native!(TimestampNanosecondArray, |value: i64| value as f64);
-
-    for row in 0..array.len() {
-        if array.is_valid(row) {
-            if let Some(value) = numeric_value(array, row)? {
-                push_range_findings(value, rule, column, row_offset + row as u64, validation);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn push_range_findings(
-    number: f64,
-    rule: &ColumnContract,
-    column: &str,
-    row: u64,
-    validation: &mut ValidationState,
-) {
-    if rule.min.is_some_and(|minimum| number < minimum) {
-        validation.record(Finding {
-            rule: "min",
-            column: column.to_string(),
-            row: Some(row),
-            message: format!("Value is below {}", rule.min.unwrap()),
-        });
-    }
-    if rule.max.is_some_and(|maximum| number > maximum) {
-        validation.record(Finding {
-            rule: "max",
-            column: column.to_string(),
-            row: Some(row),
-            message: format!("Value is above {}", rule.max.unwrap()),
-        });
-    }
-}
-
 fn validate_fast_batches<R>(
     reader: R,
     contract: &Contract,
@@ -1300,105 +1226,53 @@ where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
-    let mut validation = ValidationState::new(contract.max_findings);
-    let mut patterns = HashMap::new();
-    let mut unique_states: HashMap<String, UniqueState> = HashMap::new();
-    for (name, rule) in &contract.columns {
-        if rule.required && schema.index_of(name).is_err() {
-            validation.record(Finding {
-                rule: "required",
-                column: name.clone(),
-                row: None,
-                message: format!("Required column `{name}` is missing"),
-            });
-        }
-        if let Some(pattern) = &rule.pattern {
-            patterns.insert(name.clone(), Regex::new(pattern)?);
-        }
-    }
+    let ast = legacy_contract_ast(contract)?;
+    let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+    execute_reader(reader, &plan, &ExecutionOptions::default())
+}
 
-    let mut rows = 0_u64;
-    for maybe_batch in reader {
-        let batch = maybe_batch?;
-        for (column_index, field) in schema.fields().iter().enumerate() {
-            let Some(rule) = contract.columns.get(field.name()) else {
-                continue;
-            };
-            let array = batch.column(column_index);
-            if rule.unique {
-                unique_states
-                    .entry(field.name().clone())
-                    .or_insert_with(|| UniqueState::for_array(array.as_ref()));
-            }
-            if rule.not_null && array.null_count() > 0 {
-                for row in 0..batch.num_rows() {
-                    if array.is_null(row) {
-                        validation.record(Finding {
-                            rule: "not_null",
-                            column: field.name().clone(),
-                            row: Some(rows + row as u64),
-                            message: "Null value is not allowed".to_string(),
-                        });
-                    }
-                }
-            }
-            if rule.unique {
-                check_unique(
-                    unique_states
-                        .get_mut(field.name())
-                        .expect("unique state initialized"),
-                    array.as_ref(),
-                    field.name(),
-                    rows,
-                    &mut validation,
-                )?;
-            }
-            if rule.min.is_some() || rule.max.is_some() {
-                check_range(array.as_ref(), rule, field.name(), rows, &mut validation)?;
-            }
-            if rule.pattern.is_some() || rule.allowed.is_some() {
-                for row in 0..batch.num_rows() {
-                    if array.is_null(row) {
-                        continue;
-                    }
-                    let value = value_for_rules(array.as_ref(), row)?;
-                    if patterns
-                        .get(field.name())
-                        .is_some_and(|pattern| !pattern.is_match(&value))
-                    {
-                        validation.record(Finding {
-                            rule: "pattern",
-                            column: field.name().clone(),
-                            row: Some(rows + row as u64),
-                            message: "Value does not match the required pattern".to_string(),
-                        });
-                    }
-                    if rule
-                        .allowed
-                        .as_ref()
-                        .is_some_and(|allowed| !allowed.contains(&value))
-                    {
-                        validation.record(Finding {
-                            rule: "allowed",
-                            column: field.name().clone(),
-                            row: Some(rows + row as u64),
-                            message: "Value is not in the allowlist".to_string(),
-                        });
-                    }
-                }
-            }
-        }
-        rows += batch.num_rows() as u64;
+fn legacy_contract_ast(contract: &Contract) -> Result<ContractAst, ProofFrameError> {
+    let mut columns = BTreeMap::new();
+    for (name, rule) in &contract.columns {
+        columns.insert(
+            name.clone(),
+            RuleAst {
+                required: rule.required,
+                not_null: rule.not_null,
+                unique: rule.unique,
+                min: rule.min.map(legacy_bound).transpose()?,
+                max: rule.max.map(legacy_bound).transpose()?,
+                nan: None,
+                pattern: rule.pattern.clone(),
+                allowed: rule
+                    .allowed
+                    .as_ref()
+                    .map(|values| values.iter().cloned().collect()),
+            },
+        );
     }
-    let outcome = validation.finish();
-    Ok(FastValidationReport {
-        valid: outcome.violation_count == 0,
-        violation_count: outcome.violation_count,
-        truncated: outcome.truncated,
-        findings: outcome.findings,
-        rows,
-        mode: "rules_only",
+    Ok(ContractAst {
+        version: ContractVersion::V1,
+        columns,
+        max_findings: contract.max_findings,
     })
+}
+
+fn legacy_bound(value: f64) -> Result<BoundAst, ProofFrameError> {
+    if !value.is_finite() {
+        return Err(ProofFrameError::contract(
+            ErrorCode::ContractInvalidBound,
+            "Legacy floating-point bounds must be finite",
+            None,
+        ));
+    }
+    if value.fract() == 0.0 {
+        Ok(BoundAst::Text(format!("{value:.0}")))
+    } else {
+        Ok(BoundAst::Number(
+            serde_json::Number::from_f64(value).expect("finite values are valid JSON numbers"),
+        ))
+    }
 }
 
 /// Profile Arrow record batches and return typed Rust metadata.

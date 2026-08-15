@@ -1,13 +1,15 @@
 mod support;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{ArrayRef, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use proofframe::fingerprint_reader;
+use proofframe::{
+    CompiledContract, ContractAst, ExecutionOptions, execute_reader, fingerprint_reader,
+};
 
 use support::reader_from_batches;
 
@@ -15,6 +17,7 @@ struct CountingAllocator;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static REALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -41,6 +44,7 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 
 #[test]
 fn primitive_fingerprint_allocations_are_constant_after_setup() {
+    let _measurement_guard = ALLOCATION_TEST_LOCK.lock().unwrap();
     const ROWS: usize = 100_000;
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(
@@ -65,4 +69,35 @@ fn primitive_fingerprint_allocations_are_constant_after_setup() {
         reallocations, 0,
         "prepared fingerprint buffers must not reallocate"
     );
+}
+
+#[test]
+fn primitive_range_validation_allocations_are_constant_after_setup() {
+    let _measurement_guard = ALLOCATION_TEST_LOCK.lock().unwrap();
+    const ROWS: usize = 100_000;
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from_iter_values(0..ROWS as i64)) as ArrayRef],
+    )
+    .unwrap();
+    let ast = ContractAst::from_json(
+        r#"{"version":"proofframe.contract.v1","columns":{"id":{"min":0}}}"#,
+    )
+    .unwrap();
+    let plan = CompiledContract::compile(&ast, schema.as_ref()).unwrap();
+    let reader = reader_from_batches(vec![batch]);
+
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    REALLOCATIONS.store(0, Ordering::SeqCst);
+    let report = execute_reader(reader, &plan, &ExecutionOptions::default()).unwrap();
+    let allocations = ALLOCATIONS.load(Ordering::SeqCst);
+    let reallocations = REALLOCATIONS.load(Ordering::SeqCst);
+
+    assert!(report.valid);
+    assert!(
+        allocations <= 8,
+        "primitive range validation allocated {allocations} times for {ROWS} rows"
+    );
+    assert_eq!(reallocations, 0, "validation buffers must not reallocate");
 }
