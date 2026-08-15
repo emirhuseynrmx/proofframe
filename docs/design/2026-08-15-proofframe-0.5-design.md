@@ -83,11 +83,25 @@ The dependency direction is one way: parsing -> compilation -> execution ->
 evidence. Receipt signing consumes evidence but validation never depends on
 receipt code.
 
-## 4. Contract compilation
+## 4. Contract AST and compilation
 
 Public contract structures use `deny_unknown_fields`. Version selection is
 explicit. Optional fields distinguish absent, null and invalid values where the
 contract format requires it.
+
+The JSON contract is represented by a small syntax tree before it becomes an
+execution plan. `ContractAst` and `RuleAst` preserve user intent and typed
+literals; they do not contain Arrow arrays or mutable execution state. Semantic
+analysis resolves that tree against an Arrow schema and emits a compact
+`ExecutionPlan` intermediate representation. This separation makes an unknown
+field, an invalid literal and an unsupported rule/type pair distinguishable
+errors instead of late runtime branches.
+
+ProofFrame does not parse Rust or Python source code, so adding `syn`,
+Tree-sitter or a general expression parser would add cost without improving the
+data-contract problem. AST support is deliberately limited to the contract
+language. A future expression language requires its own versioned grammar and
+design review.
 
 `CompiledContract::compile(contract, schema, options)` performs all structural
 work once:
@@ -99,6 +113,11 @@ work once:
 - selects one typed kernel and one encoder per field;
 - computes capacities from `ResourceBudget`;
 - returns diagnostics containing stable error code, rule and column path.
+
+The resulting IR is a schema-ordered `Vec<ColumnPlan>`. Each plan contains a
+resolved column index, a preselected `KernelKind`, exact typed bounds, optional
+compiled matcher and state requirements. Execution never walks the syntax tree
+or performs contract-map lookups.
 
 The scanner receives only compiled plans. It does not perform `HashMap` rule
 lookups, regex compilation or long dynamic downcast chains inside a row loop.
@@ -306,6 +325,16 @@ Arrow version, memory budget and fingerprint version.
   and documented runtime overhead;
 - peak RSS is measured by a parent process or OS facility, not a Python monitor
   thread blocked by the GIL.
+
+The checked-in 0.4 benchmark exposes two diagnostic scaling curves that must
+remain visible in the 0.5 benchmark output. Fingerprinting holds near 0.833M
+rows/s because the current implementation allocates a canonical `Vec` for each
+cell and repeatedly performs dynamic type discovery. Timestamp uniqueness falls
+from roughly 33M rows/s at 100K rows to 5.18M rows/s at 7.6M rows because an
+unreserved, high-cardinality hash table repeatedly grows and becomes dominated
+by cache-miss-heavy random access. The 0.5 benchmark therefore reports
+allocations per row, capacity growth events, bytes of exact state and spill
+bytes alongside latency; a faster median alone is insufficient.
 
 Stretch numbers may be published only after measurement. A missed speed target
 blocks a performance claim but never justifies weakening a correctness or
