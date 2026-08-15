@@ -169,12 +169,14 @@ V1 and V2 digests can never be compared without matching version identifiers.
 
 Exactness is not replaced by probabilistic counting.
 
-- Fixed-width types use typed sets with capacity reserved from the budget.
+- Fixed-width types use fixed-capacity typed segments. Segments are sorted and
+  deduplicated with sequential access; this avoids a multi-million-entry hash
+  table's cache-miss-heavy random probes.
 - Variable-width bytes are copied once into an append-only arena.
 - The index stores a digest and arena span; digest collisions are resolved by
   comparing the original bytes.
-- Before an in-memory structure crosses its assigned limit, it emits a sorted
-  external run and releases reclaimable memory.
+- Before an in-memory structure crosses its assigned limit, it sorts its full
+  segments, emits an external run and releases reclaimable memory.
 - External runs are merged with bounded buffers.
 
 Every reservation is charged before allocation. If neither memory nor spill
