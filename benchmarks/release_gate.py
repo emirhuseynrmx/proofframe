@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -520,7 +520,7 @@ def main() -> None:
     }
     artifact = {
         "schema_version": SCHEMA_VERSION,
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "run_count": args.runs,
         "warmup_count": args.warmups,
         "fingerprint_version": args.fingerprint_version,

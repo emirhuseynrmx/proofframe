@@ -36,3 +36,18 @@ def test_ci_installs_built_wheels_without_assuming_an_activated_virtualenv() -> 
     for workflow in workflows:
         source = workflow.read_text(encoding="utf-8")
         assert "maturin develop" not in source, workflow.name
+
+
+def test_ci_installs_dependencies_needed_during_full_test_collection() -> None:
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "pytest pyarrow pandas polars psutil" in ci
+    assert "pytest-cov ruff twine pyarrow pandas polars psutil" in ci
+
+
+def test_release_gate_remains_compatible_with_python_310() -> None:
+    source = (ROOT / "benchmarks/release_gate.py").read_text(encoding="utf-8")
+
+    assert "from datetime import UTC" not in source
+    assert "datetime.now(UTC)" not in source
+    assert "datetime.now(timezone.utc)" in source
