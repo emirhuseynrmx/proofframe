@@ -1,0 +1,36 @@
+[package]
+name = "proofframe-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+proofframe = { path = "..", features = ["fuzzing"] }
+
+[[bin]]
+name = "contract_json"
+path = "fuzz_targets/contract_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receipt_json"
+path = "fuzz_targets/receipt_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "partition_bytes"
+path = "fuzz_targets/partition_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

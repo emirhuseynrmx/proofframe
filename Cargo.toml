@@ -1,6 +1,6 @@
 [package]
 name = "proofframe"
-version = "0.4.0-alpha.5"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Rust-native Arrow data contracts, canonical fingerprints, and proof receipts"
@@ -31,10 +31,11 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 python = ["dep:pyo3", "arrow/pyarrow"]
+fuzzing = []
 
 [dependencies]
 ahash = "0.8.12"
-arrow = { version = "59.1.0", default-features = false, features = ["ipc"] }
+arrow = { version = "=59.1.0", default-features = false, features = ["ipc"] }
 base64 = "0.22.1"
 blake3 = "1.8.2"
 ed25519-dalek = "3.0.0"

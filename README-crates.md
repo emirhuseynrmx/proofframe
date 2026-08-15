@@ -2,123 +2,77 @@
   <img src="https://raw.githubusercontent.com/emirhuseynrmx/proofframe/main/assets/banner.png" alt="ProofFrame" width="100%" />
 </div>
 
-# ProofFrame
+# ProofFrame for Rust
 
 [![Crates.io](https://img.shields.io/crates/v/proofframe.svg)](https://crates.io/crates/proofframe)
 [![docs.rs](https://img.shields.io/docsrs/proofframe)](https://docs.rs/proofframe)
 [![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/emirhuseynrmx/proofframe/blob/main/LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/emirhuseynrmx)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)](https://www.rust-lang.org/)
 
-**Arrow-native data contracts, canonical fingerprints, and proof receipts for Rust.**
-
-ProofFrame is a Rust crate for checking Arrow `RecordBatchReader` streams and producing deterministic evidence:
-
-- versioned canonical BLAKE3 dataset fingerprints (`pf-fp-v1`);
-- typed validation reports with `valid`, `violation_count`, `truncated`, and bounded row findings;
-- exact keyed diffs with added, removed, and changed-column evidence;
-- high-signal PII scanning and train/test leakage checks;
-- Ed25519 signed proof receipts;
-- `#![forbid(unsafe_code)]`;
-- optional Python bindings behind the `python` feature, not enabled by default.
-
-The default crates.io build is a normal Rust library. It does not require PyO3, does not enable
-`pyo3/extension-module`, and does not package Python source into the crate artifact.
-
-## Install
+ProofFrame compiles strict, versioned contracts against Arrow schemas and executes typed validation
+kernels over `RecordBatchReader` streams. Exact state and retained evidence are resource-bounded.
 
 ```bash
-cargo add proofframe@0.4.0-alpha.5
+cargo add proofframe@0.5.0
 ```
 
-## Quick use
+The default crate has no Python dependency. Enable the `python` feature only when building the PyO3
+extension.
+
+## Compiled contract API
 
 ```rust
-use proofframe::{profile_reader, validate_reader, ColumnContract, Contract};
-use std::collections::HashMap;
+use proofframe::{CompiledContract, ContractAst, ExecutionOptions, execute_reader};
 
-let profile = profile_reader(reader)?;
+let schema = reader.schema();
+let ast = ContractAst::from_json(r#"{
+  "version": "proofframe.contract.v1",
+  "columns": {
+    "order_id": {"required": true, "not_null": true, "unique": true},
+    "amount": {"min": 0}
+  },
+  "max_findings": 100
+}"#)?;
+let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+let report = execute_reader(reader, &plan, &ExecutionOptions::default())?;
 
-let contract = Contract {
-    columns: HashMap::from([
-        ("id".to_string(), ColumnContract {
-            required: true,
-            unique: true,
-            not_null: true,
-            ..ColumnContract::default()
-        }),
-    ]),
-    max_findings: 100,
-};
-
-let report = validate_reader(reader_again, &contract)?;
-
-assert!(profile.fingerprint.starts_with("pf-fp-v1:"));
 assert_eq!(report.valid, report.violation_count == 0);
+# Ok::<(), proofframe::ProofFrameError>(())
 ```
 
-## Public Rust API
+Compilation resolves column indices, converts exact source bounds to Arrow-native values, compiles
+regular expressions, and selects a kernel once. Unknown fields and rule/type mismatches fail before
+the first batch is consumed.
 
-The core functions accept Arrow readers and return typed Rust structs:
+## Fingerprint protocol
 
-- `profile_reader(reader) -> Result<Profile, ProofFrameError>`
-- `profile_reader_with_distinct(reader, DistinctMode::None|Exact) -> Result<Profile, ProofFrameError>`
-- `fingerprint_reader(reader) -> Result<String, ProofFrameError>`
-- `validate_reader(reader, &contract) -> Result<ValidationReport, ProofFrameError>`
-- `validate_fast_reader(reader, &contract) -> Result<FastValidationReport, ProofFrameError>`
-- `diff_readers(before, after, &keys) -> Result<DiffReport, ProofFrameError>`
-- `scan_pii_reader(reader, max_findings) -> Result<PiiReport, ProofFrameError>`
-- `detect_leakage_readers(train, test, &keys, max_samples) -> Result<LeakageReport, ProofFrameError>`
-- `receipt::generate_keypair_json()`
-- `receipt::sign_json(report_json, private_key)`
-- `receipt::verify_json(receipt_json)`
+```rust
+use proofframe::{FingerprintOptions, FingerprintVersion, fingerprint_reader_with_options};
 
-## Features
-
-```toml
-[dependencies]
-proofframe = "0.4.0-alpha.5"
+let options = FingerprintOptions::new(FingerprintVersion::V2);
+let fingerprint = fingerprint_reader_with_options(reader, &options)?;
+assert!(fingerprint.to_string().starts_with("pf-fp-v2:"));
+# Ok::<(), proofframe::ProofFrameError>(())
 ```
 
-The default feature set is intentionally empty. Enable `python` only when building the Python
-extension path:
+V1 remains frozen for existing proofs. V2 is a distinct protocol; callers must persist the version
+with the digest.
 
-```toml
-proofframe = { version = "0.4.0-alpha.5", features = ["python"] }
-```
+## Resource limits
 
-The PyPI package enables `python` plus `pyo3/extension-module` through maturin. Plain Rust tests and
-`cargo package` should not need Python linker symbols, including on macOS.
+`ExecutionOptions` carries memory and temporary-storage limits plus cooperative cancellation. Exact
+uniqueness uses a hierarchical account, spills sorted checksummed runs when necessary, and returns
+peak memory, peak temporary bytes, spill bytes, and run counts. Findings are sampled independently
+from the exact violation count.
 
-## Validation semantics
+Keyed diff and leakage APIs expose their own options and share the same fail-closed resource model.
+Partition headers and record lengths are validated before allocation.
 
-- Null values are ignored by `unique`; combine `unique` with `not_null` when nulls must be rejected.
-- Float uniqueness uses IEEE bit semantics via `to_bits()`: `-0.0` and `0.0` are distinct, and NaN
-  payload differences are distinct.
-- Timestamp uniqueness and min/max use the native integer value in the declared Arrow time unit;
-  different timestamp units or timezones are different schema types and are not normalized together.
-- Integer min/max and uniqueness use native Arrow integer values, not display strings.
-- Decimal values are fingerprinted canonically, but validation min/max does not coerce decimals
-  through display text; add an explicit decimal rule in a future contract schema if needed.
-- Duplicate findings render only the offending duplicate value when user-facing evidence is emitted;
-  clean rows are not stringified for numeric hot paths.
+## Compatibility
 
-## Why ProofFrame
+The 0.4 `Contract`, `validate_reader`, `validate_fast_reader`, `profile_reader`, and V1 receipt
+functions remain available for the 0.5 migration window. New Rust code should use `ContractAst`,
+`CompiledContract`, `execute_reader`, explicit fingerprint versions, and receipt V2 with a
+`TrustPolicy`.
 
-Most data checks answer one narrow question: did this table pass? ProofFrame is built for the
-production question: **what exactly was checked, why did it fail, and can we prove that later?**
-
-It keeps validation evidence bounded while still counting every violation, fingerprints the ordered
-Arrow stream with canonical bytes rather than display formatting, and emits deterministic reports
-that can be stored in CI, data contracts, and release artifacts.
-
-## Python
-
-Python users should install the wheel from PyPI:
-
-```bash
-pip install proofframe==0.4.0a5
-```
-
-The Python README and CLI documentation live in the repository `README.md`.
+The crate is `#![forbid(unsafe_code)]`. Its MSRV is Rust 1.85.

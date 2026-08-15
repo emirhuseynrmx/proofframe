@@ -9,6 +9,8 @@ pub(super) const WRITER_BUFFER_BYTES: usize = 8 * 1024;
 const MAGIC: [u8; 8] = *b"PFPART02";
 const VERSION: u16 = 2;
 const HEADER_BYTES: u16 = 92;
+#[cfg(feature = "fuzzing")]
+const MAX_FUZZ_INPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PartitionLimits {
@@ -160,6 +162,37 @@ impl PartitionReader {
         self.remaining_payload -= framed_bytes;
         Ok(Some(record))
     }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_bytes(input: &[u8]) -> Result<(), ProofFrameError> {
+    if input.len() > MAX_FUZZ_INPUT_BYTES {
+        return Err(ProofFrameError::ResourceLimit {
+            resource: "fuzz partition input",
+            requested: input.len() as u64,
+            used: 0,
+            limit: MAX_FUZZ_INPUT_BYTES as u64,
+        });
+    }
+
+    let mut file = tempfile::NamedTempFile::new()?;
+    file.write_all(input)?;
+    file.flush()?;
+
+    let mut expected_schema = [0_u8; 32];
+    if let Some(encoded_schema) = input.get(12..44) {
+        expected_schema.copy_from_slice(encoded_schema);
+    }
+    let mut reader = PartitionReader::open(
+        file.path(),
+        expected_schema,
+        PartitionLimits {
+            max_record_bytes: MAX_FUZZ_INPUT_BYTES as u64,
+            max_columns: 1024,
+        },
+    )?;
+    while reader.next()?.is_some() {}
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

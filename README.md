@@ -4,300 +4,177 @@
 
 # ProofFrame
 
-[![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/proofframe.svg)](https://pypi.org/project/proofframe/)
 [![Crates.io](https://img.shields.io/crates/v/proofframe.svg)](https://crates.io/crates/proofframe)
-[![docs.rs](https://img.shields.io/docsrs/proofframe)](https://docs.rs/proofframe)
-[![codecov](https://codecov.io/gh/emirhuseynrmx/proofframe/graph/badge.svg)](https://codecov.io/gh/emirhuseynrmx/proofframe)
+[![CI](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml/badge.svg)](https://github.com/emirhuseynrmx/proofframe/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)]()
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2)](https://github.com/sponsors/emirhuseynrmx)
 
-**Ruff for data. Git-style evidence for DataFrames.**
+ProofFrame compiles strict data contracts into typed Arrow kernels. It scans record-batch streams,
+keeps evidence bounded, and fails before execution when a rule does not match the physical schema.
 
-## Why ProofFrame
+Version 0.5.0 is a beta release. Its release gates cover synthetic scaling and allocation contracts;
+the pinned 7,645,034-row Bitcoin comparison remains a dedicated-runner gate, not a published claim.
 
-Most data checks answer one narrow question: did this table pass? ProofFrame is built for the
-harder production question: **what exactly was checked, why did it fail, and can we prove that later?**
+## What 0.5 changes
 
-- **Proof, not vibes:** every profile includes a versioned canonical BLAKE3 fingerprint
-  (`pf-fp-v1`) so the checked dataset can be identified again.
-- **Bounded evidence:** validation returns row-level findings, total violation counts, and
-  truncation status instead of hiding failures behind a boolean.
-- **One Arrow-native engine:** Rust core, Python bindings, PyArrow/Pandas/Polars input, no Python
-  row materialization in the hot path.
-- **CI-friendly contracts:** deterministic JSON, explicit CLI exit codes, signed proof receipts,
-  PII scanning, leakage checks, and keyed diffs.
-- **Fast Python package, real Rust core:** installable from PyPI with ABI-stable wheels, while the
-  same engine is available to Rust users through crates.io.
+- Contracts are a versioned, deny-unknown-fields syntax tree compiled against the Arrow schema.
+- Numeric, timestamp, decimal, string, binary, and uniqueness rules execute through specialized
+  kernels rather than per-row dynamic dispatch.
+- Exact uniqueness, keyed diff, and leakage checks have explicit memory, temporary-storage, output,
+  and sample limits. Exact state spills as checksummed runs when its memory account is exhausted.
+- `pf-fp-v1` stays frozen for existing proofs. `pf-fp-v2` adds a segmented encoder designed for
+  prepared buffers and stable batch-independent hashing.
+- Python receives native dictionaries and typed exceptions; the Rust scan runs with the GIL
+  released and consumes the Arrow C Stream when available.
+- Evidence V2 binds dataset, contract, engine, limits, and result. Receipt verification reports
+  cryptographic integrity separately from signer trust.
 
-ProofFrame is a Rust crate with Python bindings for answering three questions before bad data
-ships:
+The Rust crate forbids unsafe code. PyO3 and Arrow's FFI remain dependency boundaries and are tested
+through wheel-level Python integration tests.
 
-1. **What is this dataset?** Profile it and produce a deterministic BLAKE3 fingerprint.
-2. **Does it satisfy its contract?** Return bounded, row-level evidence—not a vague pass/fail.
-3. **What changed?** Diff two datasets by business key and name the changed columns.
-
-It accepts PyArrow tables and streams directly through the Arrow C Stream interface. Pandas and
-Polars DataFrames use the same Arrow-native path. The validation engine processes record batches in
-one pass without converting rows into Python objects.
-
-> Alpha software: `0.4.0a5` adds portable manylinux/macOS/Windows wheel publishing on top of the
-> `0.4.0a4` standalone fingerprint API, optional exact distinct profiling,
-> typed Arrow validation hot paths, lazy finding rendering, rule-by-rule benchmarks, and the
-> canonical proof/diff/receipt foundations from earlier 0.4 alphas. The receipt schema and detector
-> taxonomy may still change before 0.4 stable.
-
-## The 30-second demo
+## Install
 
 ```bash
-pip install proofframe==0.4.0a5
+pip install proofframe==0.5.0
 ```
+
+Rust users can install the core without Python:
+
+```bash
+cargo add proofframe@0.5.0
+```
+
+ProofFrame supports Python 3.10–3.13 and Rust 1.85 or newer.
+
+## Check a table
 
 ```python
 import pyarrow as pa
 import proofframe as pf
 
-users = pa.table({
-    "id": [1, 1, 3],
-    "email": ["a@example.com", None, "not-an-email"],
-    "score": [0.91, 1.40, 0.73],
+table = pa.table({
+    "order_id": [101, 102, 102],
+    "amount": [12.50, 8.00, -1.00],
 })
 
-report = pf.check(users, {
+contract = {
+    "version": "proofframe.contract.v1",
     "columns": {
-        "id": {"required": True, "unique": True},
-        "email": {"not_null": True, "pattern": r"^[^@]+@[^@]+$"},
-        "score": {"min": 0, "max": 1},
-    }
-})
+        "order_id": {"required": True, "not_null": True, "unique": True},
+        "amount": {"required": True, "min": 0},
+    },
+    "max_findings": 20,
+}
 
-assert not report["valid"]
-for finding in report["findings"]:
-    print(finding)
+report = pf.check(
+    table,
+    contract,
+    max_memory=64 * 1024 * 1024,
+    max_temp=512 * 1024 * 1024,
+    max_samples=20,
+)
+
+assert report["valid"] is False
+assert report["violation_count"] == 2
 ```
 
-ProofFrame reports the duplicate ID, null email, malformed email, and out-of-range score with their
-row numbers. `check` compiles the strict contract once, executes typed column kernels, and returns
-bounded findings plus the exact `violation_count`. The 0.4 `validate` name remains as a deprecated
-compatibility alias during the 0.5 release line.
+`violation_count` is exact even when the `findings` sample is truncated. Missing required columns
+and incompatible rule/type combinations are rejected during compilation, before rows are scanned.
 
-## Dataset fingerprints
+Pandas, Polars, PyArrow tables, record batches, readers, and Arrow C Stream providers are accepted.
+Inputs that expose a stream stay streaming; the CLI does not construct a full table for CSV or
+Parquet input.
+
+## Fingerprints
 
 ```python
-snapshot = pf.profile(users)
-fingerprint = pf.fingerprint(users)
-
-print(snapshot["fingerprint"])
-assert snapshot["fingerprint"] == fingerprint
-print(snapshot["rows"])
-print(snapshot["columns"])
+legacy = pf.fingerprint(table, version="v1")
+current = pf.fingerprint(table, version="v2")
 ```
 
-The fingerprint is emitted as `pf-fp-v1:<blake3>`. It is deterministic for the ordered Arrow data
-and distinguishes nulls, column positions, schema fields, type tags, and value boundaries. The hash
-input uses ProofFrame's canonical byte encoding rather than Arrow's display formatting, so upgrading
-Arrow cannot silently change fingerprints through prettier string rendering. Store the fingerprint
-in CI metadata to prove exactly which data was checked.
-
-For large datasets where exact cardinality is not needed, prefer:
-
-```python
-snapshot = pf.profile(data, distinct="none")
-fingerprint = pf.fingerprint(data)
-```
-
-`pf.profile(data, distinct="exact")` remains available for exact cardinality, but it is deliberately
-more expensive. The standalone `pf.fingerprint(data)` path computes only the schema, null/value
-boundaries, ordered canonical data, and BLAKE3 hash without profile or distinct state.
-
-## Row-level diff
-
-```python
-before = pa.table({"id": [1, 2, 3], "plan": ["free", "pro", "pro"]})
-after = pa.table({"id": [1, 2, 4], "plan": ["free", "team", "pro"]})
-
-change = pf.diff(before, after, keys="id")
-
-assert change["added_keys"] == ["4"]
-assert change["removed_keys"] == ["3"]
-assert change["changed"] == [{"key": "2", "columns": ["plan"]}]
-```
-
-Composite keys work too: `keys=["tenant_id", "user_id"]`. Duplicate keys fail loudly instead of
-silently producing a misleading diff. The diff engine uses disk-backed hash partitions, so it keeps
-exact changed-column output without materializing both full datasets in memory.
-
-## PII and leakage checks
-
-```python
-pii = pf.scan_pii(users)
-overlap = pf.detect_leakage(train, test, keys="user_id")
-```
-
-PII findings include the class, column, row, confidence, and a short domain-separated BLAKE3
-fingerprint. They never include the matched value. Leakage reports support key overlap or exact
-full-row overlap and expose only hashed sample identifiers.
-
-The built-in detector recognizes email, IPv4, phone, payment-card (Luhn), and IBAN patterns. It is a
-high-signal scanner, not a legal-compliance guarantee; structured identifiers and locale-specific
-formats should be covered by explicit contracts too. Bare digit matches from numeric columns are
-downgraded to low confidence so Luhn-valid order IDs are not reported as high-confidence payment
-cards without context.
-
-## Signed proof receipts
-
-```python
-keys = pf.generate_keypair()
-report = pf.validate(users, contract)
-receipt = pf.sign_receipt(report, private_key=keys["private_key"])
-assert pf.verify_receipt(receipt)["valid"]
-```
-
-Receipts use Ed25519 signatures, RFC 8785 JSON canonicalization, and a BLAKE3 report hash. Private
-keys are generated locally and are never embedded in receipts. Store them in a secret manager, not
-in source control. To avoid ambiguous JSON number canonicalization, integers outside the I-JSON safe
-range are rejected.
-
-## Streaming CLI
-
-ProofFrame opens CSV and Parquet as Arrow record-batch streams; it does not call the full-table
-`read_csv` or `read_table` APIs:
+Fingerprint versions are separate protocols. Never compare a V1 digest with a V2 digest. V1 is the
+Python compatibility default for 0.5; the CLI defaults new work to V2:
 
 ```bash
-proofframe check users.parquet --contract examples/contract.json --max-memory 512MiB
-proofframe fingerprint users.parquet --fingerprint-version v2 --batch-size 65536
-proofframe diff yesterday.parquet today.parquet \
-  --key tenant_id --key user_id --output changes.jsonl --max-temp 4GiB
-proofframe sign report.json --private-key "$PROOFFRAME_PRIVATE_KEY" --output receipt.json
-proofframe verify receipt.json
+proofframe fingerprint data.parquet --fingerprint-version v2
 ```
 
-`profile` and `validate` remain as migration aliases and emit `DeprecationWarning`. Diff summary
-samples are bounded by `--max-samples`; full change events go to an atomic JSONL or Arrow IPC sink.
-All primary operations accept explicit batch/resource limits where the operator owns bounded state.
+## Exact diff with bounded output
 
-Exit codes are stable: `0` success, `1` a negative contract/signature verdict, `2` usage or contract
-configuration error, `3` engine/input corruption, and `4` resource exhaustion.
-
-## Contract format
-
-```json
-{
-  "columns": {
-    "user_id": { "required": true, "unique": true, "not_null": true },
-    "email": { "not_null": true, "pattern": "^[^@]+@[^@]+$" },
-    "score": { "min": 0.0, "max": 1.0 },
-    "status": { "allowed": ["active", "paused", "deleted"] }
-  },
-  "max_findings": 100
-}
+```python
+result = pf.diff(
+    before,
+    after,
+    keys="order_id",
+    max_memory=256 * 1024 * 1024,
+    max_temp=2 * 1024 * 1024 * 1024,
+    max_samples=100,
+    max_output_records=1_000_000,
+    output="changes.jsonl",
+)
 ```
 
-`max_findings` bounds the number of finding examples, not correctness. `violation_count` still
-counts every violation, `truncated` tells you whether examples were omitted, and the profile and
-fingerprint still cover the full stream.
+Counts remain exact. In-memory examples are bounded by `max_samples`; complete change records can be
+written atomically as JSON Lines or Arrow IPC, up to `max_output_records`. Temporary partitions carry
+format version, schema digest, declared lengths, and a BLAKE3 checksum. Length limits are checked
+before allocation.
 
-## Why Rust + Arrow
+## CLI
 
-Python data-quality libraries often materialize Python rows or bind themselves to one DataFrame
-implementation. ProofFrame accepts the Arrow C Stream protocol, so PyArrow, Pandas, Polars, and any
-compatible producer can feed the same native engine.
-
-```text
-Pandas / Polars / PyArrow / Arrow C Stream
-                    |
-                    v
-           Arrow record batches
-                    |
-        +-----------+-----------+
-        v           v           v
-     profile     contracts     keyed diff
-        |           |           |
-        +-----------+-----------+
-                    v
-       deterministic JSON evidence
+```bash
+proofframe check data.parquet --contract contract.json --max-memory 256MiB --max-temp 2GiB
+proofframe diff old.parquet new.parquet --key order_id --output changes.jsonl
+proofframe fingerprint data.csv --fingerprint-version v2
 ```
 
-The Rust core currently provides:
+Exit codes are stable:
 
-- single-pass profiling and validation;
-- versioned canonical BLAKE3 dataset fingerprints;
-- null, distinct, numeric min/max profiles;
-- required, not-null, unique, numeric range, regex, and allowlist rules;
-- disk-backed key diff with exact added/removed/changed-column evidence;
-- bounded evidence reports;
-- a crates.io package with a default Rust API and no required Python linkage;
-- Python 3.10+ ABI-stable wheels through PyO3/maturin.
-- `#![forbid(unsafe_code)]` in the ProofFrame crate.
+| Code | Meaning |
+| ---: | --- |
+| 0 | Operation succeeded; a check or receipt is valid |
+| 1 | Contract violation or invalid receipt |
+| 2 | Invalid input, contract, or command configuration |
+| 3 | Engine, I/O, schema, or corrupt-data failure |
+| 4 | Resource limit exceeded |
 
-Rust users get a separate crates.io-focused README via `README-crates.md`.
+JSON output is emitted only after a successful operation. File outputs use a same-directory temporary
+file, flush and `fsync`, then an atomic replace.
+
+## Compatibility
+
+`validate()` and `profile()` remain migration shims for the 0.5 line. `validate()` delegates to
+`check()` and no longer creates an implicit profile. New code should call `check()` and
+`fingerprint()` separately.
+
+See [the 0.4 to 0.5 migration guide](docs/migration-0.4-to-0.5.md) for API and serialized-contract
+changes. Rust API details are in [README-crates.md](README-crates.md).
+
+## Performance evidence
+
+The release harness records raw samples, median, IQR, throughput, subprocess peak RSS, engine memory
+and spill counters, algorithm version, schema, compiler, CPU, and dataset SHA-256. It refuses to
+compare artifacts captured on different hardware, compilers, datasets, or fingerprint versions.
+
+```bash
+python benchmarks/release_gate.py \
+  --rows 100000 --runs 5 --warmups 1 \
+  --output target/release-gate-smoke.json
+```
+
+This command is a deterministic synthetic smoke test. The real Bitcoin fixture is identified by
+`benchmarks/fixtures/bitcoin-7_6m-manifest.json`; the data itself is not redistributed. Methodology
+and remaining stable-release gates are documented in [docs/testing.md](docs/testing.md).
 
 ## Development
 
 ```bash
-python -m venv .venv
-.venv/Scripts/pip install -e ".[dev]"  # Windows
-.venv/Scripts/maturin develop
-.venv/Scripts/pytest -q
-cargo test
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+maturin develop --release --locked
+python -m pytest -q
 ```
 
-Run the local throughput harness:
+CI additionally runs Miri-compatible state-machine tests, three 60-second fuzz targets, release-mode
+allocation contracts, Python 3.10–3.13 on Linux/macOS/Windows, wheel smoke tests, and package checks.
 
-```bash
-python benchmarks/profile.py --rows 1000000
-```
-
-The Python API and CLI coverage gate is 85%; the current local branch-and-line result is 98.23%.
-Rust correctness is gated separately by unit tests, Proptest, and Clippy on the declared Rust 1.85
-MSRV so Python coverage cannot hide a native-core failure.
-
-Run the same-rule local benchmark harness:
-
-```bash
-pip install -e ".[benchmark]"
-python benchmarks/compare_frameworks.py --rows 1000000 --repeats 5
-```
-
-The script runs the same non-null, uniqueness, and range predicates across a small set of validation
-engines; excludes setup/import time; and records raw samples plus exact package versions. It uses
-ProofFrame's `include_profile=False` rules-only path because benchmark peers are not asked to
-compute a BLAKE3 dataset fingerprint or exact per-column profile. See `docs/testing.md`.
-
-### Local 0.4 alpha benchmark snapshot
-
-On the development machine (Windows 11, Python 3.12), 1,000,000 valid rows, one warmup, and seven
-measured repetitions produced a ProofFrame median of **0.0162 s** (**61.65M rows/s**) for the
-rules-only path. Raw peer samples and exact versions are committed in
-`benchmarks/results/windows-1m-fast.json`; this is a reproducible machine-local result, not a
-universal performance guarantee or a marketing claim.
-
-The 0.4.0a4 rule-matrix harness records required/not-null, min/max, unique, full-contract,
-fingerprint-only, and exact-distinct profile cases separately with raw timings, rows/sec, Arrow
-schema, package versions, and isolated-process RSS deltas. A local Windows 7.6M-row run is committed
-as `benchmarks/results/windows-7_6m-a4.json`. The older `windows-7_6m-baseline.json` is a historical
-0.4.0a3 baseline from a different notebook-style run and should not be treated as a strict
-apples-to-apples comparison.
-
-The benchmark prints measured rows/second for the current machine; this README intentionally makes
-no unverified performance claim.
-
-### Local v0.1 baseline
-
-On the development machine (Windows x86-64, Python 3.12, release wheel), profiling and fingerprinting
-a generated Arrow table with **1,000,000 rows × 3 columns** took **2.257 seconds** (**443,060
-rows/second**). The profile used one integer, one float, and one string column with exact distinct
-counts. This is a reproducible baseline, not a cross-library comparison; run the harness on your own
-hardware before drawing performance conclusions.
-
-## Roadmap
-
-- **0.4 stable:** extracted Miri-compatible core, fuzz targets, pinned cross-platform benchmarks,
-  Criterion microbenchmarks, allocation tracking, and a stabilized receipt schema.
-- **0.5:** reversible dataset patches, Parquet predicate pushdown, and configurable diff partition
-  tuning.
-- **1.0:** stable contract schema and cross-language Rust/Python compatibility.
-
-## License
-
-Apache-2.0
+Apache-2.0 licensed. Security reports follow [SECURITY.md](SECURITY.md).

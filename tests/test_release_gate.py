@@ -82,6 +82,16 @@ def test_artifact_requires_every_diagnostic_field(valid_artifact):
         validate_artifact(valid_artifact)
 
 
+def test_allocation_contract_failure_preserves_the_root_cause(valid_artifact):
+    valid_artifact["allocation_contract"] = {
+        "passed": False,
+        "command": None,
+        "error": "cargo is unavailable",
+    }
+    with pytest.raises(ArtifactError, match="cargo is unavailable"):
+        validate_artifact(valid_artifact)
+
+
 def test_benchmark_artifact_publish_is_atomic(tmp_path, valid_artifact):
     target = tmp_path / "artifact.json"
     _write_atomic(target, valid_artifact)

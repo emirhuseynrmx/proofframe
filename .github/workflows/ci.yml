@@ -4,53 +4,98 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
+  rust:
+    name: Rust 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets --all-features
+      - run: cargo test --locked --release --test allocation_contract -- --test-threads=1
+      - run: cargo test --locked --doc --all-features
+      - run: cargo package --locked
+
+  python:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install pytest pyarrow pandas polars
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
-          toolchain: "1.85"
-          components: rustfmt, clippy
-      - run: python -m pip install maturin pytest pytest-cov ruff pandas polars pyarrow
-      - run: maturin build --release --out dist
-      - run: python -m pip install --no-index --find-links dist --no-deps --pre proofframe
-      - run: pytest -q
-      - run: ruff check python tests benchmarks
-      - run: cargo fmt --check
-      - run: cargo test --all-targets --all-features
-      - run: cargo package --allow-dirty
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+          args: --release --locked --out dist --compatibility pypi
+      - run: python -m pip install --no-index --find-links dist --no-deps proofframe
+      - run: python -m pytest -q --basetemp target/pytest-ci
+      - run: python -c "import proofframe; assert proofframe.__version__ == '0.5.0'"
 
-  coverage:
+  python-quality:
+    name: Python quality and coverage
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: "1.85"
-      - run: python -m pip install maturin pytest pytest-cov pandas polars pyarrow
-      - run: maturin build --release --out dist
-      - run: python -m pip install --no-index --find-links dist --no-deps --pre proofframe
-      - run: pytest -q --cov=proofframe --cov-report=term-missing --cov-report=xml --cov-fail-under=85
-      - uses: codecov/codecov-action@v5
+      - run: python -m pip install maturin pytest pytest-cov ruff pyarrow pandas polars
+      - run: maturin develop --release --locked
+      - run: ruff check python tests benchmarks scripts
+      - run: python -m pytest -q --basetemp target/pytest-coverage --cov=proofframe --cov-report=term-missing --cov-report=xml --cov-fail-under=85
+      - uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: ./coverage.xml
           flags: python
           fail_ci_if_error: true
           use_oidc: true
+
+  miri:
+    name: Miri-compatible core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: nightly
+          components: miri
+      - run: "cargo +nightly miri test --lib miri_tests::"
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [contract_json, receipt_json, partition_bytes]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: nightly
+      - run: cargo +nightly install cargo-fuzz --locked
+      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -rss_limit_mb=1024

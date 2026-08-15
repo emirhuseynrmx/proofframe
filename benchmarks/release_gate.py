@@ -299,10 +299,17 @@ def _allocation_contract() -> dict[str, Any]:
         return {"passed": False, "command": None, "error": "cargo is unavailable"}
     command = [cargo, "test", "--release", "--locked", "--test", "allocation_contract"]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    diagnostic = "\n".join(
+        output for output in (completed.stdout.strip(), completed.stderr.strip()) if output
+    )
     return {
         "passed": completed.returncode == 0,
         "command": " ".join(command),
-        "error": None if completed.returncode == 0 else completed.stderr[-2000:],
+        "error": (
+            None
+            if completed.returncode == 0
+            else (diagnostic[-4000:] or f"cargo test exited with {completed.returncode}")
+        ),
     }
 
 
@@ -391,8 +398,10 @@ def validate_artifact(artifact: dict[str, Any]) -> None:
         raise ArtifactError("dataset SHA-256 is absent or malformed")
     if not artifact.get("correctness_guards", {}).get("all_cases_passed"):
         raise ArtifactError("correctness guards are absent or failed")
-    if not artifact.get("allocation_contract", {}).get("passed"):
-        raise ArtifactError("allocation contract did not pass")
+    allocation_contract = artifact.get("allocation_contract", {})
+    if not allocation_contract.get("passed"):
+        reason = allocation_contract.get("error") or "no diagnostic was captured"
+        raise ArtifactError(f"allocation contract did not pass: {reason}")
     cases = artifact.get("cases", {})
     if set(cases) != set(CASES):
         raise ArtifactError("artifact case matrix is incomplete")

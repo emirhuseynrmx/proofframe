@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0
+
+- Added a strict, versioned contract AST and schema compiler. Unknown fields, out-of-range bounds,
+  invalid timestamp/decimal literals, and incompatible rule/type pairs fail before scanning.
+- Added typed, column-specialized execution kernels and allocation contracts for primitive clean
+  paths. Exact uniqueness uses hierarchical memory/temp accounts and checksummed sorted spill runs.
+- Preserved `pf-fp-v1` and added explicit `pf-fp-v2` segmented canonical encoding with golden,
+  batch-invariance, differential, and allocation tests.
+- Hardened exact keyed diff with versioned partition headers, schema binding, checksums, pre-allocation
+  length caps, bounded samples, atomic full-output sinks, and corruption tests.
+- Added Evidence V2 and Receipt V2. Dataset, contract, engine, resource limits, and result are bound;
+  cryptographic validity and signer trust are reported separately.
+- Changed PII and leakage evidence to return only domain-separated logical fingerprints with bounded
+  exact intersection state.
+- Replaced the Python JSON-string round trip with native dictionaries, stable typed exceptions, Arrow
+  C Stream preference, and GIL-detached native scans.
+- Made CSV/Parquet CLI paths streaming, added atomic output, and fixed exit codes 0–4.
+- Added subprocess RSS and native allocation/spill benchmark gates, pinned dataset manifests, artifact
+  comparison guards, Miri-compatible tests, three fuzz targets, immutable CI action SHAs, Python
+  3.10–3.13 cross-platform wheel tests, and release metadata validation.
+- Retained 0.4 Python and Rust compatibility entry points for the 0.5 migration window.
+
+This release is classified Beta until the pinned 7,645,034-row Bitcoin fixture and the 0.4 baseline
+are captured on the same dedicated runner. Synthetic smoke results are not presented as real-data
+performance claims.
+
 ## 0.4.0-alpha.5
 
 - Prepared PyPI Trusted Publishing for portable ABI3 wheels across Linux x86_64, Linux ARM64,

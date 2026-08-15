@@ -15,12 +15,18 @@
 - Contract validation tracks `violation_count` independently from stored finding examples, so
   `max_findings=0` cannot hide invalid data.
 
-## Miri and Loom decision
+## Miri, fuzzing, and Loom
 
-Miri is valuable for pure Rust unsafe-code boundaries, but the current native module crosses PyO3 and
-Arrow FFI, which Miri cannot exercise as a normal Python extension. A Miri job would therefore be a
-misleading green badge or a permanently broken gate. Before 0.4 stable, pure logic should be moved
-into a `proofframe-core` crate and that crate should run under Miri.
+The crate forbids unsafe code, but Miri still checks the pure-Rust ownership and state transitions
+that protect hierarchical resource reservations and strict contract parsing. CI runs only those
+explicitly compatible tests with `cargo +nightly miri test --lib miri_tests::`. It does not claim to
+exercise PyO3 or Arrow FFI; those boundaries are covered by built-wheel tests on three operating
+systems and Python 3.10–3.13.
+
+Three 60-second libFuzzer jobs feed bounded arbitrary input into the strict contract parser, the
+V1/V2 receipt dispatcher, and the production checksummed partition decoder. The partition target
+caps input at one MiB before writing or decoding it, and the decoder checks declared lengths before
+allocation.
 
 Loom is not warranted yet. ProofFrame has no custom synchronization primitive, lock-free algorithm,
 or concurrent state machine. Add Loom when shared caches, a parallel streaming coordinator, or other

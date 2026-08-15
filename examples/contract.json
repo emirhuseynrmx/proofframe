@@ -1,4 +1,5 @@
 {
+  "version": "proofframe.contract.v1",
   "columns": {
     "user_id": { "required": true, "unique": true, "not_null": true },
     "email": { "not_null": true, "pattern": "^[^@]+@[^@]+$" },
@@ -7,4 +8,3 @@
   },
   "max_findings": 100
 }
-

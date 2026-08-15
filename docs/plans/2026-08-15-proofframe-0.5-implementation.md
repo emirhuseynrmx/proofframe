@@ -1373,7 +1373,7 @@ git commit -m "bench: gate allocation memory and scaling claims"
 - Produces version `0.5.0` in Cargo and Python metadata
 - Produces a migration table for every 0.4 alpha public entry point and serialized field
 
-- [ ] **Step 1: Add parser fuzz targets**
+- [x] **Step 1: Add parser fuzz targets**
 
 Each target accepts arbitrary bytes and calls only the public strict decoder. Success must round-trip to the same versioned structure; failure must return a typed error without panic or unbounded allocation. Partition fuzzing uses a 1 MiB resource cap.
 
@@ -1390,7 +1390,7 @@ fuzz_target!(|data: &[u8]| {
 
 Receipt target calls the strict V1/V2 dispatcher. Partition target calls `PartitionReader` through a small public fuzz-only feature with `max_record_bytes = 1 << 20` and `max_columns = 1024`.
 
-- [ ] **Step 2: Add release CI jobs**
+- [x] **Step 2: Add release CI jobs**
 
 Run format, Clippy `-D warnings`, Rust tests, Python 3.10-3.13 tests, wheel smoke tests on Linux/macOS/Windows, Miri-compatible module tests, 60-second fuzz smoke jobs, package content checks, and README examples. Pin actions by immutable commit SHA.
 
@@ -1402,7 +1402,7 @@ Run format, Clippy `-D warnings`, Rust tests, Python 3.10-3.13 tests, wheel smok
 - run: cargo fuzz run contract_json -- -max_total_time=60
 ```
 
-- [ ] **Step 3: Write migration and claim audit**
+- [x] **Step 3: Write migration and claim audit**
 
 Document removed/renamed APIs, V1/V2 selection, resource defaults, exception mapping, receipt trust requirements, streaming CLI changes and exact compatibility duration. Search README/changelog for every performance number and require a linked checked-in artifact.
 
@@ -1414,7 +1414,7 @@ Document removed/renamed APIs, V1/V2 selection, resource defaults, exception map
 | self-asserted receipt key | `TrustPolicy` | caller must choose trust policy |
 ```
 
-- [ ] **Step 4: Set release versions only after gates pass**
+- [x] **Step 4: Set release versions only after gates pass**
 
 Change Cargo to `0.5.0` and Python to `0.5.0`. Update classifiers from Alpha to Production/Stable only if all stable gates pass; otherwise use Beta and do not label the release stable.
 

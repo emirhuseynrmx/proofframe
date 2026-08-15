@@ -3,7 +3,7 @@
 //!
 //! The crate exposes a Rust-native API by default. The Python extension module is available behind
 //! the `python` feature and is enabled by the PyPI build configuration. Core invariants are stable
-//! enough to publish as an alpha: `pf-fp-v1` canonical dataset fingerprints, disk-backed exact
+//! enough to publish as a beta: versioned canonical dataset fingerprints, disk-backed exact
 //! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
 mod contract;
@@ -32,6 +32,18 @@ pub use execution::{
     TempReservation, execute_reader,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
+
+/// Exercise the checksummed diff-partition decoder with a hard one-MiB input cap.
+///
+/// This API exists for `cargo-fuzz` and is only available with the `fuzzing` feature. It uses the
+/// same parser and limits as production code; malformed input is expected to return an error.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_partition_bytes(input: &[u8]) -> Result<(), ProofFrameError> {
+    diff::fuzz_partition_bytes(input)
+}
+
+#[cfg(miri)]
+mod miri_tests;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -24,6 +24,11 @@ use sink::{AtomicSink, DiffEvent};
 const MAX_PARTITION_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const LEDGER_CHUNK_BYTES: u64 = 1024 * 1024;
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_partition_bytes(input: &[u8]) -> Result<(), ProofFrameError> {
+    partition::fuzz_bytes(input)
+}
+
 #[derive(Debug, Clone)]
 pub enum DiffOutput {
     JsonLines(PathBuf),
