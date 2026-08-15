@@ -6,7 +6,9 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use tempfile::NamedTempFile;
 
 use super::{DuplicateSample, ExactSummary, F64Bits, FixedRecord, OwnedValue, ValueKind};
-use crate::{CancellationToken, ProofFrameError, ResourceAccount, TempReservation};
+use crate::{
+    CancellationToken, MemoryReservation, ProofFrameError, ResourceAccount, TempReservation,
+};
 
 const MAGIC: [u8; 8] = *b"PFRUN001";
 const VERSION: u16 = 1;
@@ -237,32 +239,7 @@ pub(super) fn merge(
     for run in runs {
         verify_payload(run, cancellation)?;
     }
-    let cursor_bytes = runs.iter().try_fold(0_u64, |total, run| {
-        let fixed = MERGE_BUFFER_BYTES
-            .checked_add(std::mem::size_of::<RunCursor>())
-            .and_then(|value| value.checked_add(std::mem::size_of::<Reverse<MergeEntry>>()))
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))?;
-        total
-            .checked_add(fixed)
-            .and_then(|value| value.checked_add(run.max_record_bytes))
-            .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))
-    })?;
-    let retained_value_bytes = runs
-        .iter()
-        .map(|run| run.max_record_bytes)
-        .max()
-        .unwrap_or(0);
-    let sample_bytes = account
-        .limits()
-        .max_samples
-        .checked_mul(std::mem::size_of::<DuplicateSample>())
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| ProofFrameError::CorruptData("Exact sample size overflowed".into()))?;
-    let merge_bytes = cursor_bytes
-        .checked_add(retained_value_bytes)
-        .and_then(|value| value.checked_add(sample_bytes))
-        .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))?;
+    let merge_bytes = merge_memory_bytes(runs, account.limits().max_samples)?;
     let _merge_memory = account.try_reserve_memory(merge_bytes)?;
     let mut cursors = runs
         .iter()
@@ -320,6 +297,168 @@ pub(super) fn merge(
             peak_temp_bytes: account.peak_temp_used(),
         },
     })
+}
+
+pub(super) fn intersect(
+    left: &[RunMeta],
+    right: &[RunMeta],
+    left_account: &ResourceAccount,
+    right_account: &ResourceAccount,
+    max_samples: usize,
+    cancellation: &CancellationToken,
+) -> Result<super::IntersectionSummary, ProofFrameError> {
+    let sample_bytes = max_samples
+        .checked_mul(32)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| ProofFrameError::CorruptData("Leakage sample size overflowed".into()))?;
+    let _sample_memory = left_account.try_reserve_memory(sample_bytes)?;
+    let mut left = UniqueMerge::new(left, left_account, cancellation)?;
+    let mut right = UniqueMerge::new(right, right_account, cancellation)?;
+    let mut left_distinct = 0_u64;
+    let mut right_distinct = 0_u64;
+    let mut overlap = 0_u64;
+    let mut samples = Vec::with_capacity(max_samples.min(1024));
+    let mut left_value = next_counted(&mut left, &mut left_distinct)?;
+    let mut right_value = next_counted(&mut right, &mut right_distinct)?;
+    while let (Some(left_item), Some(right_item)) = (&left_value, &right_value) {
+        cancellation.check()?;
+        match left_item.cmp(right_item) {
+            std::cmp::Ordering::Less => {
+                left_value = next_counted(&mut left, &mut left_distinct)?;
+            }
+            std::cmp::Ordering::Greater => {
+                right_value = next_counted(&mut right, &mut right_distinct)?;
+            }
+            std::cmp::Ordering::Equal => {
+                overlap += 1;
+                if samples.len() < max_samples {
+                    let OwnedValue::Bytes(bytes) = left_item else {
+                        return Err(corrupt("Leakage intersection requires byte identities"));
+                    };
+                    let digest: [u8; 32] = bytes
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| corrupt("Leakage identity digest is not 32 bytes"))?;
+                    samples.push(digest);
+                }
+                left_value = next_counted(&mut left, &mut left_distinct)?;
+                right_value = next_counted(&mut right, &mut right_distinct)?;
+            }
+        }
+    }
+    while left_value.is_some() {
+        left_value = next_counted(&mut left, &mut left_distinct)?;
+    }
+    while right_value.is_some() {
+        right_value = next_counted(&mut right, &mut right_distinct)?;
+    }
+    Ok(super::IntersectionSummary {
+        left_distinct,
+        right_distinct,
+        overlap,
+        samples,
+    })
+}
+
+fn next_counted(
+    merge: &mut UniqueMerge,
+    count: &mut u64,
+) -> Result<Option<OwnedValue>, ProofFrameError> {
+    let value = merge.next_unique()?;
+    if value.is_some() {
+        *count += 1;
+    }
+    Ok(value)
+}
+
+struct UniqueMerge {
+    cursors: Vec<RunCursor>,
+    heap: BinaryHeap<Reverse<MergeEntry>>,
+    _memory: MemoryReservation,
+    cancellation: CancellationToken,
+}
+
+impl UniqueMerge {
+    fn new(
+        runs: &[RunMeta],
+        account: &ResourceAccount,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, ProofFrameError> {
+        for run in runs {
+            verify_payload(run, cancellation)?;
+        }
+        let memory = account.try_reserve_memory(merge_memory_bytes(runs, 0)?)?;
+        let mut cursors = runs
+            .iter()
+            .map(RunCursor::open)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut heap = BinaryHeap::with_capacity(cursors.len());
+        for (run, cursor) in cursors.iter_mut().enumerate() {
+            if let Some((value, row)) = cursor.next()? {
+                heap.push(Reverse(MergeEntry { value, row, run }));
+            }
+        }
+        Ok(Self {
+            cursors,
+            heap,
+            _memory: memory,
+            cancellation: cancellation.clone(),
+        })
+    }
+
+    fn next_unique(&mut self) -> Result<Option<OwnedValue>, ProofFrameError> {
+        self.cancellation.check()?;
+        let Some(Reverse(first)) = self.heap.pop() else {
+            return Ok(None);
+        };
+        let value = first.value;
+        self.refill(first.run)?;
+        loop {
+            let Some(Reverse(candidate)) = self.heap.peek() else {
+                break;
+            };
+            if candidate.value != value {
+                break;
+            }
+            let Reverse(duplicate) = self.heap.pop().expect("heap was just inspected");
+            self.refill(duplicate.run)?;
+        }
+        Ok(Some(value))
+    }
+
+    fn refill(&mut self, run: usize) -> Result<(), ProofFrameError> {
+        if let Some((value, row)) = self.cursors[run].next()? {
+            self.heap.push(Reverse(MergeEntry { value, row, run }));
+        }
+        Ok(())
+    }
+}
+
+fn merge_memory_bytes(runs: &[RunMeta], max_samples: usize) -> Result<u64, ProofFrameError> {
+    let cursor_bytes = runs.iter().try_fold(0_u64, |total, run| {
+        let fixed = MERGE_BUFFER_BYTES
+            .checked_add(std::mem::size_of::<RunCursor>())
+            .and_then(|value| value.checked_add(std::mem::size_of::<Reverse<MergeEntry>>()))
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))?;
+        total
+            .checked_add(fixed)
+            .and_then(|value| value.checked_add(run.max_record_bytes))
+            .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))
+    })?;
+    let retained_value_bytes = runs
+        .iter()
+        .map(|run| run.max_record_bytes)
+        .max()
+        .unwrap_or(0);
+    let sample_bytes = max_samples
+        .checked_mul(std::mem::size_of::<DuplicateSample>())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| ProofFrameError::CorruptData("Exact sample size overflowed".into()))?;
+    cursor_bytes
+        .checked_add(retained_value_bytes)
+        .and_then(|value| value.checked_add(sample_bytes))
+        .ok_or_else(|| ProofFrameError::CorruptData("Exact merge size overflowed".into()))
 }
 
 struct RunCursor {

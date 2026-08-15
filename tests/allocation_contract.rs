@@ -4,11 +4,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{ArrayRef, Int64Array};
+use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use proofframe::{
     CompiledContract, ContractAst, ExecutionOptions, execute_reader, fingerprint_reader,
+    scan_pii_reader,
 };
 
 use support::reader_from_batches;
@@ -37,6 +38,41 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // requested size is forwarded unchanged.
         unsafe { System.realloc(pointer, layout, new_size) }
     }
+}
+
+#[test]
+fn pii_utf8_no_match_path_does_not_allocate_per_cell() {
+    let _measurement_guard = ALLOCATION_TEST_LOCK.lock().unwrap();
+    const ROWS: usize = 100_000;
+    let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+    let warmup = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(Vec::<&str>::new())) as ArrayRef],
+    )
+    .unwrap();
+    scan_pii_reader(reader_from_batches(vec![warmup]), 2).unwrap();
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+            "ordinary-value",
+            ROWS,
+        ))) as ArrayRef],
+    )
+    .unwrap();
+    let reader = reader_from_batches(vec![batch]);
+
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    REALLOCATIONS.store(0, Ordering::SeqCst);
+    let report = scan_pii_reader(reader, 2).unwrap();
+    let allocations = ALLOCATIONS.load(Ordering::SeqCst);
+    let reallocations = REALLOCATIONS.load(Ordering::SeqCst);
+
+    assert_eq!(report.finding_count, 0);
+    assert!(
+        allocations <= 8,
+        "PII no-match scan allocated {allocations} times for {ROWS} borrowed strings"
+    );
+    assert_eq!(reallocations, 0);
 }
 
 #[global_allocator]

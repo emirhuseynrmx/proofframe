@@ -1,5 +1,15 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde::Serialize;
+
+static DETECTOR: LazyLock<Detector> = LazyLock::new(|| {
+    Detector::new().expect("ProofFrame's built-in PII regular expressions must compile")
+});
+
+pub(crate) fn detector() -> &'static Detector {
+    &DETECTOR
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Match {
@@ -11,8 +21,6 @@ pub(crate) struct Detector {
     email: Regex,
     ipv4: Regex,
     phone: Regex,
-    iban: Regex,
-    card_candidate: Regex,
 }
 
 impl Detector {
@@ -23,42 +31,42 @@ impl Detector {
             )?,
             ipv4: Regex::new(r"^(?:\d{1,3}\.){3}\d{1,3}$")?,
             phone: Regex::new(r"^\+?[0-9][0-9 ()-]{7,19}$")?,
-            iban: Regex::new(r"(?i)^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")?,
-            card_candidate: Regex::new(r"^[0-9 -]{13,23}$")?,
         })
     }
 
     pub(crate) fn classify_cell(&self, value: &str, numeric_column: bool) -> Option<Match> {
         let trimmed = value.trim();
-        if self.email.is_match(trimmed) {
+        if trimmed.as_bytes().contains(&b'@') && self.email.is_match(trimmed) {
             return Some(Match {
                 kind: "email",
                 confidence: "high",
             });
         }
-        if self.ipv4.is_match(trimmed) && valid_ipv4(trimmed) {
+        if trimmed.as_bytes().contains(&b'.')
+            && trimmed
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            && self.ipv4.is_match(trimmed)
+            && valid_ipv4(trimmed)
+        {
             return Some(Match {
                 kind: "ipv4",
                 confidence: "high",
             });
         }
-        let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-        if self.iban.is_match(&compact) && valid_iban(&compact) {
+        if valid_iban(trimmed) {
             return Some(Match {
                 kind: "iban",
                 confidence: "high",
             });
         }
-        if self.card_candidate.is_match(trimmed) {
-            let digits: String = trimmed.chars().filter(char::is_ascii_digit).collect();
-            if (13..=19).contains(&digits.len()) && luhn_valid(&digits) {
-                return Some(Match {
-                    kind: "payment_card",
-                    confidence: digit_only_confidence(trimmed, numeric_column, "high"),
-                });
-            }
+        if luhn_filtered(trimmed) {
+            return Some(Match {
+                kind: "payment_card",
+                confidence: digit_only_confidence(trimmed, numeric_column, "high"),
+            });
         }
-        if self.phone.is_match(trimmed) {
+        if phone_candidate(trimmed) && self.phone.is_match(trimmed) {
             let digit_count = trimmed.chars().filter(char::is_ascii_digit).count();
             if (8..=15).contains(&digit_count) {
                 return Some(Match {
@@ -69,6 +77,15 @@ impl Detector {
         }
         None
     }
+}
+
+#[inline]
+fn phone_candidate(value: &str) -> bool {
+    (8..=20).contains(&value.len())
+        && matches!(value.as_bytes().first(), Some(b'+' | b'0'..=b'9'))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b' ' | b'(' | b')' | b'-'))
 }
 
 fn digit_only_confidence(
@@ -92,30 +109,77 @@ fn valid_ipv4(value: &str) -> bool {
 }
 
 fn valid_iban(value: &str) -> bool {
-    if !(15..=34).contains(&value.len()) || !value.is_ascii() {
+    if !value.is_ascii() {
         return false;
     }
-    let rearranged = format!("{}{}", &value[4..], &value[..4]);
-    let mut remainder = 0_u32;
-    for byte in rearranged.bytes() {
-        if byte.is_ascii_digit() {
-            remainder = (remainder * 10 + u32::from(byte - b'0')) % 97;
-        } else if byte.is_ascii_alphabetic() {
-            let number = u32::from(byte.to_ascii_uppercase() - b'A') + 10;
-            remainder = (remainder * 100 + number) % 97;
-        } else {
+
+    let mut normalized_len = 0_usize;
+    for byte in value.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        let valid = match normalized_len {
+            0..=1 => byte.is_ascii_alphabetic(),
+            2..=3 => byte.is_ascii_digit(),
+            _ => byte.is_ascii_alphanumeric(),
+        };
+        if !valid {
             return false;
         }
+        normalized_len += 1;
+    }
+    if !(15..=34).contains(&normalized_len) {
+        return false;
+    }
+
+    let mut remainder = 0_u32;
+    for byte in value
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .skip(4)
+        .chain(
+            value
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .take(4),
+        )
+    {
+        remainder = iban_remainder(remainder, byte);
     }
     remainder == 1
 }
 
-pub(crate) fn luhn_valid(value: &str) -> bool {
+#[inline]
+fn iban_remainder(remainder: u32, byte: u8) -> u32 {
+    if byte.is_ascii_digit() {
+        (remainder * 10 + u32::from(byte - b'0')) % 97
+    } else {
+        let number = u32::from(byte.to_ascii_uppercase() - b'A') + 10;
+        (remainder * 100 + number) % 97
+    }
+}
+
+fn luhn_filtered(value: &str) -> bool {
+    if !(13..=23).contains(&value.len()) || !value.is_ascii() {
+        return false;
+    }
+    let mut digit_count = 0_usize;
+    for byte in value.bytes() {
+        match byte {
+            b'0'..=b'9' => digit_count += 1,
+            b' ' | b'-' => {}
+            _ => return false,
+        }
+    }
+    if !(13..=19).contains(&digit_count) {
+        return false;
+    }
+
     let mut sum = 0_u32;
     let mut double = false;
     for byte in value.bytes().rev() {
         if !byte.is_ascii_digit() {
-            return false;
+            continue;
         }
         let mut digit = u32::from(byte - b'0');
         if double {
@@ -127,7 +191,12 @@ pub(crate) fn luhn_valid(value: &str) -> bool {
         sum += digit;
         double = !double;
     }
-    !value.is_empty() && sum % 10 == 0
+    sum % 10 == 0
+}
+
+#[cfg(test)]
+fn luhn_valid(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && luhn_filtered(value)
 }
 
 #[cfg(test)]
@@ -159,6 +228,20 @@ mod tests {
                 .kind,
             "iban"
         );
+    }
+
+    #[test]
+    fn formatted_iban_and_card_are_checked_without_compaction() {
+        let detector = Detector::new().unwrap();
+        assert_eq!(
+            detector
+                .classify_cell("GB82 WEST 1234 5698 7654 32", false)
+                .unwrap()
+                .kind,
+            "iban"
+        );
+        assert!(luhn_filtered("4111-1111-1111-1111"));
+        assert!(!luhn_filtered("4111-1111-1111-1112"));
     }
 
     proptest! {

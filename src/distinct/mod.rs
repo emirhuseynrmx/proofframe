@@ -72,6 +72,13 @@ pub struct ExactSummary {
     pub metrics: ExactMetrics,
 }
 
+pub(crate) struct IntersectionSummary {
+    pub(crate) left_distinct: u64,
+    pub(crate) right_distinct: u64,
+    pub(crate) overlap: u64,
+    pub(crate) samples: Vec<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum OwnedValue {
     I64(i64),
@@ -180,6 +187,11 @@ impl ExactState {
     }
 
     pub fn finish(mut self) -> Result<ExactSummary, ProofFrameError> {
+        self.seal()?;
+        run::merge(&self.runs, &self.account, &self.cancellation)
+    }
+
+    fn seal(&mut self) -> Result<(), ProofFrameError> {
         self.cancellation.check()?;
         match &mut self.storage {
             Storage::I64(store) => {
@@ -195,8 +207,25 @@ impl ExactState {
                 spill_bytes(store, &self.account, &self.directory, &mut self.runs)?
             }
         }
-        run::merge(&self.runs, &self.account, &self.cancellation)
+        Ok(())
     }
+}
+
+pub(crate) fn intersect_exact_states(
+    mut left: ExactState,
+    mut right: ExactState,
+    max_samples: usize,
+) -> Result<IntersectionSummary, ProofFrameError> {
+    left.seal()?;
+    right.seal()?;
+    run::intersect(
+        &left.runs,
+        &right.runs,
+        &left.account,
+        &right.account,
+        max_samples,
+        &left.cancellation,
+    )
 }
 
 enum Storage {

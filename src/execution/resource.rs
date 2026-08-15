@@ -12,6 +12,7 @@ const DEFAULT_SAMPLES: usize = 100;
 
 /// Hard limits shared by validation, distinct, diff and evidence operations.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
     pub max_memory_bytes: u64,
     pub max_temp_bytes: u64,

@@ -11,7 +11,9 @@ mod diff;
 mod distinct;
 mod encoding;
 mod error;
+pub mod evidence;
 mod execution;
+mod leakage;
 mod pii;
 pub mod receipt;
 
@@ -27,7 +29,9 @@ pub use execution::{
     CancellationToken, ExecutionOptions, MemoryReservation, ResourceAccount, ResourceLimits,
     TempReservation, execute_reader,
 };
+pub use leakage::{LeakageOptions, detect_leakage_with_options};
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use arrow::array::{
@@ -669,48 +673,6 @@ fn privacy_fingerprint(value: &str) -> String {
     hasher.finalize().to_hex()[..16].to_string()
 }
 
-fn collect_leakage_ids<R>(
-    reader: R,
-    keys: &[String],
-) -> Result<(Vec<String>, usize, HashSet<String>), ProofFrameError>
-where
-    R: RecordBatchReader,
-{
-    let schema = reader.schema();
-    let names = schema
-        .fields()
-        .iter()
-        .map(|field| field.name().clone())
-        .collect::<Vec<_>>();
-    let indexes = if keys.is_empty() {
-        (0..schema.fields().len()).collect::<Vec<_>>()
-    } else {
-        keys.iter()
-            .map(|key| {
-                schema
-                    .index_of(key)
-                    .map_err(|_| ProofFrameError::MissingColumn(key.clone()))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    let mut row_count = 0_usize;
-    let mut ids = HashSet::new();
-    for maybe_batch in reader {
-        let batch = maybe_batch?;
-        for row in 0..batch.num_rows() {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"proofframe:leakage:v1\0");
-            for index in &indexes {
-                let array = batch.column(*index);
-                update_hash(&mut hasher, *index, array.as_ref(), row)?;
-            }
-            ids.insert(hasher.finalize().to_hex().to_string());
-            row_count += 1;
-        }
-    }
-    Ok((names, row_count, ids))
-}
-
 fn numeric_value(array: &dyn Array, row: usize) -> Result<Option<f64>, ProofFrameError> {
     if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
         Ok(Some(values.value(row)))
@@ -909,7 +871,7 @@ where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
-    let detector = pii::Detector::new()?;
+    let detector = pii::detector();
     let mut findings = Vec::new();
     let mut counts = BTreeMap::new();
     let mut scanned_rows = 0_u64;
@@ -921,9 +883,15 @@ where
                 if array.is_null(row) {
                     continue;
                 }
-                let value = value_for_rules(array.as_ref(), row)?;
+                let value = if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+                    Cow::Borrowed(values.value(row))
+                } else if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+                    Cow::Borrowed(values.value(row))
+                } else {
+                    Cow::Owned(value_for_rules(array.as_ref(), row)?)
+                };
                 if let Some(classification) =
-                    detector.classify_cell(&value, is_numeric_array(array.as_ref()))
+                    detector.classify_cell(value.as_ref(), is_numeric_array(array.as_ref()))
                 {
                     total_findings += 1;
                     *counts.entry(classification.kind).or_insert(0) += 1;
@@ -933,7 +901,7 @@ where
                             confidence: classification.confidence,
                             column: schema.field(column).name().clone(),
                             row: scanned_rows + row as u64,
-                            value_fingerprint: privacy_fingerprint(&value),
+                            value_fingerprint: privacy_fingerprint(value.as_ref()),
                         });
                     }
                 }
@@ -962,40 +930,15 @@ where
     TR: RecordBatchReader,
     TE: RecordBatchReader,
 {
-    let (train_names, train_rows, train_ids) = collect_leakage_ids(train, keys)?;
-    let (test_names, test_rows, test_ids) = collect_leakage_ids(test, keys)?;
-    if keys.is_empty() && train_names != test_names {
-        return Err(ProofFrameError::SchemaMismatch(
-            "full-row leakage detection requires identical columns".to_string(),
-        ));
-    }
-    let mut overlap = train_ids
-        .intersection(&test_ids)
-        .cloned()
-        .collect::<Vec<_>>();
-    overlap.sort();
-    let overlap_count = overlap.len();
-    let truncated = overlap_count > max_samples;
-    overlap.truncate(max_samples);
-    let rate = |count: usize, total: usize| {
-        if total == 0 {
-            0.0
-        } else {
-            count as f64 / total as f64
-        }
-    };
-    Ok(LeakageReport {
-        detected: overlap_count > 0,
-        mode: if keys.is_empty() { "full_row" } else { "key" },
-        keys: keys.to_vec(),
-        train_rows,
-        test_rows,
-        overlap_count,
-        train_overlap_rate: rate(overlap_count, train_ids.len()),
-        test_overlap_rate: rate(overlap_count, test_ids.len()),
-        sample_fingerprints: overlap,
-        truncated,
-    })
+    detect_leakage_with_options(
+        train,
+        test,
+        keys,
+        &LeakageOptions {
+            max_samples,
+            ..LeakageOptions::default()
+        },
+    )
 }
 
 #[cfg(feature = "python")]
