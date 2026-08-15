@@ -16,6 +16,7 @@ pub use contract::{
     BoundAst, ColumnPlan, CompiledContract, CompiledRules, ContractAst, ContractVersion,
     KernelKind, NaNPolicy, NaNPolicyAst, RuleAst, TypedBound,
 };
+pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1423,7 +1424,8 @@ fn fingerprint_batches<R>(reader: R) -> Result<(u64, String), ProofFrameError>
 where
     R: RecordBatchReader,
 {
-    encoding::fingerprint_v1(reader)
+    let fingerprint = encoding::fingerprint_v1(reader)?;
+    Ok((fingerprint.rows(), fingerprint.to_tagged_string()))
 }
 
 /// Return only the canonical dataset fingerprint, without profiling or exact distinct state.
@@ -1432,6 +1434,17 @@ where
     R: RecordBatchReader,
 {
     fingerprint_batches(reader).map(|(_, fingerprint)| fingerprint)
+}
+
+/// Return a typed canonical fingerprint using an explicitly selected version.
+pub fn fingerprint_reader_with_options<R>(
+    reader: R,
+    options: &FingerprintOptions,
+) -> Result<Fingerprint, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    encoding::fingerprint(reader, options)
 }
 
 /// Validate Arrow record batches with the full profiling path.

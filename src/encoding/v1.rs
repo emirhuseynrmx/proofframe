@@ -2,9 +2,10 @@ use arrow::record_batch::RecordBatchReader;
 
 use super::plan::EncodingPlan;
 use super::scratch::Scratch;
+use super::{Fingerprint, FingerprintVersion};
 use crate::ProofFrameError;
 
-pub(crate) fn fingerprint_v1<R>(reader: R) -> Result<(u64, String), ProofFrameError>
+pub(crate) fn fingerprint_v1<R>(reader: R) -> Result<Fingerprint, ProofFrameError>
 where
     R: RecordBatchReader,
 {
@@ -41,11 +42,11 @@ where
     }
 
     let digest = hasher.finalize();
-    let hex = digest.to_hex();
-    let mut fingerprint = String::with_capacity("pf-fp-v1:".len() + hex.len());
-    fingerprint.push_str("pf-fp-v1:");
-    fingerprint.push_str(hex.as_str());
-    Ok((rows, fingerprint))
+    Ok(Fingerprint::new(
+        FingerprintVersion::V1,
+        *digest.as_bytes(),
+        rows,
+    ))
 }
 
 fn update_len_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {

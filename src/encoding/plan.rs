@@ -192,6 +192,89 @@ impl ValueEncoder {
         Ok(())
     }
 
+    pub(crate) fn update_v2(
+        &self,
+        hasher: &mut blake3::Hasher,
+        array: &dyn Array,
+        row: usize,
+        scratch: &mut Vec<u8>,
+    ) -> Result<(), ProofFrameError> {
+        if array.is_null(row) {
+            hasher.update(&[0]);
+            return Ok(());
+        }
+        hasher.update(&[1]);
+
+        macro_rules! direct_primitive {
+            ($variant:ident, $array_ty:ty) => {
+                if matches!(self, Self::$variant) {
+                    let values = array
+                        .as_any()
+                        .downcast_ref::<$array_ty>()
+                        .expect("encoder is fixed from the Arrow schema");
+                    hasher.update(&values.value(row).to_le_bytes());
+                    return Ok(());
+                }
+            };
+        }
+
+        direct_primitive!(Int8, Int8Array);
+        direct_primitive!(Int16, Int16Array);
+        direct_primitive!(Int32, Int32Array);
+        direct_primitive!(Int64, Int64Array);
+        direct_primitive!(UInt8, UInt8Array);
+        direct_primitive!(UInt16, UInt16Array);
+        direct_primitive!(UInt32, UInt32Array);
+        direct_primitive!(UInt64, UInt64Array);
+        direct_primitive!(Float32, Float32Array);
+        direct_primitive!(Float64, Float64Array);
+        direct_primitive!(Date32, Date32Array);
+        direct_primitive!(Date64, Date64Array);
+        direct_primitive!(TimestampSecond, TimestampSecondArray);
+        direct_primitive!(TimestampMillisecond, TimestampMillisecondArray);
+        direct_primitive!(TimestampMicrosecond, TimestampMicrosecondArray);
+        direct_primitive!(TimestampNanosecond, TimestampNanosecondArray);
+        direct_primitive!(Decimal128, Decimal128Array);
+
+        if matches!(self, Self::Boolean) {
+            let values = downcast::<BooleanArray>(array);
+            hasher.update(&[u8::from(values.value(row))]);
+            return Ok(());
+        }
+
+        macro_rules! direct_string {
+            ($variant:ident, $array_ty:ty) => {
+                if matches!(self, Self::$variant) {
+                    let value = downcast::<$array_ty>(array).value(row).as_bytes();
+                    hasher.update(&(value.len() as u64).to_le_bytes());
+                    hasher.update(value);
+                    return Ok(());
+                }
+            };
+        }
+        macro_rules! direct_binary {
+            ($variant:ident, $array_ty:ty) => {
+                if matches!(self, Self::$variant) {
+                    let value = downcast::<$array_ty>(array).value(row);
+                    hasher.update(&(value.len() as u64).to_le_bytes());
+                    hasher.update(value);
+                    return Ok(());
+                }
+            };
+        }
+
+        direct_string!(Utf8, StringArray);
+        direct_string!(LargeUtf8, LargeStringArray);
+        direct_binary!(Binary, BinaryArray);
+        direct_binary!(LargeBinary, LargeBinaryArray);
+
+        scratch.clear();
+        self.write_v1_value(array, row, scratch)?;
+        hasher.update(&(scratch.len() as u64).to_le_bytes());
+        hasher.update(scratch);
+        Ok(())
+    }
+
     fn write_v1_value(
         &self,
         array: &dyn Array,
