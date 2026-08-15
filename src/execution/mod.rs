@@ -10,8 +10,8 @@ pub use resource::{
 use arrow::record_batch::RecordBatchReader;
 
 use crate::{
-    CompiledContract, FastValidationReport, Finding, ProofFrameError, UniqueState, ValidationState,
-    check_unique,
+    CompiledContract, ExactState, FastValidationReport, Finding, KernelKind, ProofFrameError,
+    ValidationState, ValueKind,
 };
 
 /// Execution hints that do not alter contract semantics.
@@ -39,29 +39,70 @@ where
         });
     }
 
-    let mut unique_states = (0..plan.columns().len())
-        .map(|_| None)
-        .collect::<Vec<Option<UniqueState>>>();
+    let resource_root = ResourceAccount::root(options.resources);
+    let has_unique = plan.columns().iter().any(|column| column.rules().unique());
+    let unique_directory = has_unique.then(tempfile::TempDir::new).transpose()?;
+    let mut unique_states = plan
+        .columns()
+        .iter()
+        .map(|column| {
+            if !column.rules().unique() {
+                return Ok(None);
+            }
+            let directory = unique_directory
+                .as_ref()
+                .expect("a unique plan owns a temporary directory");
+            ExactState::new_with_cancellation(
+                exact_kind(column.kernel()),
+                resource_root.child(
+                    options.resources.max_memory_bytes,
+                    options.resources.max_temp_bytes,
+                ),
+                directory.path().to_path_buf(),
+                options.row_count_hint,
+                options.cancellation.clone(),
+            )
+            .map(Some)
+        })
+        .collect::<Result<Vec<_>, ProofFrameError>>()?;
     let mut rows = 0_u64;
     for maybe_batch in reader {
         options.cancellation.check()?;
         let batch = maybe_batch?;
         for (plan_index, column) in plan.columns().iter().enumerate() {
             let array = batch.column(column.column_index());
-            kernels::scan_column(column, array.as_ref(), rows, &mut validation)?;
-            if column.rules().unique() {
-                let state = unique_states[plan_index]
-                    .get_or_insert_with(|| UniqueState::for_array(array.as_ref()));
-                check_unique(
-                    state,
-                    array.as_ref(),
-                    column.field().name(),
-                    rows,
-                    &mut validation,
-                )?;
-            }
+            kernels::scan_column(
+                column,
+                array.as_ref(),
+                rows,
+                &mut validation,
+                unique_states[plan_index].as_mut(),
+            )?;
         }
         rows += batch.num_rows() as u64;
+    }
+
+    for (column, state) in plan.columns().iter().zip(unique_states) {
+        let Some(state) = state else {
+            continue;
+        };
+        let summary = state.finish()?;
+        let sampled = summary.duplicate_samples.len() as u64;
+        for duplicate in summary.duplicate_samples {
+            record_lazy(
+                &mut validation,
+                "unique",
+                column.field().name(),
+                Some(duplicate.duplicate_row),
+                || {
+                    format!(
+                        "Duplicate value first appeared at row {}",
+                        duplicate.first_row
+                    )
+                },
+            );
+        }
+        validation.violation_count += summary.duplicate_count.saturating_sub(sampled);
     }
 
     let outcome = validation.finish();
@@ -73,6 +114,31 @@ where
         rows,
         mode: "rules_only",
     })
+}
+
+fn exact_kind(kernel: &KernelKind) -> ValueKind {
+    match kernel {
+        KernelKind::I8
+        | KernelKind::I16
+        | KernelKind::I32
+        | KernelKind::I64
+        | KernelKind::Date32
+        | KernelKind::Date64
+        | KernelKind::Timestamp(_) => ValueKind::I64,
+        KernelKind::U8
+        | KernelKind::U16
+        | KernelKind::U32
+        | KernelKind::U64
+        | KernelKind::Boolean => ValueKind::U64,
+        KernelKind::F32 | KernelKind::F64 => ValueKind::F64,
+        KernelKind::Decimal128 { .. }
+        | KernelKind::Utf8
+        | KernelKind::LargeUtf8
+        | KernelKind::Binary
+        | KernelKind::LargeBinary
+        | KernelKind::Nested
+        | KernelKind::NullOnly => ValueKind::Bytes,
+    }
 }
 
 pub(crate) fn record_lazy(

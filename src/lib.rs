@@ -7,6 +7,7 @@
 //! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
 mod contract;
+mod distinct;
 mod encoding;
 mod error;
 mod execution;
@@ -17,6 +18,7 @@ pub use contract::{
     BoundAst, ColumnPlan, CompiledContract, CompiledRules, ContractAst, ContractVersion,
     KernelKind, NaNPolicy, NaNPolicyAst, RuleAst, TypedBound,
 };
+pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
 pub use execution::{
@@ -29,7 +31,6 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use ahash::RandomState;
 use arrow::array::{
     Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
     FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -256,48 +257,6 @@ impl ValidationState {
             truncated: self.violation_count as usize > self.findings.len(),
             violation_count: self.violation_count,
             findings: self.findings,
-        }
-    }
-}
-
-enum UniqueState {
-    SignedInt(HashSet<i64, RandomState>),
-    UnsignedInt(HashSet<u64, RandomState>),
-    Timestamp(HashSet<i64, RandomState>),
-    Float32(HashSet<u32, RandomState>),
-    Float64(HashSet<u64, RandomState>),
-    Utf8(HashSet<String, RandomState>),
-    Generic(HashSet<Vec<u8>, RandomState>),
-}
-
-impl UniqueState {
-    fn for_array(array: &dyn Array) -> Self {
-        if array.as_any().is::<Int8Array>()
-            || array.as_any().is::<Int16Array>()
-            || array.as_any().is::<Int32Array>()
-            || array.as_any().is::<Int64Array>()
-        {
-            Self::SignedInt(HashSet::with_hasher(RandomState::new()))
-        } else if array.as_any().is::<UInt8Array>()
-            || array.as_any().is::<UInt16Array>()
-            || array.as_any().is::<UInt32Array>()
-            || array.as_any().is::<UInt64Array>()
-        {
-            Self::UnsignedInt(HashSet::with_hasher(RandomState::new()))
-        } else if array.as_any().is::<TimestampSecondArray>()
-            || array.as_any().is::<TimestampMillisecondArray>()
-            || array.as_any().is::<TimestampMicrosecondArray>()
-            || array.as_any().is::<TimestampNanosecondArray>()
-        {
-            Self::Timestamp(HashSet::with_hasher(RandomState::new()))
-        } else if array.as_any().is::<Float32Array>() {
-            Self::Float32(HashSet::with_hasher(RandomState::new()))
-        } else if array.as_any().is::<Float64Array>() {
-            Self::Float64(HashSet::with_hasher(RandomState::new()))
-        } else if array.as_any().is::<StringArray>() {
-            Self::Utf8(HashSet::with_hasher(RandomState::new()))
-        } else {
-            Self::Generic(HashSet::with_hasher(RandomState::new()))
         }
     }
 }
@@ -1068,157 +1027,6 @@ fn is_numeric_array(array: &dyn Array) -> bool {
         || array.as_any().is::<UInt64Array>()
         || array.as_any().is::<Float32Array>()
         || array.as_any().is::<Float64Array>()
-}
-
-fn push_duplicate(validation: &mut ValidationState, column: &str, row: u64) {
-    validation.record(Finding {
-        rule: "unique",
-        column: column.to_string(),
-        row: Some(row),
-        message: "Duplicate value detected".to_string(),
-    });
-}
-
-fn check_unique(
-    state: &mut UniqueState,
-    array: &dyn Array,
-    column: &str,
-    row_offset: u64,
-    validation: &mut ValidationState,
-) -> Result<(), ProofFrameError> {
-    match state {
-        UniqueState::SignedInt(seen) => {
-            check_unique_signed(array, seen, column, row_offset, validation)
-        }
-        UniqueState::UnsignedInt(seen) => {
-            check_unique_unsigned(array, seen, column, row_offset, validation)
-        }
-        UniqueState::Timestamp(seen) => {
-            check_unique_timestamp(array, seen, column, row_offset, validation)
-        }
-        UniqueState::Float32(seen) => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .expect("type fixed from schema");
-            for row in 0..values.len() {
-                if values.is_valid(row) && !seen.insert(values.value(row).to_bits()) {
-                    push_duplicate(validation, column, row_offset + row as u64);
-                }
-            }
-        }
-        UniqueState::Float64(seen) => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .expect("type fixed from schema");
-            for row in 0..values.len() {
-                if values.is_valid(row) && !seen.insert(values.value(row).to_bits()) {
-                    push_duplicate(validation, column, row_offset + row as u64);
-                }
-            }
-        }
-        UniqueState::Utf8(seen) => {
-            let values = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("type fixed from schema");
-            for row in 0..values.len() {
-                if values.is_valid(row) && !seen.insert(values.value(row).to_owned()) {
-                    push_duplicate(validation, column, row_offset + row as u64);
-                }
-            }
-        }
-        UniqueState::Generic(seen) => {
-            for row in 0..array.len() {
-                if array.is_valid(row) {
-                    let value = canonical_value_bytes(array, row)?;
-                    if !seen.insert(value) {
-                        push_duplicate(validation, column, row_offset + row as u64);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_unique_signed(
-    array: &dyn Array,
-    seen: &mut HashSet<i64, RandomState>,
-    column: &str,
-    row_offset: u64,
-    validation: &mut ValidationState,
-) {
-    macro_rules! check {
-        ($ty:ty) => {
-            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
-                for row in 0..values.len() {
-                    if values.is_valid(row) && !seen.insert(values.value(row) as i64) {
-                        push_duplicate(validation, column, row_offset + row as u64);
-                    }
-                }
-                return;
-            }
-        };
-    }
-    check!(Int8Array);
-    check!(Int16Array);
-    check!(Int32Array);
-    check!(Int64Array);
-    unreachable!("type fixed from schema");
-}
-
-fn check_unique_unsigned(
-    array: &dyn Array,
-    seen: &mut HashSet<u64, RandomState>,
-    column: &str,
-    row_offset: u64,
-    validation: &mut ValidationState,
-) {
-    macro_rules! check {
-        ($ty:ty) => {
-            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
-                for row in 0..values.len() {
-                    if values.is_valid(row) && !seen.insert(values.value(row) as u64) {
-                        push_duplicate(validation, column, row_offset + row as u64);
-                    }
-                }
-                return;
-            }
-        };
-    }
-    check!(UInt8Array);
-    check!(UInt16Array);
-    check!(UInt32Array);
-    check!(UInt64Array);
-    unreachable!("type fixed from schema");
-}
-
-fn check_unique_timestamp(
-    array: &dyn Array,
-    seen: &mut HashSet<i64, RandomState>,
-    column: &str,
-    row_offset: u64,
-    validation: &mut ValidationState,
-) {
-    macro_rules! check {
-        ($ty:ty) => {
-            if let Some(values) = array.as_any().downcast_ref::<$ty>() {
-                for row in 0..values.len() {
-                    if values.is_valid(row) && !seen.insert(values.value(row)) {
-                        push_duplicate(validation, column, row_offset + row as u64);
-                    }
-                }
-                return;
-            }
-        };
-    }
-    check!(TimestampSecondArray);
-    check!(TimestampMillisecondArray);
-    check!(TimestampMicrosecondArray);
-    check!(TimestampNanosecondArray);
-    unreachable!("type fixed from schema");
 }
 
 fn validate_fast_batches<R>(
