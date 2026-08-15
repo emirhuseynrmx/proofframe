@@ -32,6 +32,28 @@ DEFAULT_MEMORY = 512 * 1024 * 1024
 DEFAULT_TEMP = 4 * 1024 * 1024 * 1024
 DEFAULT_OUTPUT_RECORDS = 100_000
 DEFAULT_SAMPLES = 100
+_KEY_OPTIONS = frozenset(("--private-key", "--expected-public-key"))
+
+
+def _normalize_key_options(argv: list[str] | None) -> list[str]:
+    """Bind URL-safe key values to their option before argparse classifies tokens.
+
+    Ed25519 keys use URL-safe base64, whose alphabet includes ``-``. Argparse otherwise
+    interprets a key beginning with that character as another option. The ``--name=value``
+    form is unambiguous on every supported Python and operating system.
+    """
+    source = list(sys.argv[1:] if argv is None else argv)
+    normalized: list[str] = []
+    index = 0
+    while index < len(source):
+        token = source[index]
+        if token in _KEY_OPTIONS and index + 1 < len(source):
+            normalized.append(f"{token}={source[index + 1]}")
+            index += 2
+            continue
+        normalized.append(token)
+        index += 1
+    return normalized
 
 
 def _open_reader(path: str | Path, batch_size: int = DEFAULT_BATCH_SIZE) -> pa.RecordBatchReader:
@@ -311,7 +333,7 @@ def _error_payload(error: BaseException) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     try:
-        args = _parser().parse_args(argv)
+        args = _parser().parse_args(_normalize_key_options(argv))
         result, exit_code = _execute(args)
     except SystemExit:
         raise

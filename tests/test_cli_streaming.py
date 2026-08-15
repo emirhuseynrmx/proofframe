@@ -125,6 +125,22 @@ def test_atomic_json_writer_never_publishes_a_partial_target(tmp_path):
     assert not list(tmp_path.glob(".receipt.json.*.tmp"))
 
 
+@pytest.mark.parametrize(
+    ("option", "attribute"),
+    [
+        ("--private-key", "private_key"),
+        ("--expected-public-key", "expected_public_key"),
+    ],
+)
+def test_cli_accepts_dash_prefixed_key_option_values(option, attribute):
+    command = "sign" if option == "--private-key" else "verify"
+    argv = [command, "evidence.json", option, "-urlsafe-key-material"]
+
+    args = cli._parser().parse_args(cli._normalize_key_options(argv))
+
+    assert getattr(args, attribute) == "-urlsafe-key-material"
+
+
 def test_cli_evidence_sign_and_verify_defaults_to_v2(tmp_path, capsys):
     data_path = tmp_path / "data.parquet"
     contract_path = tmp_path / "contract.json"
@@ -147,24 +163,26 @@ def test_cli_evidence_sign_and_verify_defaults_to_v2(tmp_path, capsys):
     assert evidence["schema"] == "proofframe.evidence.v2"
 
     keys = generate_keypair()
+    private_key = f"-{keys['private_key'][1:]}"
     cli.main(
         [
             "sign",
             str(evidence_path),
             "--private-key",
-            keys["private_key"],
+            private_key,
             "--output",
             str(receipt_path),
         ]
     )
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["schema"] == "proofframe.receipt.v2"
+    public_key = receipt["unsigned"]["public_key"]
     cli.main(
         [
             "verify",
             str(receipt_path),
             "--expected-public-key",
-            keys["public_key"],
+            public_key,
         ]
     )
     assert json.loads(capsys.readouterr().out)["valid"] is True
