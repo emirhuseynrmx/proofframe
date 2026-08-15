@@ -6,7 +6,8 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use proofframe::{
-    DiffOptions, DiffOutput, ErrorCode, ResourceLimits, diff_readers, diff_readers_with_options,
+    DiffOptions, DiffOutput, ErrorCode, ResourceLimits, SpillPolicy, diff_readers,
+    diff_readers_with_options,
 };
 use tempfile::TempDir;
 
@@ -154,4 +155,45 @@ fn arrow_ipc_sink_is_atomic_and_readable() {
     let rows = reader.map(|batch| batch.unwrap().num_rows()).sum::<usize>();
     assert_eq!(rows, 2);
     assert_eq!(report.metrics.output_records, 2);
+}
+
+#[test]
+fn known_small_diff_uses_the_in_memory_path_without_temp_storage() {
+    let mut options = options(4, None);
+    options.resources.max_temp_bytes = 0;
+    options.spill = SpillPolicy::Auto;
+    options.row_count_hints = Some((2, 2));
+    options.input_bytes_hint = Some(128);
+
+    let report = diff_readers_with_options(
+        reader_from_batches(vec![batch(2, "before")]),
+        reader_from_batches(vec![batch(2, "after")]),
+        &["id".to_string()],
+        &options,
+    )
+    .expect("a known small diff must stay in memory");
+
+    assert_eq!(report.changed_count, 2);
+    assert_eq!(report.metrics.partitions, 0);
+    assert_eq!(report.metrics.temp_bytes, 0);
+    assert_eq!(report.metrics.peak_temp_bytes, 0);
+}
+
+#[test]
+fn never_spill_fails_closed_when_exact_diff_exceeds_memory() {
+    let mut options = options(1, None);
+    options.resources.max_memory_bytes = 4 * 1024;
+    options.resources.max_temp_bytes = 256 * 1024 * 1024;
+    options.spill = SpillPolicy::Never;
+    options.row_count_hints = Some((10_000, 10_000));
+
+    let error = diff_readers_with_options(
+        reader_from_batches(vec![batch(10_000, "before")]),
+        reader_from_batches(vec![batch(10_000, "after")]),
+        &["id".to_string()],
+        &options,
+    )
+    .expect_err("never-spill mode must not write partitions behind the caller's back");
+
+    assert_eq!(error.code(), ErrorCode::ResourceLimit);
 }

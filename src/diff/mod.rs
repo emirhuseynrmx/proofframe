@@ -35,12 +35,40 @@ pub enum DiffOutput {
     ArrowIpc(PathBuf),
 }
 
+/// Policy for exact-state overflow during a keyed diff.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum SpillPolicy {
+    /// Use the in-memory fast path when exact size hints are safely below the budget, otherwise
+    /// fall back to checksummed temporary partitions.
+    #[default]
+    Auto,
+    /// Never create data partitions; fail closed if the in-memory exact state exceeds its budget.
+    Never,
+}
+
+impl SpillPolicy {
+    pub fn from_name(value: &str) -> Result<Self, ProofFrameError> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "never" => Ok(Self::Never),
+            other => Err(ProofFrameError::InvalidContract(format!(
+                "Unsupported spill policy `{other}`; expected `auto` or `never`"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DiffOptions {
     pub resources: ResourceLimits,
     pub max_samples: usize,
     pub output: Option<DiffOutput>,
     pub cancellation: CancellationToken,
+    /// Exact row counts supplied without consuming either stream.
+    pub row_count_hints: Option<(u64, u64)>,
+    /// Combined logical input bytes supplied by a trusted container adapter.
+    pub input_bytes_hint: Option<u64>,
+    pub spill: SpillPolicy,
 }
 
 impl Default for DiffOptions {
@@ -51,6 +79,9 @@ impl Default for DiffOptions {
             resources,
             output: None,
             cancellation: CancellationToken::new(),
+            row_count_hints: None,
+            input_bytes_hint: None,
+            spill: SpillPolicy::Auto,
         }
     }
 }
@@ -78,6 +109,13 @@ struct PartitionedRows {
     paths: Vec<PathBuf>,
 }
 
+struct InMemoryRows {
+    signature: Vec<ColumnSchema>,
+    rows: usize,
+    entries: BTreeMap<Vec<u8>, RowEntry>,
+    _memory: MemoryLedger,
+}
+
 pub fn diff_readers_with_options<B, A>(
     before: B,
     after: A,
@@ -92,6 +130,9 @@ where
         return Err(ProofFrameError::NoKeyColumns);
     }
     options.cancellation.check()?;
+    if should_use_in_memory(&before, &after, options) {
+        return diff_readers_in_memory(before, after, keys, options);
+    }
     let directory = TempDir::new()?;
     let account = ResourceAccount::root(options.resources);
     let mut temp = TempLedger::new(account.clone());
@@ -160,6 +201,166 @@ where
         output_records: accumulator.output_records,
     };
     accumulator.finish(metrics, &mut temp)
+}
+
+fn should_use_in_memory<B, A>(before: &B, after: &A, options: &DiffOptions) -> bool
+where
+    B: RecordBatchReader,
+    A: RecordBatchReader,
+{
+    if options.spill == SpillPolicy::Never {
+        return true;
+    }
+    let (Some((before_rows, after_rows)), Some(input_bytes)) =
+        (options.row_count_hints, options.input_bytes_hint)
+    else {
+        return false;
+    };
+    let rows = before_rows.saturating_add(after_rows);
+    let columns = before
+        .schema()
+        .fields()
+        .len()
+        .max(after.schema().fields().len()) as u64;
+    let per_row = 256_u64.saturating_add(columns.saturating_mul(32));
+    let estimate = input_bytes
+        .saturating_mul(2)
+        .saturating_add(rows.saturating_mul(per_row));
+    estimate <= options.resources.max_memory_bytes.saturating_mul(3) / 4
+}
+
+fn diff_readers_in_memory<B, A>(
+    before: B,
+    after: A,
+    keys: &[String],
+    options: &DiffOptions,
+) -> Result<DiffReport, ProofFrameError>
+where
+    B: RecordBatchReader,
+    A: RecordBatchReader,
+{
+    let account = ResourceAccount::root(options.resources);
+    let before = collect_rows_in_memory(before, keys, &account, &options.cancellation)?;
+    let after = collect_rows_in_memory(after, keys, &account, &options.cancellation)?;
+    if before.signature != after.signature {
+        return Err(ProofFrameError::SchemaMismatch(
+            "normalize columns before row-level diff".to_string(),
+        ));
+    }
+    let sample_limit = options.max_samples.min(options.resources.max_samples);
+    let column_names = before
+        .signature
+        .iter()
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    let mut temp = TempLedger::new(account.clone());
+    let mut accumulator = Accumulator::new(
+        keys.to_vec(),
+        before.rows,
+        after.rows,
+        sample_limit,
+        options.output.as_ref(),
+        &account,
+    )?;
+    for (key, after_entry) in &after.entries {
+        options.cancellation.check()?;
+        if let Some(before_entry) = before.entries.get(key) {
+            if before_entry.hash != after_entry.hash {
+                let columns = if accumulator.needs_changed_detail() {
+                    before_entry
+                        .values
+                        .iter()
+                        .zip(&after_entry.values)
+                        .zip(&column_names)
+                        .filter(|((before, after), _)| before != after)
+                        .map(|(_, name)| name.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                accumulator.changed(after_entry.display_key.clone(), columns, &mut temp)?;
+            }
+        } else {
+            accumulator.added(after_entry.display_key.clone(), &mut temp)?;
+        }
+    }
+    for (key, before_entry) in &before.entries {
+        options.cancellation.check()?;
+        if !after.entries.contains_key(key) {
+            accumulator.removed(before_entry.display_key.clone(), &mut temp)?;
+        }
+    }
+    let metrics = DiffMetrics {
+        partitions: 0,
+        temp_bytes: temp.used,
+        peak_memory_bytes: account.peak_memory_used(),
+        peak_temp_bytes: account.peak_temp_used(),
+        output_records: accumulator.output_records,
+    };
+    accumulator.finish(metrics, &mut temp)
+}
+
+fn collect_rows_in_memory<R: RecordBatchReader>(
+    mut reader: R,
+    keys: &[String],
+    account: &ResourceAccount,
+    cancellation: &CancellationToken,
+) -> Result<InMemoryRows, ProofFrameError> {
+    let schema = reader.schema();
+    let key_indexes = keys
+        .iter()
+        .map(|key| {
+            schema
+                .index_of(key)
+                .map_err(|_| ProofFrameError::MissingColumn(key.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let signature = schema_signature(schema.as_ref());
+    let mut entries = BTreeMap::new();
+    let mut memory = MemoryLedger::new(account.child(options_memory_cap(account), 0));
+    let mut rows = 0_usize;
+    for maybe_batch in &mut reader {
+        cancellation.check()?;
+        let batch = maybe_batch?;
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "record batch schema changed during in-memory diff".to_string(),
+            ));
+        }
+        for row in 0..batch.num_rows() {
+            let (key, display_key) = diff_key(&batch, &key_indexes, row)?;
+            let values = batch
+                .columns()
+                .iter()
+                .map(|array| {
+                    if array.is_null(row) {
+                        Ok(None)
+                    } else {
+                        crate::canonical_value_bytes(array.as_ref(), row).map(Some)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let entry = RowEntry {
+                display_key,
+                hash: row_hash(&values),
+                values,
+            };
+            memory.reserve_additional(estimated_entry_bytes(&key, &entry))?;
+            let duplicate_key = entry.display_key.clone();
+            if entries.insert(key, entry).is_some() {
+                return Err(ProofFrameError::DuplicateKey(duplicate_key));
+            }
+            rows = rows
+                .checked_add(1)
+                .ok_or_else(|| ProofFrameError::CorruptData("Diff row count overflowed".into()))?;
+        }
+    }
+    Ok(InMemoryRows {
+        signature,
+        rows,
+        entries,
+        _memory: memory,
+    })
 }
 
 fn partition_rows<R: RecordBatchReader>(

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use arrow::datatypes::{DataType, TimeUnit};
+use chrono::DateTime;
 
 use super::BoundAst;
 use crate::{ErrorCode, ProofFrameError};
@@ -128,16 +129,51 @@ pub(crate) fn parse_bound(
                 value,
                 scale: *scale,
             }),
-        DataType::Timestamp(unit, _) => text
-            .parse::<i64>()
-            .map(|value| TypedBound::Timestamp { value, unit: *unit })
-            .map_err(|_| invalid("expected integer ticks in the Arrow timestamp unit")),
+        DataType::Timestamp(unit, _) => parse_timestamp(text, *unit, path),
         _ => Err(ProofFrameError::contract(
             ErrorCode::ContractTypeMismatch,
             format!("Bounds are not supported for Arrow type `{data_type}`"),
             Some(path.to_string()),
         )),
     }
+}
+
+fn parse_timestamp(
+    source: &str,
+    unit: TimeUnit,
+    path: &str,
+) -> Result<TypedBound, ProofFrameError> {
+    if let Ok(value) = source.parse::<i64>() {
+        return Ok(TypedBound::Timestamp { value, unit });
+    }
+    let invalid = |reason: &str| {
+        ProofFrameError::contract(
+            ErrorCode::ContractInvalidBound,
+            format!("Invalid timestamp bound `{source}` at {path}: {reason}"),
+            Some(path.to_string()),
+        )
+    };
+    let timestamp = DateTime::parse_from_rfc3339(source).map_err(|_| {
+        invalid("expected integer ticks or an ISO-8601 timestamp with an explicit UTC offset")
+    })?;
+    let seconds = timestamp.timestamp();
+    let nanoseconds = i64::from(timestamp.timestamp_subsec_nanos());
+    let (scale, precision) = match unit {
+        TimeUnit::Second => (1_i64, 1_000_000_000_i64),
+        TimeUnit::Millisecond => (1_000, 1_000_000),
+        TimeUnit::Microsecond => (1_000_000, 1_000),
+        TimeUnit::Nanosecond => (1_000_000_000, 1),
+    };
+    if nanoseconds % precision != 0 {
+        return Err(invalid(
+            "fractional precision exceeds the Arrow timestamp unit; rounding is not allowed",
+        ));
+    }
+    let value = seconds
+        .checked_mul(scale)
+        .and_then(|whole| whole.checked_add(nanoseconds / precision))
+        .ok_or_else(|| invalid("timestamp exceeds the signed Arrow tick range"))?;
+    Ok(TypedBound::Timestamp { value, unit })
 }
 
 fn parse_decimal(

@@ -143,6 +143,44 @@ fn timestamp_bounds_retain_the_arrow_unit() {
 }
 
 #[test]
+fn iso_8601_timestamp_bounds_normalize_offsets_to_exact_arrow_ticks() {
+    let schema = Schema::new(vec![Field::new(
+        "created_at",
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        false,
+    )]);
+    let ast = contract_with_columns(
+        r#"{"created_at":{"min":"2023-11-14T22:13:20.123456Z","max":"2023-11-14T23:13:20.123456+01:00"}}"#,
+    );
+
+    let plan =
+        CompiledContract::compile(&ast, &schema).expect("RFC 3339 ISO-8601 bounds must compile");
+    let expected = TypedBound::Timestamp {
+        value: 1_700_000_000_123_456,
+        unit: TimeUnit::Microsecond,
+    };
+
+    assert_eq!(plan.columns()[0].rules().min(), Some(&expected));
+    assert_eq!(plan.columns()[0].rules().max(), Some(&expected));
+}
+
+#[test]
+fn iso_8601_timestamp_bounds_reject_precision_below_the_arrow_unit() {
+    let schema = Schema::new(vec![Field::new(
+        "created_at",
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        false,
+    )]);
+    let ast = contract_with_columns(r#"{"created_at":{"min":"2023-11-14T22:13:20.123456Z"}}"#);
+
+    let error = CompiledContract::compile(&ast, &schema)
+        .expect_err("sub-millisecond bounds must not be silently rounded");
+
+    assert_eq!(error.code(), ErrorCode::ContractInvalidBound);
+    assert_eq!(error.path(), Some("$.columns.created_at.min"));
+}
+
+#[test]
 fn invalid_regex_and_reversed_bounds_fail_during_compilation() {
     let text_schema = Schema::new(vec![Field::new("name", DataType::Utf8, false)]);
     let regex_ast = contract_with_columns(r#"{"name":{"pattern":"["}}"#);

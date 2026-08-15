@@ -165,11 +165,17 @@ fn update_data_type(
         DataType::LargeUtf8 => {
             hasher.update(&[20]);
         }
+        DataType::Utf8View => {
+            hasher.update(&[28]);
+        }
         DataType::Binary => {
             hasher.update(&[21]);
         }
         DataType::LargeBinary => {
             hasher.update(&[22]);
+        }
+        DataType::BinaryView => {
+            hasher.update(&[29]);
         }
         DataType::List(field) => {
             hasher.update(&[23]);

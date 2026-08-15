@@ -31,8 +31,10 @@ pub enum KernelKind {
     Timestamp(TimeUnit),
     Utf8,
     LargeUtf8,
+    Utf8View,
     Binary,
     LargeBinary,
+    BinaryView,
     Nested,
     NullOnly,
 }
@@ -60,8 +62,10 @@ impl KernelKind {
             DataType::Timestamp(unit, _) => Self::Timestamp(*unit),
             DataType::Utf8 => Self::Utf8,
             DataType::LargeUtf8 => Self::LargeUtf8,
+            DataType::Utf8View => Self::Utf8View,
             DataType::Binary => Self::Binary,
             DataType::LargeBinary => Self::LargeBinary,
+            DataType::BinaryView => Self::BinaryView,
             DataType::List(_)
             | DataType::LargeList(_)
             | DataType::FixedSizeList(_, _)
@@ -92,7 +96,7 @@ impl KernelKind {
     }
 
     fn supports_text_rules(&self) -> bool {
-        matches!(self, Self::Utf8 | Self::LargeUtf8)
+        matches!(self, Self::Utf8 | Self::LargeUtf8 | Self::Utf8View)
     }
 
     fn supports_unique(&self) -> bool {
@@ -380,6 +384,8 @@ fn hash_kernel(hasher: &mut blake3::Hasher, kernel: &KernelKind) {
         KernelKind::LargeBinary => 18,
         KernelKind::Nested => 19,
         KernelKind::NullOnly => 20,
+        KernelKind::Utf8View => 21,
+        KernelKind::BinaryView => 22,
     };
     hasher.update(&[tag]);
     match kernel {

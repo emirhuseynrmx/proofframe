@@ -11,6 +11,12 @@
   merge fan-in.
 - Release source ZIP and sdist artifacts are checked for generated binaries, local paths, unsafe
   members, and incomplete source trees.
+- Pandas and Polars now feed exact row/logical-byte hints into the native engine while retaining
+  Arrow C Stream ingestion; Arrow `Utf8View` and `BinaryView` columns are supported directly.
+- Timestamp contract bounds now accept exact offset-qualified ISO-8601/RFC 3339 values, normalize
+  offsets to UTC, and reject sub-unit precision instead of rounding.
+- Exact operations expose `spill="auto"|"never"`; known small keyed diffs avoid data partitions,
+  while never-spill mode fails closed when the configured memory budget is insufficient.
 
 - Added a strict, versioned contract AST and schema compiler. Unknown fields, out-of-range bounds,
   invalid timestamp/decimal literals, and incompatible rule/type pairs fail before scanning.

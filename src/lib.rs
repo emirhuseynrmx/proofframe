@@ -23,7 +23,7 @@ pub use contract::{
     BoundAst, ColumnPlan, CompiledContract, CompiledRules, ContractAst, ContractVersion,
     KernelKind, NaNPolicy, NaNPolicyAst, RuleAst, TypedBound,
 };
-pub use diff::{DiffMetrics, DiffOptions, DiffOutput, diff_readers_with_options};
+pub use diff::{DiffMetrics, DiffOptions, DiffOutput, SpillPolicy, diff_readers_with_options};
 pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
@@ -49,11 +49,12 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Array, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
     FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, StringArray,
-    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    StringViewArray, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 use arrow::record_batch::RecordBatchReader;
 use arrow::util::display::array_value_to_string;
@@ -97,6 +98,7 @@ impl ColumnState {
         distinct_mode: DistinctMode,
         account: &ResourceAccount,
         directory: Option<&std::path::Path>,
+        row_count_hint: Option<u64>,
     ) -> Result<Self, ProofFrameError> {
         Ok(Self {
             null_count: 0,
@@ -112,7 +114,7 @@ impl ColumnState {
                     directory
                         .expect("exact profiling owns a temporary directory")
                         .to_path_buf(),
-                    None,
+                    row_count_hint,
                 )?),
             },
             min: None,
@@ -574,6 +576,14 @@ fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, Proof
         encoded.extend_from_slice(value);
         return Ok(encoded);
     }
+    if let Some(values) = array.as_any().downcast_ref::<StringViewArray>() {
+        let value = values.value(row).as_bytes();
+        let mut encoded = Vec::with_capacity(9 + value.len());
+        encoded.push(28);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
+        return Ok(encoded);
+    }
     if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
         let value = values.value(row);
         let mut encoded = Vec::with_capacity(9 + value.len());
@@ -586,6 +596,14 @@ fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, Proof
         let value = values.value(row);
         let mut encoded = Vec::with_capacity(9 + value.len());
         encoded.push(22);
+        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(value);
+        return Ok(encoded);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
+        let value = values.value(row);
+        let mut encoded = Vec::with_capacity(9 + value.len());
+        encoded.push(29);
         encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
         encoded.extend_from_slice(value);
         return Ok(encoded);
@@ -658,6 +676,7 @@ fn inspect_batches<R>(
     contract: Option<&Contract>,
     distinct_mode: DistinctMode,
     resources: ResourceLimits,
+    row_count_hint: Option<u64>,
 ) -> Result<(Profile, ValidationOutcome), ProofFrameError>
 where
     R: RecordBatchReader,
@@ -675,6 +694,7 @@ where
                 distinct_mode,
                 &resource_root,
                 distinct_directory.as_ref().map(tempfile::TempDir::path),
+                row_count_hint,
             )
         })
         .collect::<Result<Vec<_>, ProofFrameError>>()?;
@@ -993,7 +1013,21 @@ pub fn profile_reader_with_resources<R>(
 where
     R: RecordBatchReader,
 {
-    inspect_batches(reader, None, distinct_mode, resources).map(|(profile, _)| profile)
+    profile_reader_with_resources_and_hint(reader, distinct_mode, resources, None)
+}
+
+/// Profile with hard resource budgets and an exact, non-consuming row-count hint.
+pub fn profile_reader_with_resources_and_hint<R>(
+    reader: R,
+    distinct_mode: DistinctMode,
+    resources: ResourceLimits,
+    row_count_hint: Option<u64>,
+) -> Result<Profile, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    inspect_batches(reader, None, distinct_mode, resources, row_count_hint)
+        .map(|(profile, _)| profile)
 }
 
 fn fingerprint_batches<R>(reader: R) -> Result<(u64, String), ProofFrameError>
@@ -1036,6 +1070,7 @@ where
         Some(contract),
         DistinctMode::Exact,
         ResourceLimits::default(),
+        None,
     )?;
     Ok(ValidationReport {
         valid: outcome.violation_count == 0,
@@ -1244,6 +1279,7 @@ mod tests {
                     Some(&contract),
                     DistinctMode::Exact,
                     ResourceLimits::default(),
+                    None,
                 )
                     .unwrap();
             let fast_report = validate_fast_batches(reader_from_batch(batch), &contract).unwrap();

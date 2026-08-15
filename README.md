@@ -21,11 +21,13 @@ the pinned 7,645,034-row Bitcoin comparison remains a dedicated-runner gate, not
 - Numeric, timestamp, decimal, string, binary, and uniqueness rules execute through specialized
   kernels rather than per-row dynamic dispatch.
 - Exact uniqueness, keyed diff, and leakage checks have explicit memory, temporary-storage, output,
-  and sample limits. Exact state spills as checksummed runs when its memory account is exhausted.
+  and sample limits. Known small inputs stay in memory; larger exact state spills as checksummed
+  runs and partitions when its memory account is exhausted.
 - `pf-fp-v1` stays frozen for existing proofs. `pf-fp-v2` adds a segmented encoder designed for
   prepared buffers and stable batch-independent hashing.
 - Python receives native dictionaries and typed exceptions; the Rust scan runs with the GIL
-  released and consumes the Arrow C Stream when available.
+  released. Current Pandas and Polars frames are consumed through Arrow C Stream without Python row
+  materialization, including Arrow `Utf8View` and `BinaryView` columns.
 - Evidence V2 binds dataset, contract, engine, limits, and result. Receipt verification reports
   cryptographic integrity separately from signer trust.
 
@@ -80,12 +82,14 @@ assert report["violation_count"] == 2
 
 `violation_count` is exact even when the `findings` sample is truncated. Missing required columns
 and incompatible rule/type combinations are rejected during compilation, before rows are scanned.
-Timestamp bounds are signed integer ticks in the Arrow field's declared unit, supplied as JSON
-numbers or decimal strings; contract V1 does not parse ISO-8601 timestamp strings.
+Timestamp bounds accept signed integer ticks in the Arrow field's declared unit or offset-qualified
+ISO-8601/RFC 3339 strings such as `2026-08-15T12:30:00+03:00`. String bounds are normalized to UTC
+and must map exactly to the field unit; ProofFrame rejects precision that would require rounding.
 
 Pandas, Polars, PyArrow tables, record batches, readers, and Arrow C Stream providers are accepted.
-Inputs that expose a stream stay streaming; the CLI does not construct a full table for CSV or
-Parquet input.
+Known containers also provide exact row and logical-byte hints to the Rust engine so exact buffers
+and small diffs can be sized before scanning. Inputs that expose only a stream stay streaming; the
+CLI does not construct a full table for CSV or Parquet input.
 
 ## Fingerprints
 
@@ -105,7 +109,13 @@ proofframe fingerprint data.parquet --fingerprint-version v2
 explicit and uses the bounded spill engine:
 
 ```python
-profile = pf.profile(table, distinct="exact", max_memory=64 << 20, max_temp=1 << 30)
+profile = pf.profile(
+    table,
+    distinct="exact",
+    max_memory=64 << 20,
+    max_temp=1 << 30,
+    spill="auto",  # use "never" to fail instead of writing exact-state runs
+)
 ```
 
 ## Evidence and receipts
@@ -141,19 +151,23 @@ result = pf.diff(
     max_samples=100,
     max_output_records=1_000_000,
     output="changes.jsonl",
+    spill="auto",
 )
 ```
 
 Counts remain exact. In-memory examples are bounded by `max_samples`; complete change records can be
-written atomically as JSON Lines or Arrow IPC, up to `max_output_records`. Temporary partitions carry
-format version, schema digest, declared lengths, and a BLAKE3 checksum. Length limits are checked
-before allocation.
+written atomically as JSON Lines or Arrow IPC, up to `max_output_records`. With trusted row/byte
+hints, `spill="auto"` uses a conservatively budgeted in-memory path for small diffs and reports zero
+partitions. Larger or unknown streams use temporary partitions carrying a format version, schema
+digest, declared lengths, and a BLAKE3 checksum. `spill="never"` prohibits exact-state data spill and
+fails closed at `max_memory`; output files still use an atomic same-directory temporary file. Length
+limits are checked before allocation.
 
 ## CLI
 
 ```bash
 proofframe check data.parquet --contract contract.json --max-memory 256MiB --max-temp 2GiB
-proofframe diff old.parquet new.parquet --key order_id --output changes.jsonl
+proofframe diff old.parquet new.parquet --key order_id --output changes.jsonl --spill auto
 proofframe fingerprint data.csv --fingerprint-version v2
 proofframe evidence data.parquet --contract contract.json --output evidence.json
 proofframe sign evidence.json --private-key "$PROOFFRAME_PRIVATE_KEY"

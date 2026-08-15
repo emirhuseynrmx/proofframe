@@ -44,12 +44,50 @@ def _as_reader(data: Any) -> pa.RecordBatchReader:
     )
 
 
+def _row_count_hint(data: Any) -> int | None:
+    """Return an exact, non-consuming row count for known tabular containers."""
+    if isinstance(data, (pa.Table, pa.RecordBatch)):
+        return data.num_rows
+    root_module = data.__class__.__module__.split(".")[0]
+    if root_module == "polars":
+        height = getattr(data, "height", None)
+        return height if isinstance(height, int) and height >= 0 else None
+    if root_module == "pandas":
+        return len(data.index)
+    return None
+
+
+def _byte_size_hint(data: Any) -> int | None:
+    """Return a non-consuming logical byte estimate for trusted containers."""
+    if isinstance(data, (pa.Table, pa.RecordBatch)):
+        return data.nbytes
+    root_module = data.__class__.__module__.split(".")[0]
+    if root_module == "polars":
+        estimated_size = getattr(data, "estimated_size", None)
+        if callable(estimated_size):
+            value = estimated_size()
+            return value if isinstance(value, int) and value >= 0 else None
+    if root_module == "pandas":
+        value = int(data.memory_usage(index=False, deep=True).sum())
+        return value if value >= 0 else None
+    return None
+
+
+def _temp_budget(max_temp: int, spill: str) -> int:
+    if spill == "auto":
+        return max_temp
+    if spill == "never":
+        return 0
+    raise ValueError("spill must be 'auto' or 'never'")
+
+
 def profile(
     data: Any,
     *,
     distinct: str = "none",
     max_memory: int = 512 * 1024 * 1024,
     max_temp: int = 4 * 1024 * 1024 * 1024,
+    spill: str = "auto",
 ) -> dict[str, Any]:
     """Return a deterministic profile and BLAKE3 fingerprint for tabular data."""
     if distinct not in {"none", "exact"}:
@@ -60,7 +98,10 @@ def profile(
             RuntimeWarning,
             stacklevel=2,
         )
-    return profile_arrow(_as_reader(data), distinct, max_memory, max_temp)
+    temp_budget = _temp_budget(max_temp, spill)
+    return profile_arrow(
+        _as_reader(data), distinct, _row_count_hint(data), max_memory, temp_budget
+    )
 
 
 def fingerprint(data: Any, *, version: str = "v1") -> str:
@@ -78,17 +119,19 @@ def check(
     max_temp: int = 4 * 1024 * 1024 * 1024,
     max_output_records: int = 100_000,
     max_samples: int = 100,
+    spill: str = "auto",
 ) -> dict[str, Any]:
     """Compile a strict contract and execute bounded, typed validation kernels."""
     normalized = dict(contract)
     normalized.setdefault("version", "proofframe.contract.v1")
-    row_count_hint = data.num_rows if isinstance(data, (pa.Table, pa.RecordBatch)) else None
+    row_count_hint = _row_count_hint(data)
+    temp_budget = _temp_budget(max_temp, spill)
     return check_arrow(
         _as_reader(data),
         json.dumps(normalized, sort_keys=True, separators=(",", ":")),
         row_count_hint,
         max_memory,
-        max_temp,
+        temp_budget,
         max_output_records,
         max_samples,
     )
@@ -102,17 +145,19 @@ def check_with_evidence(
     max_temp: int = 4 * 1024 * 1024 * 1024,
     max_output_records: int = 100_000,
     max_samples: int = 100,
+    spill: str = "auto",
 ) -> dict[str, Any]:
     """Validate and fingerprint one Arrow stream in a single native execution."""
     normalized = dict(contract)
     normalized.setdefault("version", "proofframe.contract.v1")
-    row_count_hint = data.num_rows if isinstance(data, (pa.Table, pa.RecordBatch)) else None
+    row_count_hint = _row_count_hint(data)
+    temp_budget = _temp_budget(max_temp, spill)
     return check_with_evidence_arrow(
         _as_reader(data),
         json.dumps(normalized, sort_keys=True, separators=(",", ":")),
         row_count_hint,
         max_memory,
-        max_temp,
+        temp_budget,
         max_output_records,
         max_samples,
     )
@@ -147,9 +192,20 @@ def diff(
     max_samples: int = 100,
     output: str | None = None,
     output_format: str = "jsonl",
+    spill: str = "auto",
 ) -> dict[str, Any]:
     """Return added, removed, and column-level changed rows by stable key."""
+    _temp_budget(max_temp, spill)
     key_list = [keys] if isinstance(keys, str) else list(keys)
+    before_rows = _row_count_hint(before)
+    after_rows = _row_count_hint(after)
+    before_bytes = _byte_size_hint(before)
+    after_bytes = _byte_size_hint(after)
+    input_bytes = (
+        before_bytes + after_bytes
+        if before_bytes is not None and after_bytes is not None
+        else None
+    )
     return diff_arrow(
         _as_reader(before),
         _as_reader(after),
@@ -160,6 +216,10 @@ def diff(
         max_samples,
         output,
         output_format,
+        before_rows,
+        after_rows,
+        input_bytes,
+        spill,
     )
 
 

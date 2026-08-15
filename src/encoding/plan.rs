@@ -1,9 +1,10 @@
 use arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Array, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
     FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, StringArray,
-    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    StringViewArray, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 use arrow::datatypes::{DataType, Schema};
 
@@ -31,8 +32,10 @@ pub(crate) enum ValueEncoder {
     Boolean,
     Utf8,
     LargeUtf8,
+    Utf8View,
     Binary,
     LargeBinary,
+    BinaryView,
     List(Box<Self>),
     LargeList(Box<Self>),
     FixedSizeList(Box<Self>),
@@ -65,8 +68,10 @@ impl ValueEncoder {
             DataType::Boolean => Self::Boolean,
             DataType::Utf8 => Self::Utf8,
             DataType::LargeUtf8 => Self::LargeUtf8,
+            DataType::Utf8View => Self::Utf8View,
             DataType::Binary => Self::Binary,
             DataType::LargeBinary => Self::LargeBinary,
+            DataType::BinaryView => Self::BinaryView,
             DataType::List(field) => Self::List(Box::new(Self::for_data_type(field.data_type())?)),
             DataType::LargeList(field) => {
                 Self::LargeList(Box::new(Self::for_data_type(field.data_type())?))
@@ -182,8 +187,10 @@ impl ValueEncoder {
 
         direct_string!(Utf8, StringArray, 19);
         direct_string!(LargeUtf8, LargeStringArray, 20);
+        direct_string!(Utf8View, StringViewArray, 28);
         direct_binary!(Binary, BinaryArray, 21);
         direct_binary!(LargeBinary, LargeBinaryArray, 22);
+        direct_binary!(BinaryView, BinaryViewArray, 29);
 
         scratch.clear();
         self.write_v1_value(array, row, scratch)?;
@@ -265,8 +272,10 @@ impl ValueEncoder {
 
         direct_string!(Utf8, StringArray);
         direct_string!(LargeUtf8, LargeStringArray);
+        direct_string!(Utf8View, StringViewArray);
         direct_binary!(Binary, BinaryArray);
         direct_binary!(LargeBinary, LargeBinaryArray);
+        direct_binary!(BinaryView, BinaryViewArray);
 
         scratch.clear();
         self.write_v1_value(array, row, scratch)?;
@@ -333,11 +342,19 @@ impl ValueEncoder {
                 20,
                 downcast::<LargeStringArray>(array).value(row).as_bytes(),
             ),
+            Self::Utf8View => write_bytes_value(
+                output,
+                28,
+                downcast::<StringViewArray>(array).value(row).as_bytes(),
+            ),
             Self::Binary => {
                 write_bytes_value(output, 21, downcast::<BinaryArray>(array).value(row))
             }
             Self::LargeBinary => {
                 write_bytes_value(output, 22, downcast::<LargeBinaryArray>(array).value(row))
+            }
+            Self::BinaryView => {
+                write_bytes_value(output, 29, downcast::<BinaryViewArray>(array).value(row))
             }
             Self::List(child_encoder) => {
                 let child = downcast::<ListArray>(array).value(row);

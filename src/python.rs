@@ -20,9 +20,10 @@ use crate::evidence::{
 use crate::{
     CompiledContract, ContractAst, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
     ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions,
-    PiiFingerprintOptions, ProofFrameError, ResourceLimits, detect_leakage_with_options,
-    diff_readers_with_options, execute_reader, execute_reader_with_fingerprint,
-    fingerprint_reader_with_options, profile_reader_with_resources, scan_pii_reader_with_options,
+    PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy,
+    detect_leakage_with_options, diff_readers_with_options, execute_reader,
+    execute_reader_with_fingerprint, fingerprint_reader_with_options,
+    profile_reader_with_resources_and_hint, scan_pii_reader_with_options,
 };
 
 create_exception!(proofframe, ProofFrameException, PyValueError);
@@ -43,6 +44,7 @@ const DEFAULT_SAMPLES: usize = 100;
 #[pyo3(signature = (
     source,
     distinct="none",
+    row_count_hint=None,
     max_memory_bytes=DEFAULT_MEMORY_BYTES,
     max_temp_bytes=DEFAULT_TEMP_BYTES
 ))]
@@ -50,6 +52,7 @@ fn profile_arrow(
     py: Python<'_>,
     source: PyArrowType<ArrowArrayStreamReader>,
     distinct: &str,
+    row_count_hint: Option<u64>,
     max_memory_bytes: u64,
     max_temp_bytes: u64,
 ) -> PyResult<Py<PyAny>> {
@@ -60,7 +63,9 @@ fn profile_arrow(
         DEFAULT_OUTPUT_RECORDS,
         DEFAULT_SAMPLES,
     );
-    let result = py.detach(move || profile_reader_with_resources(source.0, distinct, resources));
+    let result = py.detach(move || {
+        profile_reader_with_resources_and_hint(source.0, distinct, resources, row_count_hint)
+    });
     result
         .map_err(|error| map_error(py, error))
         .and_then(|report| serialize_to_python(py, &report))
@@ -372,7 +377,11 @@ fn validate_fast_arrow(
     max_output_records=DEFAULT_OUTPUT_RECORDS,
     max_samples=DEFAULT_SAMPLES,
     output_path=None,
-    output_format="jsonl"
+    output_format="jsonl",
+    before_row_count_hint=None,
+    after_row_count_hint=None,
+    input_bytes_hint=None,
+    spill="auto"
 ))]
 #[allow(clippy::too_many_arguments)]
 fn diff_arrow(
@@ -386,7 +395,12 @@ fn diff_arrow(
     max_samples: usize,
     output_path: Option<String>,
     output_format: &str,
+    before_row_count_hint: Option<u64>,
+    after_row_count_hint: Option<u64>,
+    input_bytes_hint: Option<u64>,
+    spill: &str,
 ) -> PyResult<Py<PyAny>> {
+    let spill = SpillPolicy::from_name(spill).map_err(|error| map_error(py, error))?;
     let output = match (output_path, output_format) {
         (None, _) => None,
         (Some(path), "jsonl") => Some(DiffOutput::JsonLines(PathBuf::from(path))),
@@ -412,6 +426,9 @@ fn diff_arrow(
         max_samples,
         output,
         cancellation: crate::CancellationToken::new(),
+        row_count_hints: before_row_count_hint.zip(after_row_count_hint),
+        input_bytes_hint,
+        spill,
     };
     let result = py.detach(move || diff_readers_with_options(before.0, after.0, &keys, &options));
     result

@@ -132,6 +132,12 @@ def _add_resource_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-memory", type=_parse_bytes, default=DEFAULT_MEMORY)
     parser.add_argument("--max-temp", type=_parse_bytes, default=DEFAULT_TEMP)
     parser.add_argument(
+        "--spill",
+        choices=("auto", "never"),
+        default="auto",
+        help="spill exact state when needed, or fail instead of writing data partitions",
+    )
+    parser.add_argument(
         "--max-output-records",
         type=_non_negative_int,
         default=DEFAULT_OUTPUT_RECORDS,
@@ -247,6 +253,7 @@ def _check(args: argparse.Namespace) -> dict[str, Any]:
         max_temp=args.max_temp,
         max_output_records=args.max_output_records,
         max_samples=args.max_samples,
+        spill=args.spill,
     )
 
 
@@ -271,6 +278,7 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             max_samples=args.max_samples,
             output=args.output,
             output_format=args.output_format,
+            spill=args.spill,
         )
         return result, 0
     if args.command == "evidence":
@@ -281,6 +289,7 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             max_temp=args.max_temp,
             max_output_records=args.max_output_records,
             max_samples=args.max_samples,
+            spill=args.spill,
         )
         result = checked["evidence"]
         if args.output:
@@ -311,6 +320,7 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             distinct=args.distinct,
             max_memory=args.max_memory,
             max_temp=args.max_temp,
+            spill=args.spill,
         ), 0
     if args.command == "validate":
         warnings.warn(

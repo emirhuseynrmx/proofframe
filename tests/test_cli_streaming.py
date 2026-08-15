@@ -141,6 +141,14 @@ def test_cli_accepts_dash_prefixed_key_option_values(option, attribute):
     assert getattr(args, attribute) == "-urlsafe-key-material"
 
 
+def test_cli_exposes_fail_closed_never_spill_policy():
+    args = cli._parser().parse_args(
+        ["diff", "before.parquet", "after.parquet", "--key", "id", "--spill", "never"]
+    )
+
+    assert args.spill == "never"
+
+
 def test_cli_evidence_sign_and_verify_defaults_to_v2(tmp_path, capsys):
     data_path = tmp_path / "data.parquet"
     contract_path = tmp_path / "contract.json"

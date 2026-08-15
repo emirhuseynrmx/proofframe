@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 
+import pandas as pd
 import polars as pl
 import proofframe
 import pyarrow as pa
@@ -75,18 +76,108 @@ def test_exact_profile_accepts_hard_resource_limits():
 
 
 def test_real_polars_dataframe_uses_arrow_path():
-    frame = pl.DataFrame({"id": [1, 2, 3], "score": [0.1, 0.2, 0.3]})
+    frame = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "score": [0.1, 0.2, 0.3],
+            "name": ["Ada", "Linus", "Grace"],
+            "payload": [b"a", b"b", b"c"],
+        }
+    )
 
     profile = proofframe.profile(frame, distinct="none")
     report = proofframe.validate(
         frame,
-        {"columns": {"id": {"required": True, "unique": True}, "score": {"min": 0, "max": 1}}},
+        {
+            "columns": {
+                "id": {"required": True, "unique": True},
+                "score": {"min": 0, "max": 1},
+                "name": {"pattern": "^[A-Z]"},
+                "payload": {"unique": True},
+            }
+        },
         include_profile=False,
     )
 
     assert profile["rows"] == 3
     assert profile["fingerprint"] == proofframe.fingerprint(frame)
     assert report["valid"] is True
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pd.DataFrame({"id": range(70_000)}),
+        pl.DataFrame({"id": range(70_000)}),
+    ],
+    ids=["pandas", "polars"],
+)
+def test_dataframe_row_count_hint_keeps_known_exact_state_in_memory(frame):
+    report = proofframe.check(
+        frame,
+        {"columns": {"id": {"unique": True}}},
+        max_memory=16 * 1024 * 1024,
+        max_temp=16 * 1024 * 1024,
+    )
+
+    assert report["valid"] is True
+    assert report["metrics"]["exact_runs"] == 0
+    assert report["metrics"]["spill_bytes"] == 0
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pd.DataFrame({"id": range(70_000)}),
+        pl.DataFrame({"id": range(70_000)}),
+    ],
+    ids=["pandas", "polars"],
+)
+def test_dataframe_row_count_hint_avoids_exact_profile_spill(frame):
+    with pytest.warns(RuntimeWarning, match="exact distinct"):
+        report = proofframe.profile(
+            frame,
+            distinct="exact",
+            max_memory=16 * 1024 * 1024,
+            spill="never",
+        )
+
+    assert report["columns"][0]["distinct_count"] == 70_000
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (
+            pd.DataFrame({"id": [1, 2], "value": ["before", "stable"]}),
+            pd.DataFrame({"id": [1, 2], "value": ["after", "stable"]}),
+        ),
+        (
+            pl.DataFrame({"id": [1, 2], "value": ["before", "stable"]}),
+            pl.DataFrame({"id": [1, 2], "value": ["after", "stable"]}),
+        ),
+    ],
+    ids=["pandas", "polars"],
+)
+def test_known_dataframe_diff_stays_in_memory_without_temp_storage(before, after):
+    report = proofframe.diff(
+        before,
+        after,
+        keys="id",
+        max_memory=16 * 1024 * 1024,
+        max_temp=0,
+        spill="auto",
+    )
+
+    assert report["changed_count"] == 1
+    assert report["metrics"]["partitions"] == 0
+    assert report["metrics"]["temp_bytes"] == 0
+    assert report["metrics"]["peak_temp_bytes"] == 0
+
+
+def test_invalid_spill_policy_fails_before_consuming_input():
+    with pytest.raises(ValueError, match="spill must be 'auto' or 'never'"):
+        proofframe.diff(users(), users(), keys="id", spill="sometimes")
 
 
 def test_contract_reports_row_level_evidence():

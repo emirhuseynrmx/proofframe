@@ -42,8 +42,9 @@ assert_eq!(report.valid, report.violation_count == 0);
 
 Compilation resolves column indices, converts exact source bounds to Arrow-native values, compiles
 regular expressions, and selects a kernel once. Unknown fields and rule/type mismatches fail before
-the first batch is consumed. Timestamp bounds are signed integer ticks in the Arrow field's unit,
-encoded as JSON numbers or decimal strings.
+the first batch is consumed. Timestamp bounds accept signed integer ticks in the Arrow field's unit
+or offset-qualified ISO-8601/RFC 3339 strings. Text timestamps normalize to UTC and are rejected when
+the declared Arrow unit cannot represent them exactly without rounding.
 
 ## Fingerprint protocol
 
@@ -67,7 +68,10 @@ peak memory, peak temporary bytes, spill bytes, and run counts. Findings are sam
 from the exact violation count and capped by both contract `max_findings` and resource `max_samples`.
 
 Keyed diff and leakage APIs expose their own options and share the same fail-closed resource model.
-Partition headers and record lengths are validated before allocation.
+`DiffOptions` uses exact row/logical-byte hints for a conservatively budgeted in-memory fast path;
+otherwise `SpillPolicy::Auto` selects checksummed partitions. `SpillPolicy::Never` prohibits data
+partition spill and returns a resource error if exact state does not fit. Partition headers and
+record lengths are validated before allocation.
 Legacy profile exact-distinct state uses the same spill engine; `profile_reader` defaults to no
 distinct state and callers opt in with `profile_reader_with_resources`.
 

@@ -1,9 +1,9 @@
 use arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array, Float32Array,
-    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
-    LargeStringArray, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    Array, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, StringArray, StringViewArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
 };
 
 use super::record_lazy;
@@ -178,6 +178,15 @@ pub(crate) fn scan_column(
             unique,
         );
     }
+    if matches!(plan.kernel(), KernelKind::Utf8View) {
+        return scan_string_view(
+            downcast::<StringViewArray>(array),
+            plan,
+            row_offset,
+            validation,
+            unique,
+        );
+    }
     if matches!(plan.kernel(), KernelKind::Boolean) {
         let values = downcast::<BooleanArray>(array);
         for row in 0..values.len() {
@@ -206,6 +215,15 @@ pub(crate) fn scan_column(
     if matches!(plan.kernel(), KernelKind::LargeBinary) {
         return scan_binary(
             downcast::<LargeBinaryArray>(array),
+            plan,
+            row_offset,
+            validation,
+            unique,
+        );
+    }
+    if matches!(plan.kernel(), KernelKind::BinaryView) {
+        return scan_binary_view(
+            downcast::<BinaryViewArray>(array),
             plan,
             row_offset,
             validation,
@@ -267,6 +285,79 @@ fn scan_strings<O: arrow::array::OffsetSizeTrait>(
 
 fn scan_binary<O: arrow::array::OffsetSizeTrait>(
     values: &arrow::array::GenericBinaryArray<O>,
+    plan: &ColumnPlan,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    mut unique: Option<&mut ExactState>,
+) -> Result<(), ProofFrameError> {
+    let rules = plan.rules();
+    let name = plan.field().name();
+    for row in 0..values.len() {
+        if values.is_null(row) {
+            record_null(rules.not_null(), validation, name, row_offset, row);
+            continue;
+        }
+        insert_unique(
+            &mut unique,
+            ValueRef::Bytes(values.value(row)),
+            row_offset,
+            row,
+        )?;
+    }
+    Ok(())
+}
+
+fn scan_string_view(
+    values: &StringViewArray,
+    plan: &ColumnPlan,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    mut unique: Option<&mut ExactState>,
+) -> Result<(), ProofFrameError> {
+    let rules = plan.rules();
+    let name = plan.field().name();
+    for row in 0..values.len() {
+        if values.is_null(row) {
+            record_null(rules.not_null(), validation, name, row_offset, row);
+            continue;
+        }
+        let value = values.value(row);
+        insert_unique(
+            &mut unique,
+            ValueRef::Bytes(value.as_bytes()),
+            row_offset,
+            row,
+        )?;
+        if rules
+            .pattern()
+            .is_some_and(|pattern| !pattern.is_match(value))
+        {
+            record_lazy(
+                validation,
+                "pattern",
+                name,
+                Some(row_offset + row as u64),
+                || "Value does not match the required pattern".to_string(),
+            );
+        }
+        if rules
+            .allowed()
+            .is_some_and(|allowed| !allowed.contains(value))
+        {
+            record_lazy(
+                validation,
+                "allowed",
+                name,
+                Some(row_offset + row as u64),
+                || "Value is not in the allowlist".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn scan_binary_view(
+    values: &BinaryViewArray,
     plan: &ColumnPlan,
     row_offset: u64,
     validation: &mut ValidationState,

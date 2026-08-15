@@ -193,8 +193,10 @@ fn exact_kind(kernel: &KernelKind) -> ValueKind {
         KernelKind::Decimal128 { .. }
         | KernelKind::Utf8
         | KernelKind::LargeUtf8
+        | KernelKind::Utf8View
         | KernelKind::Binary
         | KernelKind::LargeBinary
+        | KernelKind::BinaryView
         | KernelKind::Nested
         | KernelKind::NullOnly => ValueKind::Bytes,
     }
