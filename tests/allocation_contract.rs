@@ -1,0 +1,68 @@
+mod support;
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use arrow::array::{ArrayRef, Int64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use proofframe::fingerprint_reader;
+
+use support::reader_from_batches;
+
+struct CountingAllocator;
+
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static REALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the request is forwarded unchanged to the process allocator.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: the pointer and layout came from the process allocator.
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the pointer and layout came from the process allocator and the
+        // requested size is forwarded unchanged.
+        unsafe { System.realloc(pointer, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+#[test]
+fn primitive_fingerprint_allocations_are_constant_after_setup() {
+    const ROWS: usize = 100_000;
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Int64Array::from_iter_values(0..ROWS as i64)) as ArrayRef],
+    )
+    .unwrap();
+    let reader = reader_from_batches(vec![batch]);
+
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    REALLOCATIONS.store(0, Ordering::SeqCst);
+    let digest = fingerprint_reader(reader).unwrap();
+    let allocations = ALLOCATIONS.load(Ordering::SeqCst);
+    let reallocations = REALLOCATIONS.load(Ordering::SeqCst);
+
+    assert!(digest.starts_with("pf-fp-v1:"));
+    assert!(
+        allocations <= 8,
+        "primitive fingerprint allocated {allocations} times for {ROWS} rows"
+    );
+    assert_eq!(
+        reallocations, 0,
+        "prepared fingerprint buffers must not reallocate"
+    );
+}

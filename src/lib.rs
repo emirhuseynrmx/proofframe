@@ -7,6 +7,7 @@
 //! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
 mod contract;
+mod encoding;
 mod error;
 mod pii;
 pub mod receipt;
@@ -1422,25 +1423,7 @@ fn fingerprint_batches<R>(reader: R) -> Result<(u64, String), ProofFrameError>
 where
     R: RecordBatchReader,
 {
-    let schema = reader.schema();
-    let mut rows = 0_u64;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pf-fp-v1\0");
-    for field in schema.fields() {
-        let data_type = field.data_type().to_string();
-        update_schema_hash(&mut hasher, field.name(), &data_type, field.is_nullable());
-    }
-    hasher.update(b"pf-fp-body-v1\0");
-    for maybe_batch in reader {
-        let batch = maybe_batch?;
-        for row in 0..batch.num_rows() {
-            for (column_index, array) in batch.columns().iter().enumerate() {
-                update_hash(&mut hasher, column_index, array.as_ref(), row)?;
-            }
-        }
-        rows += batch.num_rows() as u64;
-    }
-    Ok((rows, format!("pf-fp-v1:{}", hasher.finalize().to_hex())))
+    encoding::fingerprint_v1(reader)
 }
 
 /// Return only the canonical dataset fingerprint, without profiling or exact distinct state.
