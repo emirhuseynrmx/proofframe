@@ -170,7 +170,11 @@ fn reject_unknown(
     Ok(())
 }
 
-fn append_path(parent: &str, segment: &str) -> String {
+pub(crate) fn column_path(column: &str) -> String {
+    append_path("$.columns", column)
+}
+
+pub(crate) fn append_path(parent: &str, segment: &str) -> String {
     if is_identifier(segment) {
         format!("{parent}.{segment}")
     } else {

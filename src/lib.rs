@@ -11,7 +11,10 @@ mod error;
 mod pii;
 pub mod receipt;
 
-pub use contract::{BoundAst, ContractAst, ContractVersion, NaNPolicyAst, RuleAst};
+pub use contract::{
+    BoundAst, ColumnPlan, CompiledContract, CompiledRules, ContractAst, ContractVersion,
+    KernelKind, NaNPolicy, NaNPolicyAst, RuleAst, TypedBound,
+};
 pub use error::{ErrorCode, ProofFrameError};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
