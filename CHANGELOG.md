@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.5.0
+
 - Added `check_with_evidence`, which validates and fingerprints the same Arrow batches in one
   execution; the caller-supplied report assembler is now explicitly named
   `assemble_evidence_unchecked`.
@@ -9,8 +11,6 @@
   merge fan-in.
 - Release source ZIP and sdist artifacts are checked for generated binaries, local paths, unsafe
   members, and incomplete source trees.
-
-## 0.5.0
 
 - Added a strict, versioned contract AST and schema compiler. Unknown fields, out-of-range bounds,
   invalid timestamp/decimal literals, and incompatible rule/type pairs fail before scanning.
