@@ -7,6 +7,7 @@
 //! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
 
 mod contract;
+mod diff;
 mod distinct;
 mod encoding;
 mod error;
@@ -18,6 +19,7 @@ pub use contract::{
     BoundAst, ColumnPlan, CompiledContract, CompiledRules, ContractAst, ContractVersion,
     KernelKind, NaNPolicy, NaNPolicyAst, RuleAst, TypedBound,
 };
+pub use diff::{DiffMetrics, DiffOptions, DiffOutput, diff_readers_with_options};
 pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
@@ -27,17 +29,13 @@ pub use execution::{
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
 
 use arrow::array::{
     Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
     FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, RecordBatch,
-    StringArray, StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, MapArray, StringArray,
+    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 #[cfg(feature = "python")]
 use arrow::ffi_stream::ArrowArrayStreamReader;
@@ -51,25 +49,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tempfile::TempDir;
 
 const DEFAULT_MAX_FINDINGS: usize = 100;
-const DIFF_PARTITIONS: usize = 64;
-
-type RowValues = Vec<Option<Vec<u8>>>;
-struct RowEntry {
-    display_key: String,
-    values: RowValues,
-    hash: String,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct ColumnSchema {
-    name: String,
-    data_type: String,
-    nullable: bool,
-}
-
 /// Per-column summary produced while profiling a dataset.
 #[derive(Debug, Serialize)]
 pub struct ColumnProfile {
@@ -291,6 +272,10 @@ pub struct DiffReport {
     pub removed_keys: Vec<String>,
     /// Per-key column-level changes, sorted by key.
     pub changed: Vec<ChangedRow>,
+    /// True when exact counts exceed the bounded in-memory samples.
+    pub truncated: bool,
+    /// Resource and output counters for the diff execution.
+    pub metrics: DiffMetrics,
 }
 
 /// A single PII detection that never carries the matched value.
@@ -499,21 +484,6 @@ fn update_hash(
     Ok(())
 }
 
-fn row_values_hash(values: &RowValues) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pf-diff-row-v1\0");
-    for (column, value) in values.iter().enumerate() {
-        hasher.update(&(column as u64).to_le_bytes());
-        match value {
-            Some(bytes) => update_len_prefixed(&mut hasher, bytes),
-            None => {
-                hasher.update(&u64::MAX.to_le_bytes());
-            }
-        };
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
 fn inspect_batches<R>(
     reader: R,
     contract: Option<&Contract>,
@@ -690,247 +660,6 @@ where
         },
         validation.finish(),
     ))
-}
-
-fn row_partition(key: &[u8]) -> usize {
-    let digest = blake3::hash(key);
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest.as_bytes()[..8]);
-    (u64::from_le_bytes(bytes) as usize) % DIFF_PARTITIONS
-}
-
-fn schema_signature<R: RecordBatchReader>(reader: &R) -> Vec<ColumnSchema> {
-    reader
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| ColumnSchema {
-            name: field.name().clone(),
-            data_type: field.data_type().to_string(),
-            nullable: field.is_nullable(),
-        })
-        .collect()
-}
-
-fn schema_names(signature: &[ColumnSchema]) -> Vec<String> {
-    signature.iter().map(|field| field.name.clone()).collect()
-}
-
-fn diff_key(
-    batch: &RecordBatch,
-    key_indexes: &[usize],
-    row: usize,
-) -> Result<(Vec<u8>, String), ProofFrameError> {
-    let mut canonical = Vec::new();
-    let mut display = Vec::with_capacity(key_indexes.len());
-    for index in key_indexes {
-        let array = batch.column(*index);
-        let value = canonical_value_bytes(array.as_ref(), row)?;
-        canonical.extend_from_slice(&(*index as u64).to_le_bytes());
-        canonical.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        canonical.extend_from_slice(&value);
-        if array.is_null(row) {
-            display.push("<null>".to_string());
-        } else {
-            display.push(value_for_rules(array.as_ref(), row)?);
-        }
-    }
-    Ok((canonical, display.join("\u{1f}")))
-}
-
-fn write_u64(writer: &mut BufWriter<File>, value: u64) -> Result<(), ProofFrameError> {
-    writer.write_all(&value.to_le_bytes()).map_err(Into::into)
-}
-
-fn read_u64(reader: &mut BufReader<File>) -> Result<Option<u64>, ProofFrameError> {
-    let mut bytes = [0_u8; 8];
-    match reader.read_exact(&mut bytes) {
-        Ok(()) => Ok(Some(u64::from_le_bytes(bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn write_bytes(writer: &mut BufWriter<File>, value: &[u8]) -> Result<(), ProofFrameError> {
-    write_u64(writer, value.len() as u64)?;
-    writer.write_all(value).map_err(Into::into)
-}
-
-fn read_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>, ProofFrameError> {
-    let len = read_u64(reader)?.ok_or_else(|| {
-        ProofFrameError::CorruptData("Truncated diff partition record".to_string())
-    })?;
-    let mut value = vec![0_u8; len as usize];
-    reader.read_exact(&mut value)?;
-    Ok(value)
-}
-
-fn write_row_record(
-    writer: &mut BufWriter<File>,
-    key: &[u8],
-    entry: &RowEntry,
-) -> Result<(), ProofFrameError> {
-    write_bytes(writer, key)?;
-    write_bytes(writer, entry.display_key.as_bytes())?;
-    write_bytes(writer, entry.hash.as_bytes())?;
-    write_u64(writer, entry.values.len() as u64)?;
-    for value in &entry.values {
-        match value {
-            Some(bytes) => write_bytes(writer, bytes)?,
-            None => write_u64(writer, u64::MAX)?,
-        }
-    }
-    Ok(())
-}
-
-fn read_row_record(
-    reader: &mut BufReader<File>,
-) -> Result<Option<(Vec<u8>, RowEntry)>, ProofFrameError> {
-    let Some(key_len) = read_u64(reader)? else {
-        return Ok(None);
-    };
-    let mut key = vec![0_u8; key_len as usize];
-    reader.read_exact(&mut key)?;
-    let display_key = String::from_utf8(read_bytes(reader)?)?;
-    let hash = String::from_utf8(read_bytes(reader)?)?;
-    let value_count = read_u64(reader)?.ok_or_else(|| {
-        ProofFrameError::CorruptData("Truncated diff partition record".to_string())
-    })?;
-    let mut values = Vec::with_capacity(value_count as usize);
-    for _ in 0..value_count {
-        let len = read_u64(reader)?
-            .ok_or_else(|| ProofFrameError::CorruptData("Truncated diff value".to_string()))?;
-        if len == u64::MAX {
-            values.push(None);
-        } else {
-            let mut value = vec![0_u8; len as usize];
-            reader.read_exact(&mut value)?;
-            values.push(Some(value));
-        }
-    }
-    Ok(Some((
-        key,
-        RowEntry {
-            display_key,
-            values,
-            hash,
-        },
-    )))
-}
-
-fn partition_rows<R>(
-    reader: R,
-    keys: &[String],
-    directory: &Path,
-    prefix: &str,
-) -> Result<(Vec<ColumnSchema>, usize, Vec<PathBuf>), ProofFrameError>
-where
-    R: RecordBatchReader,
-{
-    let schema = reader.schema();
-    let key_indexes = keys
-        .iter()
-        .map(|key| {
-            schema
-                .index_of(key)
-                .map_err(|_| ProofFrameError::MissingColumn(key.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let signature = schema_signature(&reader);
-    let paths = (0..DIFF_PARTITIONS)
-        .map(|partition| directory.join(format!("{prefix}-{partition}.pfpart")))
-        .collect::<Vec<_>>();
-    let mut writers = paths
-        .iter()
-        .map(|path| File::create(path).map(BufWriter::new))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut row_count = 0_usize;
-    for maybe_batch in reader {
-        let batch: RecordBatch = maybe_batch?;
-        for row in 0..batch.num_rows() {
-            let (key, display_key) = diff_key(&batch, &key_indexes, row)?;
-            let values = batch
-                .columns()
-                .iter()
-                .map(|array| {
-                    if array.is_null(row) {
-                        Ok(None)
-                    } else {
-                        canonical_value_bytes(array.as_ref(), row).map(Some)
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let hash = row_values_hash(&values);
-            let partition = row_partition(&key);
-            write_row_record(
-                &mut writers[partition],
-                &key,
-                &RowEntry {
-                    display_key,
-                    values,
-                    hash,
-                },
-            )?;
-            row_count += 1;
-        }
-    }
-    for writer in &mut writers {
-        writer.flush()?;
-    }
-    Ok((signature, row_count, paths))
-}
-
-fn process_diff_partition(
-    before_path: &Path,
-    after_path: &Path,
-    column_names: &[String],
-    added_keys: &mut Vec<String>,
-    removed_keys: &mut Vec<String>,
-    changed: &mut Vec<ChangedRow>,
-) -> Result<(), ProofFrameError> {
-    let mut before_rows: HashMap<Vec<u8>, RowEntry> = HashMap::new();
-    let mut before_reader = BufReader::new(File::open(before_path)?);
-    while let Some((key, entry)) = read_row_record(&mut before_reader)? {
-        let display_key = entry.display_key.clone();
-        if before_rows.insert(key, entry).is_some() {
-            return Err(ProofFrameError::DuplicateKey(display_key));
-        }
-    }
-
-    let mut seen_after: HashSet<Vec<u8>> = HashSet::new();
-    let mut after_reader = BufReader::new(File::open(after_path)?);
-    while let Some((key, entry)) = read_row_record(&mut after_reader)? {
-        if !seen_after.insert(key.clone()) {
-            return Err(ProofFrameError::DuplicateKey(entry.display_key.clone()));
-        }
-        if let Some(before_entry) = before_rows.get(&key) {
-            if before_entry.hash != entry.hash {
-                let columns = before_entry
-                    .values
-                    .iter()
-                    .zip(&entry.values)
-                    .zip(column_names)
-                    .filter(|((before, after), _)| before != after)
-                    .map(|(_, name)| name.clone())
-                    .collect();
-                changed.push(ChangedRow {
-                    key: entry.display_key,
-                    columns,
-                });
-            }
-        } else {
-            added_keys.push(entry.display_key);
-        }
-    }
-
-    removed_keys.extend(before_rows.iter().filter_map(|(key, entry)| {
-        if seen_after.contains(key) {
-            None
-        } else {
-            Some(entry.display_key.clone())
-        }
-    }));
-    Ok(())
 }
 
 fn privacy_fingerprint(value: &str) -> String {
@@ -1171,48 +900,7 @@ where
     B: RecordBatchReader,
     A: RecordBatchReader,
 {
-    if keys.is_empty() {
-        return Err(ProofFrameError::NoKeyColumns);
-    }
-    let directory = TempDir::new()?;
-    let (before_schema, before_count, before_paths) =
-        partition_rows(before, keys, directory.path(), "before")?;
-    let (after_schema, after_count, after_paths) =
-        partition_rows(after, keys, directory.path(), "after")?;
-    if before_schema != after_schema {
-        return Err(ProofFrameError::SchemaMismatch(
-            "normalize columns before row-level diff".to_string(),
-        ));
-    }
-    let column_names = schema_names(&before_schema);
-
-    let mut added_keys = Vec::new();
-    let mut removed_keys = Vec::new();
-    let mut changed = Vec::new();
-    for (before_path, after_path) in before_paths.iter().zip(&after_paths) {
-        process_diff_partition(
-            before_path,
-            after_path,
-            &column_names,
-            &mut added_keys,
-            &mut removed_keys,
-            &mut changed,
-        )?;
-    }
-    added_keys.sort();
-    removed_keys.sort();
-    changed.sort_by(|left, right| left.key.cmp(&right.key));
-    Ok(DiffReport {
-        keys: keys.to_vec(),
-        before_rows: before_count,
-        after_rows: after_count,
-        added_count: added_keys.len(),
-        removed_count: removed_keys.len(),
-        changed_count: changed.len(),
-        added_keys,
-        removed_keys,
-        changed,
-    })
+    diff::diff_readers_with_options(before, after, keys, &DiffOptions::default())
 }
 
 /// Scan Arrow record batches for high-signal PII patterns.
@@ -1410,7 +1098,7 @@ mod tests {
 
     use arrow::array::ArrayRef;
     use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatchIterator;
+    use arrow::record_batch::{RecordBatch, RecordBatchIterator};
     use proptest::prelude::*;
 
     fn reader_from_batch(batch: RecordBatch) -> impl RecordBatchReader {

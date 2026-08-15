@@ -34,7 +34,7 @@ python = ["dep:pyo3", "arrow/pyarrow"]
 
 [dependencies]
 ahash = "0.8.12"
-arrow = { version = "59.1.0", default-features = false }
+arrow = { version = "59.1.0", default-features = false, features = ["ipc"] }
 base64 = "0.22.1"
 blake3 = "1.8.2"
 ed25519-dalek = "3.0.0"
