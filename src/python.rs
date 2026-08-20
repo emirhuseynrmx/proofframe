@@ -754,6 +754,14 @@ fn map_error(py: Python<'_>, error: ProofFrameError) -> PyErr {
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_data_functions(module)?;
+    register_receipt_functions(module)?;
+    register_exceptions(module)?;
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    Ok(())
+}
+
+fn register_data_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(check_arrow, module)?)?;
@@ -764,11 +772,19 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(scan_pii_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(detect_leakage_arrow, module)?)?;
+    Ok(())
+}
+
+fn register_receipt_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(generate_signing_keypair, module)?)?;
     module.add_function(wrap_pyfunction!(sign_proof_receipt, module)?)?;
     module.add_function(wrap_pyfunction!(sign_evidence_receipt, module)?)?;
     module.add_function(wrap_pyfunction!(verify_proof_receipt, module)?)?;
     module.add_function(wrap_pyfunction!(verify_proof_receipt_any, module)?)?;
+    Ok(())
+}
+
+fn register_exceptions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "ProofFrameError",
         module.py().get_type::<ProofFrameException>(),
@@ -796,6 +812,5 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.py().get_type::<ProofFrameArrowError>(),
     )?;
     module.add("ReceiptError", module.py().get_type::<ReceiptError>())?;
-    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

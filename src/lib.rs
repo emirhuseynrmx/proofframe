@@ -56,7 +56,8 @@ use arrow::array::{
     TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
     UInt64Array,
 };
-use arrow::record_batch::RecordBatchReader;
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use arrow::util::display::array_value_to_string;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -698,11 +699,45 @@ where
             )
         })
         .collect::<Result<Vec<_>, ProofFrameError>>()?;
-    let mut seen_unique: HashMap<String, HashSet<Vec<u8>>> = HashMap::new();
-    let mut patterns: HashMap<String, Regex> = HashMap::new();
+    let mut rules = prepare_validation(&schema, contract)?;
+    let mut rows = 0_u64;
+    let mut hasher = profile_hasher(&schema);
+    for maybe_batch in reader {
+        let batch = maybe_batch?;
+        BatchInspection {
+            contract,
+            states: &mut states,
+            rules: &mut rules,
+            hasher: &mut hasher,
+        }
+        .inspect(&batch, &schema, rows)?;
+        rows += batch.num_rows() as u64;
+    }
+    let columns = finish_column_profiles(&schema, states)?;
+    Ok((
+        Profile {
+            rows,
+            columns,
+            fingerprint: format!("pf-fp-v1:{}", hasher.finalize().to_hex()),
+        },
+        rules.validation.finish(),
+    ))
+}
+
+struct RuleValidation {
+    validation: ValidationState,
+    seen_unique: HashMap<String, HashSet<Vec<u8>>>,
+    patterns: HashMap<String, Regex>,
+}
+
+fn prepare_validation(
+    schema: &SchemaRef,
+    contract: Option<&Contract>,
+) -> Result<RuleValidation, ProofFrameError> {
     let max_findings = contract.map_or(DEFAULT_MAX_FINDINGS, |value| value.max_findings);
     let mut validation = ValidationState::new(max_findings);
-
+    let mut seen_unique = HashMap::new();
+    let mut patterns = HashMap::new();
     if let Some(contract) = contract {
         for (name, rule) in &contract.columns {
             if rule.required && schema.index_of(name).is_err() {
@@ -721,129 +756,246 @@ where
             }
         }
     }
+    Ok(RuleValidation {
+        validation,
+        seen_unique,
+        patterns,
+    })
+}
 
-    let mut rows = 0_u64;
+fn profile_hasher(schema: &SchemaRef) -> blake3::Hasher {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pf-fp-v1\0");
     for field in schema.fields() {
-        let data_type = field.data_type().to_string();
-        update_schema_hash(&mut hasher, field.name(), &data_type, field.is_nullable());
+        update_schema_hash(
+            &mut hasher,
+            field.name(),
+            &field.data_type().to_string(),
+            field.is_nullable(),
+        );
     }
     hasher.update(b"pf-fp-body-v1\0");
-    for maybe_batch in reader {
-        let batch = maybe_batch?;
+    hasher
+}
+
+struct BatchInspection<'a> {
+    contract: Option<&'a Contract>,
+    states: &'a mut [ColumnState],
+    rules: &'a mut RuleValidation,
+    hasher: &'a mut blake3::Hasher,
+}
+
+impl BatchInspection<'_> {
+    fn inspect(
+        &mut self,
+        batch: &RecordBatch,
+        schema: &SchemaRef,
+        row_offset: u64,
+    ) -> Result<(), ProofFrameError> {
         if batch.schema().as_ref() != schema.as_ref() {
             return Err(ProofFrameError::SchemaMismatch(
                 "record batch schema changed during profiling".to_string(),
             ));
         }
         for row in 0..batch.num_rows() {
-            let global_row = rows + row as u64;
+            let global_row = row_offset + row as u64;
             for (column_index, array) in batch.columns().iter().enumerate() {
-                let field = schema.field(column_index);
-                let state = &mut states[column_index];
-                if array.is_null(row) {
-                    state.null_count += 1;
-                    update_hash(&mut hasher, column_index, array.as_ref(), row)?;
-                    if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
-                        if rule.not_null {
-                            validation.record(Finding {
-                                rule: "not_null",
-                                column: field.name().clone(),
-                                row: Some(global_row),
-                                message: "Null value is not allowed".to_string(),
-                            });
-                        }
-                    }
-                    continue;
-                }
-
-                state.non_null_count += 1;
-                update_hash(&mut hasher, column_index, array.as_ref(), row)?;
-                let value_key = canonical_value_bytes(array.as_ref(), row)?;
-                if let Some(distinct) = &mut state.distinct {
-                    distinct.insert(ValueRef::Bytes(&value_key), global_row)?;
-                }
-                if let Some(number) = numeric_value(array.as_ref(), row)? {
-                    state.min = Some(state.min.map_or(number, |current| current.min(number)));
-                    state.max = Some(state.max.map_or(number, |current| current.max(number)));
-                }
-
-                if let Some(rule) = contract.and_then(|value| value.columns.get(field.name())) {
-                    if rule.unique
-                        && !seen_unique
-                            .get_mut(field.name())
-                            .expect("unique set initialized")
-                            .insert(value_key)
-                    {
-                        let value = value_for_rules(array.as_ref(), row)?;
-                        validation.record(Finding {
-                            rule: "unique",
-                            column: field.name().clone(),
-                            row: Some(global_row),
-                            message: format!("Duplicate value `{value}`"),
-                        });
-                    }
-                    let numeric = if rule.min.is_some() || rule.max.is_some() {
-                        numeric_value(array.as_ref(), row)?
-                    } else {
-                        None
-                    };
-                    if let Some(min) = rule.min {
-                        if numeric.is_some_and(|number| number < min) {
-                            let value = value_for_rules(array.as_ref(), row)?;
-                            validation.record(Finding {
-                                rule: "min",
-                                column: field.name().clone(),
-                                row: Some(global_row),
-                                message: format!("Value `{value}` is below {min}"),
-                            });
-                        }
-                    }
-                    if let Some(max) = rule.max {
-                        if numeric.is_some_and(|number| number > max) {
-                            let value = value_for_rules(array.as_ref(), row)?;
-                            validation.record(Finding {
-                                rule: "max",
-                                column: field.name().clone(),
-                                row: Some(global_row),
-                                message: format!("Value `{value}` is above {max}"),
-                            });
-                        }
-                    }
-                    if patterns.contains_key(field.name()) || rule.allowed.is_some() {
-                        let value = value_for_rules(array.as_ref(), row)?;
-                        if let Some(regex) = patterns.get(field.name()) {
-                            if !regex.is_match(&value) {
-                                validation.record(Finding {
-                                    rule: "pattern",
-                                    column: field.name().clone(),
-                                    row: Some(global_row),
-                                    message: format!(
-                                        "Value `{value}` does not match `{}`",
-                                        regex.as_str()
-                                    ),
-                                });
-                            }
-                        }
-                        if let Some(allowed) = &rule.allowed {
-                            if !allowed.contains(&value) {
-                                validation.record(Finding {
-                                    rule: "allowed",
-                                    column: field.name().clone(),
-                                    row: Some(global_row),
-                                    message: format!("Value `{value}` is not in the allowlist"),
-                                });
-                            }
-                        }
-                    }
-                }
+                self.inspect_cell(
+                    array.as_ref(),
+                    schema.field(column_index).name(),
+                    column_index,
+                    row,
+                    global_row,
+                )?;
             }
         }
-        rows += batch.num_rows() as u64;
+        Ok(())
     }
 
-    let columns = schema
+    fn inspect_cell(
+        &mut self,
+        array: &dyn Array,
+        column_name: &str,
+        column_index: usize,
+        row: usize,
+        global_row: u64,
+    ) -> Result<(), ProofFrameError> {
+        update_hash(self.hasher, column_index, array, row)?;
+        let rule = self
+            .contract
+            .and_then(|value| value.columns.get(column_name));
+        let state = &mut self.states[column_index];
+        if array.is_null(row) {
+            state.null_count += 1;
+            if rule.is_some_and(|value| value.not_null) {
+                self.rules.validation.record(Finding {
+                    rule: "not_null",
+                    column: column_name.to_string(),
+                    row: Some(global_row),
+                    message: "Null value is not allowed".to_string(),
+                });
+            }
+            return Ok(());
+        }
+
+        state.non_null_count += 1;
+        let value_key = canonical_value_bytes(array, row)?;
+        if let Some(distinct) = &mut state.distinct {
+            distinct.insert(ValueRef::Bytes(&value_key), global_row)?;
+        }
+        if let Some(number) = numeric_value(array, row)? {
+            state.min = Some(state.min.map_or(number, |current| current.min(number)));
+            state.max = Some(state.max.map_or(number, |current| current.max(number)));
+        }
+        if let Some(rule) = rule {
+            self.rules.validate_column_rule(
+                array,
+                row,
+                global_row,
+                column_name,
+                &value_key,
+                rule,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl RuleValidation {
+    fn validate_column_rule(
+        &mut self,
+        array: &dyn Array,
+        row: usize,
+        global_row: u64,
+        column_name: &str,
+        value_key: &[u8],
+        rule: &ColumnContract,
+    ) -> Result<(), ProofFrameError> {
+        if rule.unique
+            && !self
+                .seen_unique
+                .get_mut(column_name)
+                .expect("unique set initialized")
+                .insert(value_key.to_vec())
+        {
+            let value = value_for_rules(array, row)?;
+            self.validation.record(Finding {
+                rule: "unique",
+                column: column_name.to_string(),
+                row: Some(global_row),
+                message: format!("Duplicate value `{value}`"),
+            });
+        }
+        validate_numeric_rule(
+            array,
+            row,
+            global_row,
+            column_name,
+            rule,
+            &mut self.validation,
+        )?;
+        validate_text_rule(
+            array,
+            row,
+            global_row,
+            column_name,
+            rule,
+            &self.patterns,
+            &mut self.validation,
+        )
+    }
+}
+
+fn validate_numeric_rule(
+    array: &dyn Array,
+    row: usize,
+    global_row: u64,
+    column_name: &str,
+    rule: &ColumnContract,
+    validation: &mut ValidationState,
+) -> Result<(), ProofFrameError> {
+    if rule.min.is_none() && rule.max.is_none() {
+        return Ok(());
+    }
+    let numeric = numeric_value(array, row)?;
+    if rule
+        .min
+        .is_some_and(|minimum| numeric.is_some_and(|value| value < minimum))
+    {
+        let value = value_for_rules(array, row)?;
+        validation.record(Finding {
+            rule: "min",
+            column: column_name.to_string(),
+            row: Some(global_row),
+            message: format!(
+                "Value `{value}` is below {}",
+                rule.min.expect("minimum exists")
+            ),
+        });
+    }
+    if rule
+        .max
+        .is_some_and(|maximum| numeric.is_some_and(|value| value > maximum))
+    {
+        let value = value_for_rules(array, row)?;
+        validation.record(Finding {
+            rule: "max",
+            column: column_name.to_string(),
+            row: Some(global_row),
+            message: format!(
+                "Value `{value}` is above {}",
+                rule.max.expect("maximum exists")
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_text_rule(
+    array: &dyn Array,
+    row: usize,
+    global_row: u64,
+    column_name: &str,
+    rule: &ColumnContract,
+    patterns: &HashMap<String, Regex>,
+    validation: &mut ValidationState,
+) -> Result<(), ProofFrameError> {
+    let pattern = patterns.get(column_name);
+    if pattern.is_none() && rule.allowed.is_none() {
+        return Ok(());
+    }
+    let value = value_for_rules(array, row)?;
+    if pattern.is_some_and(|regex| !regex.is_match(&value)) {
+        validation.record(Finding {
+            rule: "pattern",
+            column: column_name.to_string(),
+            row: Some(global_row),
+            message: format!(
+                "Value `{value}` does not match `{}`",
+                pattern.expect("pattern exists").as_str()
+            ),
+        });
+    }
+    if rule
+        .allowed
+        .as_ref()
+        .is_some_and(|allowed| !allowed.contains(&value))
+    {
+        validation.record(Finding {
+            rule: "allowed",
+            column: column_name.to_string(),
+            row: Some(global_row),
+            message: format!("Value `{value}` is not in the allowlist"),
+        });
+    }
+    Ok(())
+}
+
+fn finish_column_profiles(
+    schema: &SchemaRef,
+    states: Vec<ColumnState>,
+) -> Result<Vec<ColumnProfile>, ProofFrameError> {
+    schema
         .fields()
         .iter()
         .zip(states)
@@ -863,15 +1015,7 @@ where
                 max: state.max,
             })
         })
-        .collect::<Result<Vec<_>, ProofFrameError>>()?;
-    Ok((
-        Profile {
-            rows,
-            columns,
-            fingerprint: format!("pf-fp-v1:{}", hasher.finalize().to_hex()),
-        },
-        validation.finish(),
-    ))
+        .collect()
 }
 
 fn privacy_fingerprint(key: &[u8; 32], value: &str) -> String {
