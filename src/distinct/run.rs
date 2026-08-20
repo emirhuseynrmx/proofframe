@@ -221,6 +221,45 @@ pub(super) fn compact(
     directory: &std::path::Path,
     cancellation: &CancellationToken,
 ) -> Result<RunMeta, ProofFrameError> {
+    let spec = compaction_spec(runs, cancellation)?;
+    let reservation = account.try_reserve_temp(spec.total_bytes)?;
+    let _merge_memory = account.try_reserve_memory(merge_memory_bytes(runs)?)?;
+    let file = NamedTempFile::new_in(directory)?;
+    let mut writer = BufWriter::new(file.reopen()?);
+    write_compaction_header(&mut writer, &spec)?;
+
+    let (mut cursors, mut heap) = open_merge_cursors(runs)?;
+    let (written_records, written_payload, checksum) =
+        merge_compacted_payload(&mut writer, &mut cursors, &mut heap, cancellation)?;
+    if written_records != spec.records || written_payload != spec.payload_bytes {
+        return Err(corrupt("Exact compacted run length changed during merge"));
+    }
+    patch_compaction_checksum(&mut writer, &checksum)?;
+    drop(writer);
+
+    Ok(RunMeta {
+        path: file.into_temp_path(),
+        kind: spec.kind,
+        records: spec.records,
+        payload_bytes: spec.payload_bytes,
+        max_record_bytes: spec.max_record_bytes,
+        checksum,
+        _temp: reservation,
+    })
+}
+
+struct CompactionSpec {
+    kind: ValueKind,
+    records: u64,
+    payload_bytes: u64,
+    max_record_bytes: u64,
+    total_bytes: u64,
+}
+
+fn compaction_spec(
+    runs: &[RunMeta],
+    cancellation: &CancellationToken,
+) -> Result<CompactionSpec, ProofFrameError> {
     let first = runs
         .first()
         .ok_or_else(|| corrupt("Exact run compaction requires at least one run"))?;
@@ -251,17 +290,31 @@ pub(super) fn compact(
         .map(|run| run.max_record_bytes)
         .max()
         .unwrap_or(0);
-    let reservation = account.try_reserve_temp(total_bytes)?;
-    let _merge_memory = account.try_reserve_memory(merge_memory_bytes(runs)?)?;
-    let file = NamedTempFile::new_in(directory)?;
-    let mut writer = BufWriter::new(file.reopen()?);
+    Ok(CompactionSpec {
+        kind: first.kind,
+        records,
+        payload_bytes,
+        max_record_bytes,
+        total_bytes,
+    })
+}
+
+fn write_compaction_header(
+    writer: &mut BufWriter<File>,
+    spec: &CompactionSpec,
+) -> Result<(), ProofFrameError> {
     writer.write_all(&MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
-    writer.write_all(&[first.kind.tag(), 0])?;
-    writer.write_all(&records.to_le_bytes())?;
-    writer.write_all(&payload_bytes.to_le_bytes())?;
+    writer.write_all(&[spec.kind.tag(), 0])?;
+    writer.write_all(&spec.records.to_le_bytes())?;
+    writer.write_all(&spec.payload_bytes.to_le_bytes())?;
     writer.write_all(&[0_u8; 32])?;
+    Ok(())
+}
 
+fn open_merge_cursors(
+    runs: &[RunMeta],
+) -> Result<(Vec<RunCursor>, BinaryHeap<Reverse<MergeEntry>>), ProofFrameError> {
     let mut cursors = runs
         .iter()
         .map(RunCursor::open)
@@ -272,6 +325,15 @@ pub(super) fn compact(
             heap.push(Reverse(MergeEntry { value, row, run }));
         }
     }
+    Ok((cursors, heap))
+}
+
+fn merge_compacted_payload(
+    writer: &mut BufWriter<File>,
+    cursors: &mut [RunCursor],
+    heap: &mut BinaryHeap<Reverse<MergeEntry>>,
+    cancellation: &CancellationToken,
+) -> Result<(u64, u64, [u8; 32]), ProofFrameError> {
     let mut hasher = blake3::Hasher::new();
     let mut written_records = 0_u64;
     let mut written_payload = 0_u64;
@@ -281,7 +343,7 @@ pub(super) fn compact(
         }
         written_payload = written_payload
             .checked_add(write_owned_record(
-                &mut writer,
+                writer,
                 &mut hasher,
                 &entry.value,
                 entry.row,
@@ -296,26 +358,23 @@ pub(super) fn compact(
             }));
         }
     }
-    if written_records != records || written_payload != payload_bytes {
-        return Err(corrupt("Exact compacted run length changed during merge"));
-    }
+    Ok((
+        written_records,
+        written_payload,
+        *hasher.finalize().as_bytes(),
+    ))
+}
 
-    let checksum = *hasher.finalize().as_bytes();
+fn patch_compaction_checksum(
+    writer: &mut BufWriter<File>,
+    checksum: &[u8; 32],
+) -> Result<(), ProofFrameError> {
     writer.flush()?;
     writer.seek(SeekFrom::Start(CHECKSUM_OFFSET))?;
-    writer.write_all(&checksum)?;
+    writer.write_all(checksum)?;
     writer.flush()?;
     writer.get_ref().sync_data()?;
-    drop(writer);
-    Ok(RunMeta {
-        path: file.into_temp_path(),
-        kind: first.kind,
-        records,
-        payload_bytes,
-        max_record_bytes,
-        checksum,
-        _temp: reservation,
-    })
+    Ok(())
 }
 
 fn write_owned_record(
