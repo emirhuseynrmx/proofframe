@@ -129,18 +129,18 @@ profile = pf.profile(
 checked = pf.check_with_evidence(table, contract, max_samples=20)
 report = checked["report"]
 evidence = checked["evidence"]
-keypair = pf.generate_keypair()
-signing_key = keypair.pop("private" + "_key")
-verification_key = keypair.pop("public" + "_key")
-receipt = pf.sign_evidence(evidence, private_key=signing_key)
-verification = pf.verify_receipt(receipt, expected_public_key=verification_key)
-assert verification["valid"]
+assert report["valid"] is False
+assert evidence["schema"] == "proofframe.evidence.v2"
 ```
 
 `check_with_evidence` validates and fingerprints each Arrow batch in the same native execution.
 Evidence V2 separately binds canonical contract source (`pf-contract-v1`), compiled typed plan
 (`pf-plan-v1`), and Arrow schema (`pf-schema-v1`). `sign_receipt(..., receipt_version="v1")` exists
 only for migration; normal Python and CLI signing defaults to V2.
+
+Generate receipt keys in a controlled provisioning step, keep signing material in a secret manager,
+and pass it to the signing API only at execution time. Verification should use a trusted public key
+obtained independently from the receipt being checked.
 
 PII findings use keyed 256-bit fingerprints. The default scan key is random per run and unlinkable.
 For stable correlation, pass a URL-safe base64 32-byte `fingerprint_key` and a non-secret `key_id`;
