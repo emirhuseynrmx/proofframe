@@ -19,45 +19,68 @@ pub(crate) fn scan_column(
     validation: &mut ValidationState,
     mut unique: Option<&mut ExactState>,
 ) -> Result<(), ProofFrameError> {
+    if let Some(result) =
+        scan_signed_kernel(plan, array, row_offset, validation, unique.as_deref_mut())
+    {
+        return result;
+    }
+    if let Some(result) =
+        scan_unsigned_kernel(plan, array, row_offset, validation, unique.as_deref_mut())
+    {
+        return result;
+    }
+    if let Some(result) =
+        scan_float_kernel(plan, array, row_offset, validation, unique.as_deref_mut())
+    {
+        return result;
+    }
+    if let Some(result) =
+        scan_timestamp_kernel(plan, array, row_offset, validation, unique.as_deref_mut())
+    {
+        return result;
+    }
+    if let Some(result) =
+        scan_scalar_kernel(plan, array, row_offset, validation, unique.as_deref_mut())
+    {
+        return result;
+    }
+    if let Some(result) =
+        scan_text_binary_kernel(plan, array, row_offset, validation, unique.as_deref_mut())
+    {
+        return result;
+    }
+    scan_fallback(array, plan, row_offset, validation, unique)
+}
+
+fn scan_signed_kernel(
+    plan: &ColumnPlan,
+    array: &dyn Array,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    unique: Option<&mut ExactState>,
+) -> Option<Result<(), ProofFrameError>> {
     let name = plan.field().name();
     let rules = plan.rules();
+    let mut unique = unique;
 
     macro_rules! signed {
         ($variant:ident, $array_ty:ty) => {
             if matches!(plan.kernel(), KernelKind::$variant) {
-                let values = downcast::<$array_ty>(array);
-                let minimum = signed_bound(rules.min());
-                let maximum = signed_bound(rules.max());
-                for row in 0..values.len() {
-                    if values.is_null(row) {
-                        record_null(rules.not_null(), validation, name, row_offset, row);
-                        continue;
+                return Some((|| {
+                    let values = downcast::<$array_ty>(array);
+                    let minimum = signed_bound(rules.min());
+                    let maximum = signed_bound(rules.max());
+                    for row in 0..values.len() {
+                        if values.is_null(row) {
+                            record_null(rules.not_null(), validation, name, row_offset, row);
+                            continue;
+                        }
+                        let value = values.value(row) as i64;
+                        record_range(value, minimum, maximum, validation, name, row_offset, row);
+                        insert_unique(&mut unique, ValueRef::I64(value), row_offset, row)?;
                     }
-                    let value = values.value(row) as i64;
-                    record_range(value, minimum, maximum, validation, name, row_offset, row);
-                    insert_unique(&mut unique, ValueRef::I64(value), row_offset, row)?;
-                }
-                return Ok(());
-            }
-        };
-    }
-
-    macro_rules! unsigned {
-        ($variant:ident, $array_ty:ty) => {
-            if matches!(plan.kernel(), KernelKind::$variant) {
-                let values = downcast::<$array_ty>(array);
-                let minimum = unsigned_bound(rules.min());
-                let maximum = unsigned_bound(rules.max());
-                for row in 0..values.len() {
-                    if values.is_null(row) {
-                        record_null(rules.not_null(), validation, name, row_offset, row);
-                        continue;
-                    }
-                    let value = values.value(row) as u64;
-                    record_range(value, minimum, maximum, validation, name, row_offset, row);
-                    insert_unique(&mut unique, ValueRef::U64(value), row_offset, row)?;
-                }
-                return Ok(());
+                    Ok(())
+                })());
             }
         };
     }
@@ -68,54 +91,120 @@ pub(crate) fn scan_column(
     signed!(I64, Int64Array);
     signed!(Date32, Date32Array);
     signed!(Date64, Date64Array);
+    None
+}
+
+fn scan_unsigned_kernel(
+    plan: &ColumnPlan,
+    array: &dyn Array,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    unique: Option<&mut ExactState>,
+) -> Option<Result<(), ProofFrameError>> {
+    let name = plan.field().name();
+    let rules = plan.rules();
+    let mut unique = unique;
+
+    macro_rules! unsigned {
+        ($variant:ident, $array_ty:ty) => {
+            if matches!(plan.kernel(), KernelKind::$variant) {
+                return Some((|| {
+                    let values = downcast::<$array_ty>(array);
+                    let minimum = unsigned_bound(rules.min());
+                    let maximum = unsigned_bound(rules.max());
+                    for row in 0..values.len() {
+                        if values.is_null(row) {
+                            record_null(rules.not_null(), validation, name, row_offset, row);
+                            continue;
+                        }
+                        let value = values.value(row) as u64;
+                        record_range(value, minimum, maximum, validation, name, row_offset, row);
+                        insert_unique(&mut unique, ValueRef::U64(value), row_offset, row)?;
+                    }
+                    Ok(())
+                })());
+            }
+        };
+    }
+
     unsigned!(U8, UInt8Array);
     unsigned!(U16, UInt16Array);
     unsigned!(U32, UInt32Array);
     unsigned!(U64, UInt64Array);
+    None
+}
+
+fn scan_float_kernel(
+    plan: &ColumnPlan,
+    array: &dyn Array,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    unique: Option<&mut ExactState>,
+) -> Option<Result<(), ProofFrameError>> {
+    let name = plan.field().name();
+    let rules = plan.rules();
+    let mut unique = unique;
 
     if matches!(plan.kernel(), KernelKind::F32) {
-        let values = downcast::<Float32Array>(array);
-        let minimum = float32_bound(rules.min());
-        let maximum = float32_bound(rules.max());
-        for row in 0..values.len() {
-            if values.is_null(row) {
-                record_null(rules.not_null(), validation, name, row_offset, row);
-                continue;
+        return Some((|| {
+            let values = downcast::<Float32Array>(array);
+            let minimum = float32_bound(rules.min());
+            let maximum = float32_bound(rules.max());
+            for row in 0..values.len() {
+                if values.is_null(row) {
+                    record_null(rules.not_null(), validation, name, row_offset, row);
+                    continue;
+                }
+                let value = values.value(row);
+                if value.is_nan() {
+                    record_nan(rules, validation, name, row_offset, row);
+                } else {
+                    record_range(value, minimum, maximum, validation, name, row_offset, row);
+                }
+                insert_unique(
+                    &mut unique,
+                    ValueRef::F64(u64::from(value.to_bits())),
+                    row_offset,
+                    row,
+                )?;
             }
-            let value = values.value(row);
-            if value.is_nan() {
-                record_nan(rules, validation, name, row_offset, row);
-            } else {
-                record_range(value, minimum, maximum, validation, name, row_offset, row);
-            }
-            insert_unique(
-                &mut unique,
-                ValueRef::F64(u64::from(value.to_bits())),
-                row_offset,
-                row,
-            )?;
-        }
-        return Ok(());
+            Ok(())
+        })());
     }
     if matches!(plan.kernel(), KernelKind::F64) {
-        let values = downcast::<Float64Array>(array);
-        let minimum = float64_bound(rules.min());
-        let maximum = float64_bound(rules.max());
-        for row in 0..values.len() {
-            if values.is_null(row) {
-                record_null(rules.not_null(), validation, name, row_offset, row);
-                continue;
+        return Some((|| {
+            let values = downcast::<Float64Array>(array);
+            let minimum = float64_bound(rules.min());
+            let maximum = float64_bound(rules.max());
+            for row in 0..values.len() {
+                if values.is_null(row) {
+                    record_null(rules.not_null(), validation, name, row_offset, row);
+                    continue;
+                }
+                let value = values.value(row);
+                if value.is_nan() {
+                    record_nan(rules, validation, name, row_offset, row);
+                } else {
+                    record_range(value, minimum, maximum, validation, name, row_offset, row);
+                }
+                insert_unique(&mut unique, ValueRef::F64(value.to_bits()), row_offset, row)?;
             }
-            let value = values.value(row);
-            if value.is_nan() {
-                record_nan(rules, validation, name, row_offset, row);
-            } else {
-                record_range(value, minimum, maximum, validation, name, row_offset, row);
-            }
-            insert_unique(&mut unique, ValueRef::F64(value.to_bits()), row_offset, row)?;
-        }
-        return Ok(());
+            Ok(())
+        })());
     }
+    None
+}
+
+fn scan_timestamp_kernel(
+    plan: &ColumnPlan,
+    array: &dyn Array,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    unique: Option<&mut ExactState>,
+) -> Option<Result<(), ProofFrameError>> {
+    let name = plan.field().name();
+    let rules = plan.rules();
+    let mut unique = unique;
 
     macro_rules! timestamp {
         ($array_ty:ty) => {{
@@ -131,107 +220,133 @@ pub(crate) fn scan_column(
                 record_range(value, minimum, maximum, validation, name, row_offset, row);
                 insert_unique(&mut unique, ValueRef::I64(value), row_offset, row)?;
             }
-            return Ok(());
+            Ok(())
         }};
     }
     if let KernelKind::Timestamp(unit) = plan.kernel() {
-        match unit {
+        return Some((|| match unit {
             arrow::datatypes::TimeUnit::Second => timestamp!(TimestampSecondArray),
             arrow::datatypes::TimeUnit::Millisecond => timestamp!(TimestampMillisecondArray),
             arrow::datatypes::TimeUnit::Microsecond => timestamp!(TimestampMicrosecondArray),
             arrow::datatypes::TimeUnit::Nanosecond => timestamp!(TimestampNanosecondArray),
-        }
+        })());
     }
+    None
+}
+
+fn scan_scalar_kernel(
+    plan: &ColumnPlan,
+    array: &dyn Array,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    unique: Option<&mut ExactState>,
+) -> Option<Result<(), ProofFrameError>> {
+    let name = plan.field().name();
+    let rules = plan.rules();
+    let mut unique = unique;
 
     if matches!(plan.kernel(), KernelKind::Decimal128 { .. }) {
-        let values = downcast::<Decimal128Array>(array);
-        let minimum = decimal_bound(rules.min());
-        let maximum = decimal_bound(rules.max());
-        for row in 0..values.len() {
-            if values.is_null(row) {
-                record_null(rules.not_null(), validation, name, row_offset, row);
-                continue;
+        return Some((|| {
+            let values = downcast::<Decimal128Array>(array);
+            let minimum = decimal_bound(rules.min());
+            let maximum = decimal_bound(rules.max());
+            for row in 0..values.len() {
+                if values.is_null(row) {
+                    record_null(rules.not_null(), validation, name, row_offset, row);
+                    continue;
+                }
+                let value = values.value(row);
+                record_range(value, minimum, maximum, validation, name, row_offset, row);
+                let encoded = value.to_le_bytes();
+                insert_unique(&mut unique, ValueRef::Bytes(&encoded), row_offset, row)?;
             }
-            let value = values.value(row);
-            record_range(value, minimum, maximum, validation, name, row_offset, row);
-            let encoded = value.to_le_bytes();
-            insert_unique(&mut unique, ValueRef::Bytes(&encoded), row_offset, row)?;
-        }
-        return Ok(());
+            Ok(())
+        })());
     }
+    if matches!(plan.kernel(), KernelKind::Boolean) {
+        return Some((|| {
+            let values = downcast::<BooleanArray>(array);
+            for row in 0..values.len() {
+                if values.is_null(row) {
+                    record_null(rules.not_null(), validation, name, row_offset, row);
+                    continue;
+                }
+                insert_unique(
+                    &mut unique,
+                    ValueRef::U64(u64::from(values.value(row))),
+                    row_offset,
+                    row,
+                )?;
+            }
+            Ok(())
+        })());
+    }
+    None
+}
 
+fn scan_text_binary_kernel(
+    plan: &ColumnPlan,
+    array: &dyn Array,
+    row_offset: u64,
+    validation: &mut ValidationState,
+    unique: Option<&mut ExactState>,
+) -> Option<Result<(), ProofFrameError>> {
+    let mut unique = unique;
     if matches!(plan.kernel(), KernelKind::Utf8) {
-        return scan_strings(
+        return Some(scan_strings(
             downcast::<StringArray>(array),
             plan,
             row_offset,
             validation,
-            unique,
-        );
+            unique.as_deref_mut(),
+        ));
     }
     if matches!(plan.kernel(), KernelKind::LargeUtf8) {
-        return scan_strings(
+        return Some(scan_strings(
             downcast::<LargeStringArray>(array),
             plan,
             row_offset,
             validation,
-            unique,
-        );
+            unique.as_deref_mut(),
+        ));
     }
     if matches!(plan.kernel(), KernelKind::Utf8View) {
-        return scan_string_view(
+        return Some(scan_string_view(
             downcast::<StringViewArray>(array),
             plan,
             row_offset,
             validation,
-            unique,
-        );
-    }
-    if matches!(plan.kernel(), KernelKind::Boolean) {
-        let values = downcast::<BooleanArray>(array);
-        for row in 0..values.len() {
-            if values.is_null(row) {
-                record_null(rules.not_null(), validation, name, row_offset, row);
-                continue;
-            }
-            insert_unique(
-                &mut unique,
-                ValueRef::U64(u64::from(values.value(row))),
-                row_offset,
-                row,
-            )?;
-        }
-        return Ok(());
+            unique.as_deref_mut(),
+        ));
     }
     if matches!(plan.kernel(), KernelKind::Binary) {
-        return scan_binary(
+        return Some(scan_binary(
             downcast::<BinaryArray>(array),
             plan,
             row_offset,
             validation,
-            unique,
-        );
+            unique.as_deref_mut(),
+        ));
     }
     if matches!(plan.kernel(), KernelKind::LargeBinary) {
-        return scan_binary(
+        return Some(scan_binary(
             downcast::<LargeBinaryArray>(array),
             plan,
             row_offset,
             validation,
-            unique,
-        );
+            unique.as_deref_mut(),
+        ));
     }
     if matches!(plan.kernel(), KernelKind::BinaryView) {
-        return scan_binary_view(
+        return Some(scan_binary_view(
             downcast::<BinaryViewArray>(array),
             plan,
             row_offset,
             validation,
             unique,
-        );
+        ));
     }
-
-    scan_fallback(array, plan, row_offset, validation, unique)
+    None
 }
 
 fn scan_strings<O: arrow::array::OffsetSizeTrait>(

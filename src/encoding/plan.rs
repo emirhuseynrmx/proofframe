@@ -45,33 +45,64 @@ pub(crate) enum ValueEncoder {
 
 impl ValueEncoder {
     pub(crate) fn for_data_type(data_type: &DataType) -> Result<Self, ProofFrameError> {
+        if let Some(encoder) = Self::scalar_encoder(data_type) {
+            return Ok(encoder);
+        }
+        if let Some(encoder) = Self::temporal_encoder(data_type) {
+            return Ok(encoder);
+        }
+        if let Some(encoder) = Self::nested_encoder(data_type)? {
+            return Ok(encoder);
+        }
+        Err(ProofFrameError::UnsupportedType(data_type.to_string()))
+    }
+
+    fn scalar_encoder(data_type: &DataType) -> Option<Self> {
+        match data_type {
+            DataType::Int8 => Some(Self::Int8),
+            DataType::Int16 => Some(Self::Int16),
+            DataType::Int32 => Some(Self::Int32),
+            DataType::Int64 => Some(Self::Int64),
+            DataType::UInt8 => Some(Self::UInt8),
+            DataType::UInt16 => Some(Self::UInt16),
+            DataType::UInt32 => Some(Self::UInt32),
+            DataType::UInt64 => Some(Self::UInt64),
+            DataType::Float32 => Some(Self::Float32),
+            DataType::Float64 => Some(Self::Float64),
+            DataType::Decimal128(_, _) => Some(Self::Decimal128),
+            DataType::Boolean => Some(Self::Boolean),
+            DataType::Utf8 => Some(Self::Utf8),
+            DataType::LargeUtf8 => Some(Self::LargeUtf8),
+            DataType::Utf8View => Some(Self::Utf8View),
+            DataType::Binary => Some(Self::Binary),
+            DataType::LargeBinary => Some(Self::LargeBinary),
+            DataType::BinaryView => Some(Self::BinaryView),
+            _ => None,
+        }
+    }
+
+    fn temporal_encoder(data_type: &DataType) -> Option<Self> {
+        match data_type {
+            DataType::Date32 => Some(Self::Date32),
+            DataType::Date64 => Some(Self::Date64),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Second, _) => {
+                Some(Self::TimestampSecond)
+            }
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
+                Some(Self::TimestampMillisecond)
+            }
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
+                Some(Self::TimestampMicrosecond)
+            }
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, _) => {
+                Some(Self::TimestampNanosecond)
+            }
+            _ => None,
+        }
+    }
+
+    fn nested_encoder(data_type: &DataType) -> Result<Option<Self>, ProofFrameError> {
         let encoder = match data_type {
-            DataType::Int8 => Self::Int8,
-            DataType::Int16 => Self::Int16,
-            DataType::Int32 => Self::Int32,
-            DataType::Int64 => Self::Int64,
-            DataType::UInt8 => Self::UInt8,
-            DataType::UInt16 => Self::UInt16,
-            DataType::UInt32 => Self::UInt32,
-            DataType::UInt64 => Self::UInt64,
-            DataType::Float32 => Self::Float32,
-            DataType::Float64 => Self::Float64,
-            DataType::Date32 => Self::Date32,
-            DataType::Date64 => Self::Date64,
-            DataType::Timestamp(unit, _) => match unit {
-                arrow::datatypes::TimeUnit::Second => Self::TimestampSecond,
-                arrow::datatypes::TimeUnit::Millisecond => Self::TimestampMillisecond,
-                arrow::datatypes::TimeUnit::Microsecond => Self::TimestampMicrosecond,
-                arrow::datatypes::TimeUnit::Nanosecond => Self::TimestampNanosecond,
-            },
-            DataType::Decimal128(_, _) => Self::Decimal128,
-            DataType::Boolean => Self::Boolean,
-            DataType::Utf8 => Self::Utf8,
-            DataType::LargeUtf8 => Self::LargeUtf8,
-            DataType::Utf8View => Self::Utf8View,
-            DataType::Binary => Self::Binary,
-            DataType::LargeBinary => Self::LargeBinary,
-            DataType::BinaryView => Self::BinaryView,
             DataType::List(field) => Self::List(Box::new(Self::for_data_type(field.data_type())?)),
             DataType::LargeList(field) => {
                 Self::LargeList(Box::new(Self::for_data_type(field.data_type())?))
@@ -86,9 +117,9 @@ impl ValueEncoder {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             DataType::Map(field, _) => Self::Map(Box::new(Self::for_data_type(field.data_type())?)),
-            other => return Err(ProofFrameError::UnsupportedType(other.to_string())),
+            _ => return Ok(None),
         };
-        Ok(encoder)
+        Ok(Some(encoder))
     }
 
     pub(crate) fn update_v1(
