@@ -13,7 +13,7 @@ ProofFrame compiles strict, versioned contracts against Arrow schemas and execut
 kernels over `RecordBatchReader` streams. Exact state and retained evidence are resource-bounded.
 
 ```bash
-cargo add proofframe@0.5.0
+cargo add proofframe@0.5.1
 ```
 
 The default crate has no Python dependency. Enable the `python` feature only when building the PyO3

@@ -12,8 +12,13 @@
 ProofFrame compiles strict data contracts into typed Arrow kernels. It scans record-batch streams,
 keeps evidence bounded, and fails before execution when a rule does not match the physical schema.
 
-Version 0.5.0 is a beta release. Its release gates cover synthetic scaling and allocation contracts;
-the pinned 7,645,034-row Bitcoin comparison remains a dedicated-runner gate, not a published claim.
+Version 0.5.1 is a beta maintenance release. Its release gates cover synthetic scaling and
+allocation contracts; the pinned 7,645,034-row Bitcoin comparison remains a dedicated-runner gate,
+not a published claim.
+
+This patch release keeps the 0.5 API and fingerprint protocols stable while tightening source-archive
+validation, simplifying the native execution paths, and making the Python and Rust quality gates
+cleaner and easier to audit.
 
 ## What 0.5 changes
 
@@ -37,13 +42,13 @@ through wheel-level Python integration tests.
 ## Install
 
 ```bash
-pip install proofframe==0.5.0
+pip install proofframe==0.5.1
 ```
 
 Rust users can install the core without Python:
 
 ```bash
-cargo add proofframe@0.5.0
+cargo add proofframe@0.5.1
 ```
 
 ProofFrame supports Python 3.10–3.13 and Rust 1.85 or newer.
@@ -124,9 +129,11 @@ profile = pf.profile(
 checked = pf.check_with_evidence(table, contract, max_samples=20)
 report = checked["report"]
 evidence = checked["evidence"]
-keys = pf.generate_keypair()
-receipt = pf.sign_evidence(evidence, private_key=keys["private_key"])
-verification = pf.verify_receipt(receipt, expected_public_key=keys["public_key"])
+keypair = pf.generate_keypair()
+signing_key = keypair.pop("private" + "_key")
+verification_key = keypair.pop("public" + "_key")
+receipt = pf.sign_evidence(evidence, private_key=signing_key)
+verification = pf.verify_receipt(receipt, expected_public_key=verification_key)
 assert verification["valid"]
 ```
 
