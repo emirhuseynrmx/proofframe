@@ -88,6 +88,20 @@ def test_cli_exit_codes_distinguish_verdict_usage_engine_and_resources(tmp_path,
     assert error["code"] == "PF_RESOURCE_LIMIT"
 
 
+def test_cli_reports_malformed_contract_as_a_usage_error(tmp_path, capsys):
+    data_path = tmp_path / "data.parquet"
+    contract_path = tmp_path / "contract.json"
+    parquet.write_table(pa.table({"id": [1]}), data_path)
+    contract_path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["check", str(data_path), "--contract", str(contract_path)])
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_info.value.code == 2
+    assert "Expecting property name" in error["error"]
+
+
 def test_diff_streams_full_events_to_an_atomic_jsonl_sink(tmp_path, capsys):
     before_path = tmp_path / "before.parquet"
     after_path = tmp_path / "after.parquet"
