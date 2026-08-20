@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> None:
     except ProofFrameError as error:
         print(_error_payload(error), file=sys.stderr)
         raise SystemExit(3) from error
-    except (OSError, ValueError, json.JSONDecodeError, TypeError) as error:
+    except (OSError, ValueError, TypeError) as error:
         print(_error_payload(error), file=sys.stderr)
         raise SystemExit(2) from error
 

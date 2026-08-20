@@ -17,20 +17,24 @@ def table() -> pa.Table:
 
 
 class ArrowConvertible:
-    def to_arrow(self):
+    @staticmethod
+    def to_arrow():
         return table()
 
 
 class ArrowStreamProvider:
-    def __arrow_c_stream__(self, requested_schema=None):
+    @staticmethod
+    def __arrow_c_stream__(requested_schema=None):
         return table().__arrow_c_stream__(requested_schema)
 
 
 class BothArrowProtocols:
-    def __arrow_c_stream__(self, requested_schema=None):
+    @staticmethod
+    def __arrow_c_stream__(requested_schema=None):
         return table().__arrow_c_stream__(requested_schema)
 
-    def to_arrow(self):
+    @staticmethod
+    def to_arrow():
         raise AssertionError("materializing to_arrow path was selected")
 
 

@@ -177,7 +177,6 @@ def validate(
         DeprecationWarning,
         stacklevel=2,
     )
-    del include_profile
     return check(data, contract, **options)
 
 
