@@ -618,7 +618,7 @@ struct RunCursor {
 impl RunCursor {
     fn open(run: &RunMeta) -> Result<Self, ProofFrameError> {
         let mut file = run.open()?;
-        file.seek(SeekFrom::Start(0))?;
+        file.rewind()?;
         if file.metadata()?.len() != HEADER_BYTES + run.payload_bytes {
             return Err(corrupt("Exact run length does not match its header"));
         }

@@ -67,7 +67,9 @@ impl Detector {
             });
         }
         if phone_candidate(trimmed) && self.phone.is_match(trimmed) {
-            let digit_count = trimmed.chars().filter(char::is_ascii_digit).count();
+            let digit_count = trimmed
+                .matches(|character: char| character.is_ascii_digit())
+                .count();
             if (8..=15).contains(&digit_count) {
                 return Some(Match {
                     kind: "phone",
