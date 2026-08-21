@@ -2,13 +2,14 @@
 
 ## What runs now
 
-- Rust unit tests and Proptest properties cover PII primitives and signed-receipt tampering.
+- Rust unit, integration, allocation, and Proptest suites cover typed contracts, exact state,
+  partition ordering, PII primitives, and signed-receipt tampering.
 - Python integration tests cross the PyO3/Arrow C Stream boundary.
 - Clippy with warnings denied, rustfmt, Ruff, and a three-OS CI matrix are release gates.
 - `benchmarks/release_gate.py` runs each case in a dedicated worker process. The parent samples RSS
   every 5 ms, so a Python thread blocked by the GIL cannot hide the native peak. Artifacts retain
-  five raw samples, median, IQR, throughput, native resource counters, spill bytes, hardware,
-  compiler, algorithm version, and the dataset SHA-256.
+  seven raw Python and native-scan samples, median, IQR, throughput, native resource counters,
+  spill bytes, hardware, compiler, algorithm version, and the dataset SHA-256.
 - Rules-only validation uses typed Arrow buffers and type-specific hash sets for integer,
   timestamp, floating-point, and string uniqueness. It still returns bounded row evidence; it skips
   profile, fingerprint, exact distinct, and min/max profile state.
@@ -28,9 +29,10 @@ V1/V2 receipt dispatcher, and the production checksummed partition decoder. The 
 caps input at one MiB before writing or decoding it, and the decoder checks declared lengths before
 allocation.
 
-Loom is not warranted yet. ProofFrame has no custom synchronization primitive, lock-free algorithm,
-or concurrent state machine. Add Loom when shared caches, a parallel streaming coordinator, or other
-interleaving-sensitive state is introduced.
+Partition workers use scoped standard threads, a mutex-protected bounded work queue, ordered result
+slots, and the existing hierarchical resource account. No custom synchronization primitive or
+lock-free state machine is present, so Loom is not used. The Miri-compatible coordinator tests cover
+the pure state transitions; built-wheel tests cover the Arrow/PyO3 boundary.
 
 ## Release benchmark contract
 
@@ -41,19 +43,23 @@ synthetic table and is never presented as the real-data result:
 
 ```bash
 python benchmarks/release_gate.py \
-  --rows 100000 --runs 5 --warmups 1 \
+  --rows 100000 --runs 7 --warmups 1 \
   --output target/release-gate-smoke.json
 ```
 
-`tests/test_release_gate.py` rejects artifacts with fewer than five runs, a different dataset hash,
-missing correctness guards, mixed fingerprint versions, missing diagnostic fields, or different
-CPU/compiler identity. Linux `perf` counters are optional diagnostics: unavailable permissions are
-recorded as `null` with the OS error and never replaced by estimates.
+The v2 matrix covers frozen V1 numeric validation, cross-column comparisons, conditional
+assertions, dataset ratios, composite identity in memory and under forced spill, and fingerprints.
+`tests/test_release_gate.py` rejects artifacts with fewer than seven runs, a different dataset hash,
+missing correctness or native/Python timing fields, mixed fingerprint versions, allocation growth,
+or different CPU/compiler identity. Linux `perf` counters are optional diagnostics: unavailable
+permissions are recorded as `null` with the OS error and never replaced by estimates.
 
 The allocation fields are backed by the release-mode counting allocator in
 `tests/allocation_contract.rs`; production RSS and engine-accounted bytes are separate measures.
 Cross-version speed gates run only against a baseline captured on the same dataset, hardware,
-compiler, and fingerprint version.
+compiler, and fingerprint version. The 100k run is a correctness/resource smoke. The 95% installed
+Python/native throughput gate applies at one million rows or more, where fixed reader and FFI setup
+does not dominate sub-millisecond kernels.
 
 ## Remaining dedicated-runner work
 

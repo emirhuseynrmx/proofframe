@@ -8,9 +8,9 @@ on:
         required: false
         default: "100000"
       runs:
-        description: "Measured runs per case (minimum 5)"
+        description: "Measured runs per case (minimum 7)"
         required: false
-        default: "5"
+        default: "7"
       perf:
         description: "Attempt Linux perf counters"
         type: boolean

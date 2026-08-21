@@ -31,10 +31,19 @@ import psutil
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.csv as arrow_csv
+from proofframe import _proofframe
 from pyarrow import parquet
 
-SCHEMA_VERSION = "proofframe.release-benchmark.v1"
-CASES = ("numeric_min", "timestamp_unique", "full_contract", "fingerprint")
+SCHEMA_VERSION = "proofframe.release-benchmark.v2"
+CASES = (
+    "v1_numeric_min",
+    "relational_compare",
+    "conditional_assertion",
+    "dataset_ratios",
+    "composite_memory",
+    "composite_spill",
+    "fingerprint",
+)
 PERF_EVENTS = (
     "cycles",
     "instructions",
@@ -112,20 +121,54 @@ def _load_dataset(path: Path, rows: int | None) -> pa.Table:
 
 def _contract(case: str) -> dict[str, Any]:
     numeric = {name: {"min": 0} for name in ("open", "high", "low", "close", "volume")}
-    if case == "numeric_min":
-        return {"columns": numeric}
-    if case == "timestamp_unique":
-        return {"columns": {"timestamp": {"unique": True}}}
-    if case == "full_contract":
+    if case == "v1_numeric_min":
+        return {"version": "proofframe.contract.v1", "columns": numeric}
+    if case == "relational_compare":
         return {
-            "columns": {
-                "timestamp": {"required": True, "not_null": True, "unique": True},
-                **{
-                    name: {"required": True, "not_null": True, "min": 0}
-                    for name in ("open", "high", "low", "close", "volume")
+            "version": "proofframe.contract.v2",
+            "columns": {},
+            "row_rules": [{
+                "name": "high_covers_low",
+                "compare": {
+                    "left": {"column": "high"},
+                    "op": "gte",
+                    "right": {"column": "low"},
                 },
+            }],
+        }
+    if case == "conditional_assertion":
+        return {
+            "version": "proofframe.contract.v2",
+            "columns": {},
+            "row_rules": [{
+                "name": "traded_close",
+                "when": {
+                    "left": {"column": "volume"},
+                    "op": "gt",
+                    "right": {"literal": 0},
+                },
+                "assert": {"column": "close", "min": 0},
+            }],
+        }
+    if case == "dataset_ratios":
+        return {
+            "version": "proofframe.contract.v2",
+            "columns": {},
+            "dataset_rules": {
+                "null_ratio": {"volume": {"max": 0.0}},
+                "distinct_ratio": {"timestamp": {"min": 1.0}},
             },
-            "max_findings": 100,
+        }
+    if case in {"composite_memory", "composite_spill"}:
+        return {
+            "version": "proofframe.contract.v2",
+            "columns": {},
+            "dataset_rules": {
+                "composite_unique": [{
+                    "name": "candle_identity",
+                    "columns": ["timestamp", "open"],
+                }]
+            },
         }
     raise ValueError(f"Unknown contract case: {case}")
 
@@ -147,13 +190,45 @@ def _execute_case(
     report = proofframe.check(
         table,
         _contract(case),
-        max_memory=max_memory,
+        max_memory=_case_memory(case, max_memory),
         max_temp=max_temp,
         max_samples=100,
     )
     if not report["valid"] or report["rows"] != table.num_rows:
         raise RuntimeError(f"{case} correctness guard failed: {report}")
     return report, None
+
+
+def _case_memory(case: str, configured: int) -> int:
+    if case == "composite_spill":
+        return min(configured, 256 * 1024)
+    return configured
+
+
+def _execute_native_case(
+    case: str,
+    table: pa.Table,
+    *,
+    fingerprint_version: str,
+    max_memory: int,
+    max_temp: int,
+) -> tuple[float, dict[str, Any] | None]:
+    if case == "fingerprint":
+        result = _proofframe.benchmark_fingerprint_arrow(
+            table.to_reader(), fingerprint_version
+        )
+        return result["native_elapsed_ns"] / 1_000_000, None
+    result = _proofframe.benchmark_check_arrow(
+        table.to_reader(),
+        json.dumps(_contract(case), sort_keys=True, separators=(",", ":")),
+        table.num_rows,
+        _case_memory(case, max_memory),
+        max_temp,
+    )
+    report = result["report"]
+    if not report["valid"] or report["rows"] != table.num_rows:
+        raise RuntimeError(f"{case} native correctness guard failed: {report}")
+    return result["native_elapsed_ns"] / 1_000_000, report
 
 
 def _os_peak_rss() -> int:
@@ -173,6 +248,7 @@ def _worker(args: argparse.Namespace) -> None:
         )
 
     samples_ms: list[float] = []
+    native_samples_ms: list[float] = []
     last_report: dict[str, Any] | None = None
     last_digest: str | None = None
     for _ in range(args.runs):
@@ -187,6 +263,16 @@ def _worker(args: argparse.Namespace) -> None:
         )
         elapsed = time.perf_counter_ns() - started
         samples_ms.append(elapsed / 1_000_000)
+        native_elapsed_ms, native_report = _execute_native_case(
+            args.worker_case,
+            table,
+            fingerprint_version=args.fingerprint_version,
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+        )
+        native_samples_ms.append(native_elapsed_ms)
+        if native_report is not None:
+            last_report = native_report
 
     metrics = (last_report or {}).get("metrics", {})
     print(
@@ -195,6 +281,7 @@ def _worker(args: argparse.Namespace) -> None:
                 "case": args.worker_case,
                 "rows": table.num_rows,
                 "samples_ms": samples_ms,
+                "native_samples_ms": native_samples_ms,
                 "correctness": True,
                 "fingerprint": last_digest,
                 "engine_peak_bytes": int(metrics.get("peak_memory_bytes", 0)),
@@ -366,12 +453,23 @@ def _summarize_case(
 ) -> dict[str, Any]:
     samples = [float(sample) for sample in result["samples_ms"]]
     median_ms = statistics.median(samples)
-    allocation_proven = result["case"] in {"numeric_min", "fingerprint"}
+    native_samples = [float(sample) for sample in result["native_samples_ms"]]
+    native_median_ms = statistics.median(native_samples)
+    allocation_proven = result["case"] in {
+        "v1_numeric_min",
+        "relational_compare",
+        "conditional_assertion",
+        "fingerprint",
+    }
     return {
         "samples_ms": samples,
         "median_ms": median_ms,
+        "native_samples_ms": native_samples,
+        "native_median_ms": native_median_ms,
         "iqr_ms": _iqr(samples),
         "rows_per_second": result["rows"] / (median_ms / 1000),
+        "native_rows_per_second": result["rows"] / (native_median_ms / 1000),
+        "python_native_throughput_ratio": native_median_ms / median_ms,
         "allocations_per_row": 0.0 if allocation_passed and allocation_proven else None,
         "allocation_evidence": (
             "tests/allocation_contract.rs" if allocation_proven else "not instrumented for this case"
@@ -391,11 +489,19 @@ def _summarize_case(
 def _validate_artifact_identity(artifact: dict[str, Any]) -> None:
     if artifact.get("schema_version") != SCHEMA_VERSION:
         raise ArtifactError("unsupported benchmark artifact schema")
-    if not isinstance(artifact.get("run_count"), int) or artifact["run_count"] < 5:
-        raise ArtifactError("release artifacts require at least five measured runs")
+    if not isinstance(artifact.get("run_count"), int) or artifact["run_count"] < 7:
+        raise ArtifactError("release artifacts require at least seven measured runs")
     dataset_sha = artifact.get("dataset", {}).get("sha256", "")
     if len(dataset_sha) != 64 or any(character not in "0123456789abcdef" for character in dataset_sha):
         raise ArtifactError("dataset SHA-256 is absent or malformed")
+    parity_gate = artifact.get("parity_gate")
+    expected_parity = {
+        "minimum_rows": 1_000_000,
+        "minimum_ratio": 0.95,
+        "applied": artifact["dataset"].get("rows", 0) >= 1_000_000,
+    }
+    if parity_gate != expected_parity:
+        raise ArtifactError("parity_gate metadata is absent or inconsistent")
 
 
 def _validate_artifact_guards(artifact: dict[str, Any]) -> None:
@@ -417,12 +523,17 @@ def _validate_artifact_cases(artifact: dict[str, Any]) -> None:
     for name, case in cases.items():
         if len(case.get("samples_ms", [])) != artifact["run_count"]:
             raise ArtifactError(f"{name} does not contain the declared sample count")
+        if len(case.get("native_samples_ms", [])) != artifact["run_count"]:
+            raise ArtifactError(f"{name} does not contain the declared native sample count")
         if not case.get("correctness"):
             raise ArtifactError(f"{name} correctness guard failed")
         for field in (
             "median_ms",
+            "native_median_ms",
             "iqr_ms",
             "rows_per_second",
+            "native_rows_per_second",
+            "python_native_throughput_ratio",
             "allocations_per_row",
             "capacity_growth_events",
             "engine_peak_bytes",
@@ -462,19 +573,22 @@ def enforce_release_gates(artifact: dict[str, Any], baseline: dict[str, Any] | N
             raise ArtifactError(f"{name} exceeded the engine temp budget")
     if artifact["cases"]["fingerprint"]["allocations_per_row"] != 0:
         raise ArtifactError("fingerprint allocation gate failed")
-    if artifact["cases"]["numeric_min"]["allocations_per_row"] != 0:
-        raise ArtifactError("numeric kernel allocation gate failed")
+    for name in ("v1_numeric_min", "relational_compare", "conditional_assertion"):
+        if artifact["cases"][name]["allocations_per_row"] != 0:
+            raise ArtifactError(f"{name} allocation gate failed")
+        if artifact["cases"][name]["capacity_growth_events"] != 0:
+            raise ArtifactError(f"{name} capacity growth gate failed")
+    if artifact["dataset"]["rows"] >= 1_000_000:
+        for name, case in artifact["cases"].items():
+            if case["python_native_throughput_ratio"] < 0.95:
+                raise ArtifactError(f"{name} Python throughput is below 95% of native")
     if baseline is None:
         return
     validate_comparison(baseline, artifact)
     current = artifact["cases"]
     previous = baseline["cases"]
-    if current["fingerprint"]["median_ms"] > previous["fingerprint"]["median_ms"] / 3:
-        raise ArtifactError("fingerprint did not reach the 3x release gate")
-    if current["timestamp_unique"]["median_ms"] > previous["timestamp_unique"]["median_ms"] / 2:
-        raise ArtifactError("timestamp unique did not reach the 2x release gate")
-    if current["numeric_min"]["median_ms"] > previous["numeric_min"]["median_ms"] * 1.10:
-        raise ArtifactError("numeric min regressed by more than 10%")
+    if current["v1_numeric_min"]["median_ms"] > previous["v1_numeric_min"]["median_ms"] * 1.03:
+        raise ArtifactError("V1 validation regressed by more than 3%")
 
 
 def _write_atomic(path: Path, artifact: dict[str, Any]) -> None:
@@ -494,7 +608,7 @@ def _write_atomic(path: Path, artifact: dict[str, Any]) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=100_000)
-    parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--baseline", type=Path)
@@ -514,8 +628,8 @@ def main() -> None:
     if args.worker_case:
         _worker(args)
         return
-    if args.runs < 5:
-        raise ArtifactError("release benchmark requires --runs >= 5")
+    if args.runs < 7:
+        raise ArtifactError("release benchmark requires --runs >= 7")
     if args.rows <= 0 or args.warmups < 0 or args.rss_interval <= 0:
         raise ArtifactError("rows and RSS interval must be positive; warmups cannot be negative")
 
@@ -550,6 +664,11 @@ def main() -> None:
             "numpy": version("numpy"),
         },
         "allocation_contract": allocation,
+        "parity_gate": {
+            "minimum_rows": 1_000_000,
+            "minimum_ratio": 0.95,
+            "applied": args.rows >= 1_000_000,
+        },
         "correctness_guards": {"all_cases_passed": all(case["correctness"] for case in cases.values())},
         "cases": cases,
     }
