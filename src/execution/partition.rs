@@ -6,7 +6,14 @@ use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
 use super::{ExecutionOptions, ResourceAccount, execute_reader, execute_reader_inner_with_account};
-use crate::{CompiledContract, ExecutionMetrics, FastValidationReport, ProofFrameError};
+use crate::encoding::V2FingerprintState;
+use crate::evidence::{
+    PartitionEvidenceV1, PartitionManifestV1, partition_result_digest, validation_result_digest,
+};
+use crate::{
+    CompiledContract, ExecutionMetrics, FastValidationReport, Fingerprint, FingerprintOptions,
+    FingerprintVersion, ProofFrameError,
+};
 
 /// One independently consumable Arrow stream in a logical dataset partition.
 pub type PartitionReader = Box<dyn RecordBatchReader + Send>;
@@ -36,6 +43,75 @@ pub fn check_partition_readers(
         );
     }
     execute_independent_partitions(readers, plan, options)
+}
+
+/// Validate ordered partitions and bind each partition fingerprint into a manifest.
+pub fn check_partition_readers_with_evidence(
+    readers: Vec<PartitionReader>,
+    plan: &CompiledContract,
+    contract_source_digest: &str,
+    options: &ExecutionOptions,
+) -> Result<(FastValidationReport, PartitionManifestV1), ProofFrameError> {
+    if readers.is_empty() {
+        return Err(ProofFrameError::InvalidContract(
+            "At least one partition is required".into(),
+        ));
+    }
+    for reader in &readers {
+        if reader.schema().as_ref() != plan.schema() {
+            return Err(ProofFrameError::SchemaMismatch(
+                "partition schema differs from the schema used to compile the contract".into(),
+            ));
+        }
+    }
+    validate_source_digest(contract_source_digest)?;
+    let fingerprints = Arc::new(Mutex::new(
+        (0..readers.len())
+            .map(|_| None)
+            .collect::<Vec<Option<Fingerprint>>>(),
+    ));
+    let sequence = FingerprintedPartitionSequence::new(
+        readers,
+        Arc::new(plan.schema().clone()),
+        Arc::clone(&fingerprints),
+    )?;
+    let report = execute_reader(sequence, plan, options)?;
+    let schema_digest = report.schema_digest.clone();
+    let compiled_plan_digest = report.compiled_plan_digest.clone();
+    let report_value = serde_json::to_value(&report)?;
+    let global_result_digest = validation_result_digest(&report_value)?;
+    let mut slots = fingerprints
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let partitions = slots
+        .iter_mut()
+        .enumerate()
+        .map(|(index, slot)| {
+            let fingerprint = slot.take().ok_or_else(|| {
+                ProofFrameError::CorruptData(format!(
+                    "partition fingerprint {index} was not finalized"
+                ))
+            })?;
+            Ok(PartitionEvidenceV1 {
+                index: index as u64,
+                schema_digest: schema_digest.clone(),
+                contract_source_digest: contract_source_digest.to_string(),
+                compiled_plan_digest: compiled_plan_digest.clone(),
+                rows: fingerprint.rows(),
+                fingerprint_version: fingerprint.version(),
+                fingerprint_digest: *fingerprint.digest(),
+                result_digest: partition_result_digest(
+                    index as u64,
+                    &fingerprint,
+                    &schema_digest,
+                    contract_source_digest,
+                    &compiled_plan_digest,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProofFrameError>>()?;
+    let manifest = PartitionManifestV1::new(partitions, global_result_digest, options.resources)?;
+    Ok((report, manifest))
 }
 
 fn requires_global_state(plan: &CompiledContract) -> bool {
@@ -186,5 +262,100 @@ impl Iterator for PartitionSequence {
 impl RecordBatchReader for PartitionSequence {
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
+    }
+}
+
+struct FingerprintedPartitionSequence {
+    readers: VecDeque<PartitionReader>,
+    schema: SchemaRef,
+    fingerprints: Arc<Mutex<Vec<Option<Fingerprint>>>>,
+    index: usize,
+    state: Option<V2FingerprintState>,
+}
+
+impl FingerprintedPartitionSequence {
+    fn new(
+        readers: Vec<PartitionReader>,
+        schema: SchemaRef,
+        fingerprints: Arc<Mutex<Vec<Option<Fingerprint>>>>,
+    ) -> Result<Self, ProofFrameError> {
+        let state = Some(V2FingerprintState::new(
+            schema.as_ref(),
+            &FingerprintOptions::new(FingerprintVersion::V2),
+        )?);
+        Ok(Self {
+            readers: readers.into(),
+            schema,
+            fingerprints,
+            index: 0,
+            state,
+        })
+    }
+
+    fn finish_current(&mut self) {
+        let fingerprint = self
+            .state
+            .take()
+            .expect("each logical partition owns a fingerprint state")
+            .finish();
+        self.fingerprints
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())[self.index] = Some(fingerprint);
+    }
+}
+
+impl Iterator for FingerprintedPartitionSequence {
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let reader = self.readers.front_mut()?;
+            if let Some(batch) = reader.next() {
+                return Some(batch.and_then(|batch| {
+                    self.state
+                        .as_mut()
+                        .expect("active partition owns a fingerprint state")
+                        .update(&batch)
+                        .map_err(|error| ArrowError::ExternalError(Box::new(error)))?;
+                    Ok(batch)
+                }));
+            }
+            self.finish_current();
+            self.readers.pop_front();
+            self.index += 1;
+            if !self.readers.is_empty() {
+                self.state = Some(
+                    V2FingerprintState::new(
+                        self.schema.as_ref(),
+                        &FingerprintOptions::new(FingerprintVersion::V2),
+                    )
+                    .expect("schema was already accepted for the first partition"),
+                );
+            }
+        }
+    }
+}
+
+impl RecordBatchReader for FingerprintedPartitionSequence {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+fn validate_source_digest(value: &str) -> Result<(), ProofFrameError> {
+    let valid = ["pf-contract-v1:", "pf-contract-v2:"].iter().any(|prefix| {
+        value.strip_prefix(prefix).is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(ProofFrameError::InvalidReceipt(
+            "Partition contract source digest is malformed".into(),
+        ))
     }
 }

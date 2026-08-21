@@ -12,6 +12,8 @@ import pyarrow as pa
 from ._proofframe import (
     assemble_evidence_unchecked_arrow,
     check_arrow,
+    check_partitions_arrow,
+    check_partitions_with_evidence_arrow,
     check_with_evidence_arrow,
     detect_leakage_arrow,
     diff_arrow,
@@ -81,6 +83,12 @@ def _temp_budget(max_temp: int, spill: str) -> int:
     raise ValueError("spill must be 'auto' or 'never'")
 
 
+def _threads(threads: int | None) -> int | None:
+    if threads is not None and threads < 1:
+        raise ValueError("threads must be at least 1")
+    return threads
+
+
 def profile(
     data: Any,
     *,
@@ -120,6 +128,7 @@ def check(
     max_output_records: int = 100_000,
     max_samples: int = 100,
     spill: str = "auto",
+    threads: int | None = None,
 ) -> dict[str, Any]:
     """Compile a strict contract and execute bounded, typed validation kernels."""
     normalized = dict(contract)
@@ -134,6 +143,63 @@ def check(
         temp_budget,
         max_output_records,
         max_samples,
+        _threads(threads),
+    )
+
+
+def check_partitions(
+    partitions: Sequence[Any],
+    contract: Mapping[str, Any],
+    *,
+    max_memory: int = 512 * 1024 * 1024,
+    max_temp: int = 4 * 1024 * 1024 * 1024,
+    max_output_records: int = 100_000,
+    max_samples: int = 100,
+    spill: str = "auto",
+    threads: int | None = None,
+) -> dict[str, Any]:
+    """Validate ordered Arrow partitions in the shared native Rust engine."""
+    readers = [_as_reader(partition) for partition in partitions]
+    if not readers:
+        raise ValueError("partitions must contain at least one dataset")
+    normalized = dict(contract)
+    normalized.setdefault("version", "proofframe.contract.v1")
+    return check_partitions_arrow(
+        readers,
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")),
+        max_memory,
+        _temp_budget(max_temp, spill),
+        max_output_records,
+        max_samples,
+        _threads(threads),
+    )
+
+
+def check_partitions_with_evidence(
+    partitions: Sequence[Any],
+    contract: Mapping[str, Any],
+    *,
+    max_memory: int = 512 * 1024 * 1024,
+    max_temp: int = 4 * 1024 * 1024 * 1024,
+    max_output_records: int = 100_000,
+    max_samples: int = 100,
+    spill: str = "auto",
+    threads: int | None = None,
+) -> dict[str, Any]:
+    """Validate partitions and bind their ordered V2 fingerprints into a manifest."""
+    readers = [_as_reader(partition) for partition in partitions]
+    if not readers:
+        raise ValueError("partitions must contain at least one dataset")
+    normalized = dict(contract)
+    normalized.setdefault("version", "proofframe.contract.v1")
+    return check_partitions_with_evidence_arrow(
+        readers,
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")),
+        max_memory,
+        _temp_budget(max_temp, spill),
+        max_output_records,
+        max_samples,
+        _threads(threads),
     )
 
 
@@ -146,6 +212,7 @@ def check_with_evidence(
     max_output_records: int = 100_000,
     max_samples: int = 100,
     spill: str = "auto",
+    threads: int | None = None,
 ) -> dict[str, Any]:
     """Validate and fingerprint one Arrow stream in a single native execution."""
     normalized = dict(contract)
@@ -160,6 +227,7 @@ def check_with_evidence(
         temp_budget,
         max_output_records,
         max_samples,
+        _threads(threads),
     )
 
 

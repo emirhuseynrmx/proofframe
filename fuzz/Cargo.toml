@@ -32,5 +32,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "partition_manifest_json"
+path = "fuzz_targets/partition_manifest_json.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

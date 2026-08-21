@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ProofFrameError;
-use crate::evidence::EvidenceV2;
+use crate::evidence::{EvidenceV2, PartitionManifestV1};
 
 mod trust;
 pub use trust::{TrustPolicy, TrustStore};
@@ -83,6 +83,32 @@ pub struct UnsignedReceiptV2 {
 pub struct SignedReceiptV2 {
     pub schema: ReceiptSchema,
     pub unsigned: UnsignedReceiptV2,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PartitionReceiptSchema {
+    #[serde(rename = "proofframe.partition-receipt.v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnsignedPartitionReceiptV1 {
+    pub schema: PartitionReceiptSchema,
+    pub algorithm: String,
+    pub engine_version: String,
+    pub issued_at_unix_ms: u64,
+    pub manifest_hash: [u8; 32],
+    pub manifest: PartitionManifestV1,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedPartitionReceiptV1 {
+    pub schema: PartitionReceiptSchema,
+    pub unsigned: UnsignedPartitionReceiptV1,
     pub signature: String,
 }
 
@@ -227,6 +253,56 @@ pub fn sign_v2_json(evidence_json: &str, private_key: &str) -> Result<String, Pr
     Ok(serde_json::to_string(&sign_v2(evidence, &signing)?)?)
 }
 
+/// Sign an ordered partition manifest without changing the frozen receipt V2 envelope.
+pub fn sign_partition_manifest(
+    manifest: PartitionManifestV1,
+    signing: &SigningKey,
+) -> Result<SignedPartitionReceiptV1, ProofFrameError> {
+    let unsigned = UnsignedPartitionReceiptV1 {
+        schema: PartitionReceiptSchema::V1,
+        algorithm: "Ed25519".to_string(),
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        issued_at_unix_ms: now_unix_ms()?,
+        manifest_hash: manifest.digest()?,
+        manifest,
+        public_key: URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes()),
+    };
+    let signature = signing.sign(&partition_message(&unsigned)?);
+    Ok(SignedPartitionReceiptV1 {
+        schema: PartitionReceiptSchema::V1,
+        unsigned,
+        signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+    })
+}
+
+/// Verify manifest integrity, signature validity, and the supplied signer-trust policy.
+pub fn verify_partition_manifest_receipt(
+    receipt: &SignedPartitionReceiptV1,
+    trust: &TrustPolicy,
+) -> Result<ReceiptVerification, ProofFrameError> {
+    let manifest_valid = receipt.unsigned.manifest.validate().is_ok();
+    let schema_supported = receipt.schema == PartitionReceiptSchema::V1
+        && receipt.unsigned.schema == PartitionReceiptSchema::V1
+        && receipt.unsigned.algorithm == "Ed25519"
+        && manifest_valid;
+    let expected_hash = receipt.unsigned.manifest.digest_unchecked()?;
+    let report_hash_matches = expected_hash == receipt.unsigned.manifest_hash && manifest_valid;
+    let public = decode_public_key(&receipt.unsigned.public_key)?;
+    let signature = Signature::from_bytes(&decode_exact(&receipt.signature, "signature")?);
+    let signature_valid = public
+        .verify_strict(&partition_message(&receipt.unsigned)?, &signature)
+        .is_ok();
+    let signer_trusted = trust.accepts(&public);
+    Ok(ReceiptVerification {
+        valid: schema_supported && report_hash_matches && signature_valid && signer_trusted,
+        signature_valid,
+        report_hash_matches,
+        schema_supported,
+        signer_trusted,
+        legacy: false,
+    })
+}
+
 /// Verify V2 or legacy V1 JSON with an optional expected signer key.
 pub fn verify_json_with_expected_key(
     receipt_json: &str,
@@ -312,6 +388,14 @@ fn v2_message(unsigned: &UnsignedReceiptV2) -> Result<Vec<u8>, ProofFrameError> 
     let canonical = canonical(unsigned)?;
     let mut message = Vec::with_capacity(27 + canonical.len());
     message.extend_from_slice(b"proofframe:receipt:v2\0");
+    message.extend_from_slice(&canonical);
+    Ok(message)
+}
+
+fn partition_message(unsigned: &UnsignedPartitionReceiptV1) -> Result<Vec<u8>, ProofFrameError> {
+    let canonical = canonical(unsigned)?;
+    let mut message = Vec::with_capacity(39 + canonical.len());
+    message.extend_from_slice(b"proofframe:partition-receipt:v1\0");
     message.extend_from_slice(&canonical);
     Ok(message)
 }

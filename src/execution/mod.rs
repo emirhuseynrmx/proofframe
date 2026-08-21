@@ -6,7 +6,9 @@ mod partition;
 mod resource;
 mod row_kernels;
 
-pub use partition::{PartitionReader, check_partition_readers};
+pub use partition::{
+    PartitionReader, check_partition_readers, check_partition_readers_with_evidence,
+};
 
 pub use resource::{
     CancellationToken, MemoryReservation, ResourceAccount, ResourceLimits, TempReservation,

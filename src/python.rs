@@ -1,6 +1,8 @@
 //! Typed, non-blocking Python boundary.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::pyarrow::PyArrowType;
@@ -19,10 +21,10 @@ use crate::evidence::{
 };
 use crate::{
     CompiledContract, ContractDocument, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
-    ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions,
-    PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy,
-    detect_leakage_with_options, diff_readers_with_options, execute_reader,
-    execute_reader_with_fingerprint, fingerprint_reader_with_options,
+    ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions, PartitionReader,
+    PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy, check_partition_readers,
+    check_partition_readers_with_evidence, detect_leakage_with_options, diff_readers_with_options,
+    execute_reader, execute_reader_with_fingerprint, fingerprint_reader_with_options,
     profile_reader_with_resources_and_hint, scan_pii_reader_with_options,
 };
 
@@ -78,7 +80,16 @@ fn fingerprint_arrow(
     source: PyArrowType<ArrowArrayStreamReader>,
     version: &str,
 ) -> PyResult<String> {
-    let version = match version {
+    let version = parse_fingerprint_version(py, version)?;
+    py.detach(move || {
+        fingerprint_reader_with_options(source.0, &FingerprintOptions::new(version))
+            .map(|fingerprint| fingerprint.to_tagged_string())
+    })
+    .map_err(|error| map_error(py, error))
+}
+
+fn parse_fingerprint_version(py: Python<'_>, version: &str) -> PyResult<FingerprintVersion> {
+    Ok(match version {
         "v1" | "pf-fp-v1" => FingerprintVersion::V1,
         "v2" | "pf-fp-v2" => FingerprintVersion::V2,
         other => {
@@ -89,12 +100,30 @@ fn fingerprint_arrow(
                 )),
             ));
         }
-    };
-    py.detach(move || {
-        fingerprint_reader_with_options(source.0, &FingerprintOptions::new(version))
-            .map(|fingerprint| fingerprint.to_tagged_string())
     })
-    .map_err(|error| map_error(py, error))
+}
+
+#[pyfunction]
+#[pyo3(signature = (source, version="v1"))]
+fn benchmark_fingerprint_arrow(
+    py: Python<'_>,
+    source: PyArrowType<ArrowArrayStreamReader>,
+    version: &str,
+) -> PyResult<Py<PyAny>> {
+    let version = parse_fingerprint_version(py, version)?;
+    let result = py.detach(move || {
+        let started = Instant::now();
+        let fingerprint =
+            fingerprint_reader_with_options(source.0, &FingerprintOptions::new(version))?;
+        let native_elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        Ok(serde_json::json!({
+            "native_elapsed_ns": native_elapsed_ns,
+            "fingerprint": fingerprint.to_tagged_string(),
+        }))
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|value| value_to_python(py, value))
 }
 
 #[pyfunction]
@@ -105,7 +134,8 @@ fn fingerprint_arrow(
     max_memory_bytes=DEFAULT_MEMORY_BYTES,
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
-    max_samples=DEFAULT_SAMPLES
+    max_samples=DEFAULT_SAMPLES,
+    threads=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn check_arrow(
@@ -117,6 +147,7 @@ fn check_arrow(
     max_temp_bytes: u64,
     max_output_records: u64,
     max_samples: usize,
+    threads: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
         let schema = source.0.schema();
@@ -132,7 +163,7 @@ fn check_arrow(
                 max_samples,
             ),
             cancellation: crate::CancellationToken::new(),
-            threads: None,
+            threads: worker_count(threads)?,
         };
         execute_reader(source.0, &plan, &options).map(|report| (report, contract_source_digest))
     });
@@ -141,6 +172,172 @@ fn check_arrow(
         .and_then(|(report, source_digest)| {
             serialize_check_report_to_python(py, &report, source_digest)
         })
+}
+
+/// Internal release-gate hook: compile outside the timer, then measure exactly
+/// the same native execution path used by `check_arrow`.
+#[pyfunction]
+#[pyo3(signature = (
+    source,
+    contract_json,
+    row_count_hint=None,
+    max_memory_bytes=DEFAULT_MEMORY_BYTES,
+    max_temp_bytes=DEFAULT_TEMP_BYTES
+))]
+fn benchmark_check_arrow(
+    py: Python<'_>,
+    source: PyArrowType<ArrowArrayStreamReader>,
+    contract_json: String,
+    row_count_hint: Option<u64>,
+    max_memory_bytes: u64,
+    max_temp_bytes: u64,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || {
+        let schema = source.0.schema();
+        let document = ContractDocument::from_json(&contract_json)?;
+        let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
+        let options = ExecutionOptions {
+            row_count_hint,
+            resources: limits(
+                max_memory_bytes,
+                max_temp_bytes,
+                DEFAULT_OUTPUT_RECORDS,
+                DEFAULT_SAMPLES,
+            ),
+            cancellation: crate::CancellationToken::new(),
+            threads: None,
+        };
+        let started = Instant::now();
+        let report = execute_reader(source.0, &plan, &options)?;
+        let native_elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        Ok(serde_json::json!({
+            "native_elapsed_ns": native_elapsed_ns,
+            "report": report,
+        }))
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|value| value_to_python(py, value))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    sources,
+    contract_json,
+    max_memory_bytes=DEFAULT_MEMORY_BYTES,
+    max_temp_bytes=DEFAULT_TEMP_BYTES,
+    max_output_records=DEFAULT_OUTPUT_RECORDS,
+    max_samples=DEFAULT_SAMPLES,
+    threads=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn check_partitions_arrow(
+    py: Python<'_>,
+    sources: Vec<PyArrowType<ArrowArrayStreamReader>>,
+    contract_json: String,
+    max_memory_bytes: u64,
+    max_temp_bytes: u64,
+    max_output_records: u64,
+    max_samples: usize,
+    threads: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || {
+        let readers = sources
+            .into_iter()
+            .map(|source| Box::new(source.0) as PartitionReader)
+            .collect::<Vec<_>>();
+        let schema = readers
+            .first()
+            .ok_or_else(|| {
+                ProofFrameError::InvalidContract("At least one partition is required".into())
+            })?
+            .schema();
+        let source_digest = contract_source_digest(&contract_json)?;
+        let document = ContractDocument::from_json(&contract_json)?;
+        let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
+        let options = ExecutionOptions {
+            row_count_hint: None,
+            resources: limits(
+                max_memory_bytes,
+                max_temp_bytes,
+                max_output_records,
+                max_samples,
+            ),
+            cancellation: crate::CancellationToken::new(),
+            threads: worker_count(threads)?,
+        };
+        check_partition_readers(readers, &plan, &options).map(|report| (report, source_digest))
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|(report, source_digest)| {
+            serialize_check_report_to_python(py, &report, source_digest)
+        })
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    sources,
+    contract_json,
+    max_memory_bytes=DEFAULT_MEMORY_BYTES,
+    max_temp_bytes=DEFAULT_TEMP_BYTES,
+    max_output_records=DEFAULT_OUTPUT_RECORDS,
+    max_samples=DEFAULT_SAMPLES,
+    threads=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn check_partitions_with_evidence_arrow(
+    py: Python<'_>,
+    sources: Vec<PyArrowType<ArrowArrayStreamReader>>,
+    contract_json: String,
+    max_memory_bytes: u64,
+    max_temp_bytes: u64,
+    max_output_records: u64,
+    max_samples: usize,
+    threads: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    let result = py.detach(move || {
+        let readers = sources
+            .into_iter()
+            .map(|source| Box::new(source.0) as PartitionReader)
+            .collect::<Vec<_>>();
+        let schema = readers
+            .first()
+            .ok_or_else(|| {
+                ProofFrameError::InvalidContract("At least one partition is required".into())
+            })?
+            .schema();
+        let source_digest = contract_source_digest(&contract_json)?;
+        let document = ContractDocument::from_json(&contract_json)?;
+        let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
+        let options = ExecutionOptions {
+            row_count_hint: None,
+            resources: limits(
+                max_memory_bytes,
+                max_temp_bytes,
+                max_output_records,
+                max_samples,
+            ),
+            cancellation: crate::CancellationToken::new(),
+            threads: worker_count(threads)?,
+        };
+        let (report, manifest) =
+            check_partition_readers_with_evidence(readers, &plan, &source_digest, &options)?;
+        let mut report = serde_json::to_value(report)?;
+        report
+            .as_object_mut()
+            .ok_or_else(|| {
+                ProofFrameError::CorruptData("Partition report is not a JSON object".into())
+            })?
+            .insert(
+                "contract_source_digest".to_string(),
+                Value::String(source_digest),
+            );
+        Ok(serde_json::json!({"report": report, "manifest": manifest}))
+    });
+    result
+        .map_err(|error| map_error(py, error))
+        .and_then(|value| value_to_python(py, value))
 }
 
 #[pyfunction]
@@ -227,7 +424,8 @@ fn assemble_evidence_unchecked_arrow(
     max_memory_bytes=DEFAULT_MEMORY_BYTES,
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
-    max_samples=DEFAULT_SAMPLES
+    max_samples=DEFAULT_SAMPLES,
+    threads=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn check_with_evidence_arrow(
@@ -239,6 +437,7 @@ fn check_with_evidence_arrow(
     max_temp_bytes: u64,
     max_output_records: u64,
     max_samples: usize,
+    threads: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
         let schema = source.0.schema();
@@ -254,7 +453,7 @@ fn check_with_evidence_arrow(
                 max_samples,
             ),
             cancellation: crate::CancellationToken::new(),
-            threads: None,
+            threads: worker_count(threads)?,
         };
         let (report, fingerprint) = execute_reader_with_fingerprint(source.0, &plan, &options)?;
         let mut report_value = serde_json::to_value(&report)?;
@@ -333,6 +532,7 @@ fn validate_arrow(
         max_temp_bytes,
         max_output_records,
         max_samples,
+        None,
     )
 }
 
@@ -366,6 +566,7 @@ fn validate_fast_arrow(
         max_temp_bytes,
         max_output_records,
         max_samples,
+        None,
     )
 }
 
@@ -629,6 +830,16 @@ fn limits(memory: u64, temp: u64, output: u64, samples: usize) -> ResourceLimits
     }
 }
 
+fn worker_count(threads: Option<usize>) -> Result<Option<NonZeroUsize>, ProofFrameError> {
+    threads
+        .map(|threads| {
+            NonZeroUsize::new(threads).ok_or_else(|| {
+                ProofFrameError::InvalidContract("threads must be at least 1".into())
+            })
+        })
+        .transpose()
+}
+
 fn json_text_to_python(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
     let value: Value =
         serde_json::from_str(json).map_err(|error| map_error(py, ProofFrameError::Json(error)))?;
@@ -766,7 +977,14 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn register_data_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(benchmark_fingerprint_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(check_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(benchmark_check_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(check_partitions_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        check_partitions_with_evidence_arrow,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(check_with_evidence_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(assemble_evidence_unchecked_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;

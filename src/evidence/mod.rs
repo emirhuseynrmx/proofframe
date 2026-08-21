@@ -1,5 +1,10 @@
 //! Strict, versioned evidence envelopes binding data, execution and result claims.
 
+mod partition;
+
+pub(crate) use partition::partition_result_digest;
+pub use partition::{PartitionEvidenceV1, PartitionManifestSchema, PartitionManifestV1};
+
 use serde::{Deserialize, Serialize};
 
 use serde_json::Value;

@@ -3,8 +3,8 @@
 //!
 //! The crate exposes a Rust-native API by default. The Python extension module is available behind
 //! the `python` feature and is enabled by the PyPI build configuration. Core invariants are stable
-//! enough to publish as a beta: versioned canonical dataset fingerprints, disk-backed exact
-//! keyed diffs, privacy-preserving PII findings, leakage checks, and signed proof receipts.
+//! enough for the stable 0.5 line: versioned canonical dataset fingerprints, compiled relational
+//! and dataset contracts, disk-backed exact state, deterministic partitions, and signed evidence.
 
 mod contract;
 mod diff;
@@ -33,8 +33,8 @@ pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
 pub use execution::{
     CancellationToken, ExecutionOptions, MemoryReservation, PartitionReader, ResourceAccount,
-    ResourceLimits, TempReservation, check_partition_readers, execute_reader,
-    execute_reader_with_fingerprint,
+    ResourceLimits, TempReservation, check_partition_readers,
+    check_partition_readers_with_evidence, execute_reader, execute_reader_with_fingerprint,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
 
@@ -45,6 +45,14 @@ pub use leakage::{LeakageOptions, detect_leakage_with_options};
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_partition_bytes(input: &[u8]) -> Result<(), ProofFrameError> {
     diff::fuzz_partition_bytes(input)
+}
+
+/// Exercise the strict, bounded partition-manifest JSON decoder.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_partition_manifest_json(input: &[u8]) -> Result<(), ProofFrameError> {
+    let source = std::str::from_utf8(input)
+        .map_err(|error| ProofFrameError::InvalidReceipt(error.to_string()))?;
+    evidence::PartitionManifestV1::from_json(source).map(|_| ())
 }
 
 #[cfg(miri)]

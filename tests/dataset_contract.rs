@@ -9,12 +9,17 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use proofframe::{CompiledContract, ContractDocument, ExecutionOptions, execute_reader};
+use serde_json::{Value, json};
 
 use support::reader_from_batches;
 
 fn compile(source: &str, schema: &Schema) -> CompiledContract {
     let document = ContractDocument::from_json(source).unwrap();
     CompiledContract::compile_document(&document, schema).unwrap()
+}
+
+fn compile_json(source: Value, schema: &Schema) -> CompiledContract {
+    compile(&source.to_string(), schema)
 }
 
 #[test]
@@ -61,41 +66,43 @@ fn composite_unique_is_exact_across_record_batch_boundaries() {
         Field::new("order_id", DataType::Int64, false),
         Field::new("line_id", DataType::Int64, false),
     ]));
-    let make_batch = |orders: Vec<i64>, lines: Vec<i64>| {
+    let make_batch = |orders: &[i64], lines: &[i64]| {
         RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(Int64Array::from(orders)) as ArrayRef,
-                Arc::new(Int64Array::from(lines)) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(orders.iter().copied())) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(lines.iter().copied())) as ArrayRef,
             ],
         )
         .unwrap()
     };
-    let plan = compile(
-        r#"{
-            "version":"proofframe.contract.v2",
-            "columns":{},
-            "dataset_rules":{
-                "composite_unique":[{"name":"line_key","columns":["order_id","line_id"]}]
+    let plan = compile_json(
+        json!({
+            "version": "proofframe.contract.v2",
+            "columns": {},
+            "dataset_rules": {
+                "composite_unique": [{
+                    "name": "line_key",
+                    "columns": ["order_id", "line_id"]
+                }]
             }
-        }"#,
+        }),
         schema.as_ref(),
     );
 
     let report = execute_reader(
-        reader_from_batches(vec![
-            make_batch(vec![1, 1], vec![1, 2]),
-            make_batch(vec![1], vec![1]),
-        ]),
+        reader_from_batches(vec![make_batch(&[1, 1], &[1, 2]), make_batch(&[1], &[1])]),
         &plan,
         &ExecutionOptions::default(),
     )
     .unwrap();
 
     assert_eq!(report.violation_count, 1);
-    assert_eq!(report.findings[0].rule, "composite_unique");
-    assert_eq!(report.findings[0].row, Some(2));
-    assert!(report.findings[0].message.contains("line_key"));
+    assert!(report.findings.iter().any(|finding| {
+        finding.rule == "composite_unique"
+            && finding.row == Some(2)
+            && finding.message.contains("line_key")
+    }));
 }
 
 #[test]

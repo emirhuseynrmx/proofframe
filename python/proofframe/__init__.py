@@ -4,6 +4,8 @@ from ._proofframe import __version__
 from .api import (
     assemble_evidence_unchecked,
     check,
+    check_partitions,
+    check_partitions_with_evidence,
     check_with_evidence,
     detect_leakage,
     diff,
@@ -41,6 +43,8 @@ __all__ = [
     "__version__",
     "assemble_evidence_unchecked",
     "check",
+    "check_partitions",
+    "check_partitions_with_evidence",
     "check_with_evidence",
     "detect_leakage",
     "diff",

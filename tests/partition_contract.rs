@@ -8,7 +8,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use proofframe::{
     CompiledContract, ContractDocument, ErrorCode, ExecutionOptions, PartitionReader,
-    check_partition_readers,
+    check_partition_readers, check_partition_readers_with_evidence,
 };
 
 use support::reader_from_batches;
@@ -28,12 +28,12 @@ fn serial_and_parallel_partition_reports_are_byte_equivalent_and_ordered() {
         Field::new("low", DataType::Int64, false),
         Field::new("high", DataType::Int64, false),
     ]));
-    let make_batch = |low: Vec<i64>, high: Vec<i64>| {
+    let make_batch = |low: &[i64], high: &[i64]| {
         RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(Int64Array::from(low)) as ArrayRef,
-                Arc::new(Int64Array::from(high)) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(low.iter().copied())) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(high.iter().copied())) as ArrayRef,
             ],
         )
         .unwrap()
@@ -52,8 +52,8 @@ fn serial_and_parallel_partition_reports_are_byte_equivalent_and_ordered() {
     let run = |threads| {
         check_partition_readers(
             vec![
-                partition(make_batch(vec![1, 4], vec![2, 3])),
-                partition(make_batch(vec![7, 5], vec![6, 8])),
+                partition(make_batch(&[1, 4], &[2, 3])),
+                partition(make_batch(&[7, 5], &[6, 8])),
             ],
             &plan,
             &ExecutionOptions {
@@ -115,12 +115,12 @@ fn exact_composite_uniqueness_remains_global_across_partitions() {
         Field::new("order_id", DataType::Int64, false),
         Field::new("line_id", DataType::Int64, false),
     ]));
-    let make_batch = |orders: Vec<i64>, lines: Vec<i64>| {
+    let make_batch = |orders: &[i64], lines: &[i64]| {
         RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(Int64Array::from(orders)) as ArrayRef,
-                Arc::new(Int64Array::from(lines)) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(orders.iter().copied())) as ArrayRef,
+                Arc::new(Int64Array::from_iter_values(lines.iter().copied())) as ArrayRef,
             ],
         )
         .unwrap()
@@ -138,8 +138,8 @@ fn exact_composite_uniqueness_remains_global_across_partitions() {
 
     let report = check_partition_readers(
         vec![
-            partition(make_batch(vec![1, 1], vec![1, 2])),
-            partition(make_batch(vec![1], vec![1])),
+            partition(make_batch(&[1, 1], &[1, 2])),
+            partition(make_batch(&[1], &[1])),
         ],
         &plan,
         &ExecutionOptions {
@@ -150,5 +150,50 @@ fn exact_composite_uniqueness_remains_global_across_partitions() {
     .unwrap();
 
     assert_eq!(report.violation_count, 1);
-    assert_eq!(report.findings[0].row, Some(2));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| { finding.rule == "composite_unique" && finding.row == Some(2) })
+    );
+}
+
+#[test]
+fn partition_manifest_is_emitted_from_the_same_global_validation_traversal() {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let make_batch = |values: &[i64]| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from_iter_values(values.iter().copied())) as ArrayRef],
+        )
+        .unwrap()
+    };
+    let plan = compile(
+        r#"{"version":"proofframe.contract.v2","columns":{"id":{"not_null":true}}}"#,
+        schema.as_ref(),
+    );
+    let source_digest = format!("pf-contract-v2:{}", "2".repeat(64));
+
+    let (report, manifest) = check_partition_readers_with_evidence(
+        vec![
+            partition(make_batch(&[1, 2])),
+            partition(make_batch(&[3, 4, 5])),
+        ],
+        &plan,
+        &source_digest,
+        &ExecutionOptions {
+            threads: Some(NonZeroUsize::new(2).unwrap()),
+            ..ExecutionOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(report.valid);
+    assert_eq!(report.rows, 5);
+    assert_eq!(manifest.partitions.len(), 2);
+    assert_eq!(manifest.partitions[0].rows, 2);
+    assert_eq!(manifest.partitions[1].rows, 3);
+    assert_eq!(manifest.partitions[0].index, 0);
+    assert_eq!(manifest.partitions[1].index, 1);
+    manifest.validate().unwrap();
 }

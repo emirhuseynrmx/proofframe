@@ -6,6 +6,7 @@ use arrow::array::{
     UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
+use std::cmp::Ordering;
 
 use super::record_lazy;
 use crate::{
@@ -232,8 +233,12 @@ impl DatasetState {
             } else {
                 nulls as f64 / rows as f64
             };
-            let valid = ratio.range().min.is_none_or(|min| value >= min)
-                && ratio.range().max.is_none_or(|max| value <= max);
+            let valid =
+                ratio.range().min.is_none_or(|min| {
+                    compare_fraction_to_bound(nulls, rows, min) != Ordering::Less
+                }) && ratio.range().max.is_none_or(|max| {
+                    compare_fraction_to_bound(nulls, rows, max) != Ordering::Greater
+                });
             if !valid {
                 record_lazy(validation, "null_ratio", ratio.column(), None, || {
                     format!("Null ratio `{value}` is outside the contract range")
@@ -264,8 +269,11 @@ impl DatasetState {
                 } else {
                     distinct as f64 / rows as f64
                 };
-                let valid = range.min.is_none_or(|min| ratio >= min)
-                    && range.max.is_none_or(|max| ratio <= max);
+                let valid = range.min.is_none_or(|min| {
+                    compare_fraction_to_bound(distinct, rows, min) != Ordering::Less
+                }) && range.max.is_none_or(|max| {
+                    compare_fraction_to_bound(distinct, rows, max) != Ordering::Greater
+                });
                 if !valid {
                     record_lazy(validation, "distinct_ratio", &state.column, None, || {
                         format!("Exact distinct ratio `{ratio}` is outside the contract range")
@@ -476,4 +484,72 @@ fn append_bytes(output: &mut Vec<u8>, tag: u8, value: &[u8]) -> Result<(), Proof
     output.extend_from_slice(&(value.len() as u64).to_le_bytes());
     output.extend_from_slice(value);
     Ok(())
+}
+
+fn compare_fraction_to_bound(numerator: u64, denominator: u64, bound: f64) -> Ordering {
+    if denominator == 0 {
+        return 0.0_f64.total_cmp(&bound);
+    }
+    if bound <= 0.0 {
+        return numerator.cmp(&0);
+    }
+    if bound >= 1.0 {
+        return numerator.cmp(&denominator);
+    }
+
+    let bits = bound.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    if exponent_bits == 0 {
+        return if numerator == 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let mut bound_numerator = (1_u64 << 52) | (bits & ((1_u64 << 52) - 1));
+    let mut denominator_shift = (1075 - exponent_bits) as u32;
+    let cancelled = bound_numerator.trailing_zeros().min(denominator_shift);
+    bound_numerator >>= cancelled;
+    denominator_shift -= cancelled;
+
+    if denominator_shift >= u128::BITS {
+        return if numerator == 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    let bound_denominator = 1_u128 << denominator_shift;
+    let Some(left) = u128::from(numerator).checked_mul(bound_denominator) else {
+        return Ordering::Greater;
+    };
+    let right = u128::from(denominator) * u128::from(bound_numerator);
+    left.cmp(&right)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use super::compare_fraction_to_bound;
+
+    #[test]
+    fn ratio_comparison_does_not_round_large_integer_counts() {
+        let rows = u64::MAX;
+        let count = rows / 2 + 1;
+
+        assert_eq!(
+            compare_fraction_to_bound(count, rows, 0.5),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_fraction_to_bound(0, rows, f64::MIN_POSITIVE),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_fraction_to_bound(1, rows, f64::MIN_POSITIVE),
+            Ordering::Greater
+        );
+    }
 }
