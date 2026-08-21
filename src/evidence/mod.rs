@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::Value;
 
-use crate::{ContractAst, FingerprintVersion, ProofFrameError, ResourceLimits};
+use crate::{
+    ContractDocument, ContractVersion, FingerprintVersion, ProofFrameError, ResourceLimits,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EvidenceSchema {
@@ -62,14 +64,24 @@ pub struct EvidenceV2 {
 
 /// Digest the validated, RFC 8785-canonical contract source independently from its compiled plan.
 pub fn contract_source_digest(source: &str) -> Result<String, ProofFrameError> {
-    ContractAst::from_json(source)?;
+    let document = ContractDocument::from_json(source)?;
     let value: Value = serde_json::from_str(source)?;
     let canonical = serde_json_canonicalizer::to_vec(&value)
         .map_err(|error| ProofFrameError::InvalidContract(error.to_string()))?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"proofframe:contract-source:v1\0");
+    let (domain, prefix) = match document.version() {
+        ContractVersion::V1 => (
+            b"proofframe:contract-source:v1\0".as_slice(),
+            "pf-contract-v1:",
+        ),
+        ContractVersion::V2 => (
+            b"proofframe:contract-source:v2\0".as_slice(),
+            "pf-contract-v2:",
+        ),
+    };
+    hasher.update(domain);
     hasher.update(&canonical);
-    Ok(format!("pf-contract-v1:{}", hasher.finalize().to_hex()))
+    Ok(format!("{prefix}{}", hasher.finalize().to_hex()))
 }
 
 /// Bind a canonical validation report to one versioned result identity.
@@ -147,12 +159,16 @@ impl EvidenceV2 {
                 "V2 evidence requires the V2 dataset fingerprint",
             ));
         }
-        validate_tagged_digest(
+        validate_tagged_digest_any(
             &self.contract_source_digest,
-            "pf-contract-v1:",
+            &["pf-contract-v1:", "pf-contract-v2:"],
             "contract source",
         )?;
-        validate_tagged_digest(&self.compiled_plan_digest, "pf-plan-v1:", "compiled plan")?;
+        validate_tagged_digest_any(
+            &self.compiled_plan_digest,
+            &["pf-plan-v1:", "pf-plan-v2:"],
+            "compiled plan",
+        )?;
         validate_tagged_digest(&self.schema_digest, "pf-schema-v1:", "schema")?;
         validate_tagged_digest(
             &self.result.result_digest,
@@ -239,6 +255,27 @@ fn validate_tagged_digest(value: &str, prefix: &str, label: &str) -> Result<(), 
         )));
     }
     Ok(())
+}
+
+fn validate_tagged_digest_any(
+    value: &str,
+    prefixes: &[&str],
+    label: &str,
+) -> Result<(), ProofFrameError> {
+    if prefixes.iter().any(|prefix| {
+        value.strip_prefix(prefix).is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    }) {
+        Ok(())
+    } else {
+        Err(invalid_evidence(format!(
+            "Evidence {label} digest has an unsupported prefix or malformed digest"
+        )))
+    }
 }
 
 fn invalid_evidence(message: impl Into<String>) -> ProofFrameError {

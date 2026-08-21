@@ -1,7 +1,9 @@
 //! Schema-compiled, column-oriented validation execution.
 
+mod dataset_state;
 mod kernels;
 mod resource;
+mod row_kernels;
 
 pub use resource::{
     CancellationToken, MemoryReservation, ResourceAccount, ResourceLimits, TempReservation,
@@ -79,6 +81,12 @@ where
         .transpose()?;
     let finding_limit = plan.max_findings().min(options.resources.max_samples);
     let mut validation = ValidationState::new_accounted(finding_limit, resource_root.clone());
+    let mut dataset_state = dataset_state::DatasetState::new(
+        plan.dataset_plan(),
+        &resource_root,
+        options.row_count_hint,
+        &options.cancellation,
+    )?;
     let has_unique = plan.columns().iter().any(|column| column.rules().unique());
     let unique_directory = has_unique.then(tempfile::TempDir::new).transpose()?;
     let mut unique_states = plan
@@ -127,6 +135,12 @@ where
             )?;
             validation.check_resources()?;
         }
+        for row_plan in plan.row_plans() {
+            row_kernels::scan_row_plan(row_plan, &batch, rows, &mut validation)?;
+            validation.check_resources()?;
+        }
+        dataset_state.update(&batch, rows, &mut validation)?;
+        validation.check_resources()?;
         rows += batch.num_rows() as u64;
     }
 
@@ -153,6 +167,11 @@ where
         validation.violation_count += summary.duplicate_count.saturating_sub(sampled);
     }
 
+    let dataset_metrics = dataset_state.finish(rows, &mut validation)?;
+    spill_bytes = spill_bytes.saturating_add(dataset_metrics.spill_bytes);
+    exact_runs = exact_runs.saturating_add(dataset_metrics.exact_runs);
+    validation.check_resources()?;
+
     let outcome = validation.finish();
     let report = FastValidationReport {
         valid: outcome.violation_count == 0,
@@ -175,7 +194,7 @@ where
     Ok((report, fingerprint.map(V2FingerprintState::finish)))
 }
 
-fn exact_kind(kernel: &KernelKind) -> ValueKind {
+pub(super) fn exact_kind(kernel: &KernelKind) -> ValueKind {
     match kernel {
         KernelKind::I8
         | KernelKind::I16

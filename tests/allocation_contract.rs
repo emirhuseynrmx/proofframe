@@ -8,8 +8,8 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use proofframe::{
-    CompiledContract, ContractAst, ExecutionOptions, execute_reader, fingerprint_reader,
-    scan_pii_reader,
+    CompiledContract, ContractAst, ContractDocument, ExecutionOptions, execute_reader,
+    fingerprint_reader, scan_pii_reader,
 };
 
 use support::reader_from_batches;
@@ -139,4 +139,49 @@ fn primitive_range_validation_allocations_are_constant_after_setup() {
         "primitive range validation allocated {allocations} times for {ROWS} rows"
     );
     assert_eq!(reallocations, 0, "validation buffers must not reallocate");
+}
+
+#[test]
+fn relational_i64_validation_does_not_allocate_per_row() {
+    const ROWS: usize = 100_000;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("low", DataType::Int64, false),
+        Field::new("high", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from_iter_values(0..ROWS as i64)) as ArrayRef,
+            Arc::new(Int64Array::from_iter_values(1..=ROWS as i64)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"ordered",
+                "compare":{"left":{"column":"low"},"op":"lt","right":{"column":"high"}}
+            }]
+        }"#,
+    )
+    .unwrap();
+    let plan = CompiledContract::compile_document(&document, schema.as_ref()).unwrap();
+
+    let (report, allocations, reallocations) = measure(|| {
+        execute_reader(
+            reader_from_batches(vec![batch]),
+            &plan,
+            &ExecutionOptions::default(),
+        )
+        .unwrap()
+    });
+
+    assert!(report.valid);
+    assert!(
+        allocations <= 8,
+        "relational scan allocated {allocations} times for {ROWS} rows"
+    );
+    assert_eq!(reallocations, 0, "relational buffers must not reallocate");
 }

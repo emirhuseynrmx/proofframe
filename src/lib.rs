@@ -20,8 +20,12 @@ mod python;
 pub mod receipt;
 
 pub use contract::{
-    BoundAst, ColumnPlan, CompiledContract, CompiledRules, ContractAst, ContractVersion,
-    KernelKind, NaNPolicy, NaNPolicyAst, RuleAst, TypedBound,
+    AssertionAst, BoundAst, ColumnPlan, CompareAst, CompareOpAst, ComparePlan, CompiledContract,
+    CompiledRules, CompositeNullPolicyAst, CompositeUniqueAst, CompositeUniquePlan, ContractAst,
+    ContractAstV2, ContractDocument, ContractVersion, CountPlan, CountRangeAst, DatasetPlan,
+    DatasetRulesAst, KernelKind, NaNPolicy, NaNPolicyAst, NullPolicyAst, OperandAst, OperandPlan,
+    ParameterizedTypeAst, PrimitiveTypeAst, RatioPlan, RatioRangeAst, RowPlan, RowPlanKind,
+    RowRuleAst, RuleAst, RuleAstV2, ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
 };
 pub use diff::{DiffMetrics, DiffOptions, DiffOutput, SpillPolicy, diff_readers_with_options};
 pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};

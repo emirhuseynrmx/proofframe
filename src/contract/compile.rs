@@ -8,7 +8,12 @@ use regex::Regex;
 
 use super::ast::{append_path, column_path};
 use super::bounds::parse_bound;
-use super::{ContractAst, NaNPolicyAst, RuleAst, TypedBound};
+use super::{
+    CompareOpAst, ComparePlan, CompositeNullPolicyAst, ContractAst, ContractAstV2,
+    ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, NaNPolicyAst, NullPolicyAst,
+    OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst, RowPlan, RowPlanKind, RuleAst, RuleAstV2,
+    ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
+};
 use crate::{ErrorCode, ProofFrameError};
 
 /// Arrow-specialized kernel selected once during contract compilation.
@@ -73,6 +78,10 @@ impl KernelKind {
             | DataType::Map(_, _) => Self::Nested,
             _ => Self::NullOnly,
         }
+    }
+
+    pub(crate) fn from_data_type_for_plan(data_type: &DataType) -> Self {
+        Self::from_data_type(data_type)
     }
 
     fn supports_bounds(&self) -> bool {
@@ -217,6 +226,9 @@ impl ColumnPlan {
 pub struct CompiledContract {
     schema: Schema,
     columns: Vec<ColumnPlan>,
+    row_plans: Vec<RowPlan>,
+    dataset_plan: DatasetPlan,
+    version: ContractVersion,
     max_findings: usize,
 }
 
@@ -263,6 +275,80 @@ impl CompiledContract {
         Ok(Self {
             schema: schema.clone(),
             columns,
+            row_plans: Vec::new(),
+            dataset_plan: DatasetPlan::default(),
+            version: ContractVersion::V1,
+            max_findings: contract.max_findings,
+        })
+    }
+
+    /// Compile either frozen V1 syntax or the relational V2 contract language.
+    pub fn compile_document(
+        document: &ContractDocument,
+        schema: &Schema,
+    ) -> Result<Self, ProofFrameError> {
+        match document {
+            ContractDocument::V1(contract) => Self::compile(contract, schema),
+            ContractDocument::V2(contract) => Self::compile_v2(contract, schema),
+        }
+    }
+
+    fn compile_v2(contract: &ContractAstV2, schema: &Schema) -> Result<Self, ProofFrameError> {
+        for (name, rules) in &contract.columns {
+            let Ok(column_index) = schema.index_of(name) else {
+                if rules.required || has_v2_value_rules(rules) {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::MissingColumn,
+                        format!("Contract column `{name}` is absent from the Arrow schema"),
+                        Some(column_path(name)),
+                    ));
+                }
+                continue;
+            };
+            if let Some(expected) = rules.expected_type.as_ref() {
+                let actual = schema.field(column_index).data_type();
+                if !expected_type_matches(expected, actual) {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::ContractTypeMismatch,
+                        format!("Column `{name}` requires `{expected:?}`, found `{actual}`"),
+                        Some(append_path(&column_path(name), "type")),
+                    ));
+                }
+            }
+        }
+
+        let mut columns = Vec::with_capacity(contract.columns.len());
+        for (column_index, field) in schema.fields().iter().enumerate() {
+            let Some(source) = contract.columns.get(field.name()) else {
+                continue;
+            };
+            let source_rules = v2_rules_as_v1(source);
+            if !has_runtime_rules(&source_rules) {
+                continue;
+            }
+            let kernel = KernelKind::from_data_type(field.data_type());
+            let rules = compile_rules(field.name(), field.data_type(), &kernel, &source_rules)?;
+            columns.push(ColumnPlan {
+                column_index,
+                field: field.clone(),
+                kernel,
+                rules,
+            });
+        }
+
+        let row_plans = contract
+            .row_rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| RowPlan::compile(rule, schema, index))
+            .collect::<Result<Vec<_>, _>>()?;
+        let dataset_plan = DatasetPlan::compile(contract, schema)?;
+        Ok(Self {
+            schema: schema.clone(),
+            columns,
+            row_plans,
+            dataset_plan,
+            version: ContractVersion::V2,
             max_findings: contract.max_findings,
         })
     }
@@ -275,6 +361,16 @@ impl CompiledContract {
     #[must_use]
     pub const fn schema(&self) -> &Schema {
         &self.schema
+    }
+
+    #[must_use]
+    pub fn row_plans(&self) -> &[RowPlan] {
+        &self.row_plans
+    }
+
+    #[must_use]
+    pub const fn dataset_plan(&self) -> &DatasetPlan {
+        &self.dataset_plan
     }
 
     #[must_use]
@@ -292,6 +388,9 @@ impl CompiledContract {
 
     /// Domain-separated digest of the schema-resolved execution plan.
     pub fn compiled_plan_digest(&self) -> Result<String, ProofFrameError> {
+        if self.version == ContractVersion::V2 {
+            return self.compiled_plan_digest_v2();
+        }
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"proofframe:compiled-plan:v1\0");
         hasher.update(&crate::encoding::canonical_schema_digest(&self.schema)?);
@@ -334,6 +433,295 @@ impl CompiledContract {
         }
         Ok(tagged_digest("pf-plan-v1:", hasher.finalize()))
     }
+
+    fn compiled_plan_digest_v2(&self) -> Result<String, ProofFrameError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"proofframe:compiled-plan:v2\0");
+        hasher.update(&crate::encoding::canonical_schema_digest(&self.schema)?);
+        hasher.update(&(self.max_findings as u64).to_le_bytes());
+        for column in &self.columns {
+            hasher.update(&(column.column_index as u64).to_le_bytes());
+            hash_part(&mut hasher, column.field.name().as_bytes());
+            hash_kernel(&mut hasher, &column.kernel);
+            hash_compiled_rules(&mut hasher, &column.rules);
+        }
+        hasher.update(&(self.row_plans.len() as u64).to_le_bytes());
+        for row in &self.row_plans {
+            hash_row_plan(&mut hasher, row);
+        }
+        hash_dataset_plan(&mut hasher, &self.dataset_plan);
+        Ok(tagged_digest("pf-plan-v2:", hasher.finalize()))
+    }
+}
+
+fn hash_row_plan(hasher: &mut blake3::Hasher, plan: &RowPlan) {
+    hash_part(hasher, plan.name().as_bytes());
+    match plan.kind() {
+        RowPlanKind::Compare(compare) => {
+            hasher.update(&[0]);
+            hash_compare_plan(hasher, compare);
+        }
+        RowPlanKind::Conditional {
+            predicate,
+            assertion_column,
+            assertion_field,
+            assertion,
+        } => {
+            hasher.update(&[1]);
+            hash_compare_plan(hasher, predicate);
+            hasher.update(&(*assertion_column as u64).to_le_bytes());
+            hash_part(hasher, assertion_field.name().as_bytes());
+            hash_compiled_rules(hasher, assertion);
+        }
+    }
+}
+
+fn hash_compare_plan(hasher: &mut blake3::Hasher, plan: &ComparePlan) {
+    hash_operand_plan(hasher, plan.left());
+    hasher.update(&[compare_op_tag(plan.op()), null_policy_tag(plan.nulls())]);
+    hash_operand_plan(hasher, plan.right());
+}
+
+fn hash_operand_plan(hasher: &mut blake3::Hasher, operand: &OperandPlan) {
+    match operand {
+        OperandPlan::Column {
+            column_index,
+            field,
+            kernel,
+        } => {
+            hasher.update(&[0]);
+            hasher.update(&(*column_index as u64).to_le_bytes());
+            hash_part(hasher, field.name().as_bytes());
+            hash_kernel(hasher, kernel);
+        }
+        OperandPlan::Literal(value) => {
+            hasher.update(&[1]);
+            match value {
+                ScalarValuePlan::Boolean(value) => {
+                    hasher.update(&[0, u8::from(*value)]);
+                }
+                ScalarValuePlan::I64(value) => {
+                    hasher.update(&[1]);
+                    hasher.update(&value.to_le_bytes());
+                }
+                ScalarValuePlan::U64(value) => {
+                    hasher.update(&[2]);
+                    hasher.update(&value.to_le_bytes());
+                }
+                ScalarValuePlan::F64(value) => {
+                    hasher.update(&[3]);
+                    hasher.update(&value.to_bits().to_le_bytes());
+                }
+                ScalarValuePlan::Text(value) => {
+                    hasher.update(&[4]);
+                    hash_part(hasher, value.as_bytes());
+                }
+            }
+        }
+    }
+}
+
+fn hash_dataset_plan(hasher: &mut blake3::Hasher, plan: &DatasetPlan) {
+    hash_optional_count_range(hasher, plan.row_count());
+    hasher.update(&(plan.null_ratios().len() as u64).to_le_bytes());
+    for ratio in plan.null_ratios() {
+        hasher.update(&(ratio.column_index() as u64).to_le_bytes());
+        hash_part(hasher, ratio.column().as_bytes());
+        hash_optional_f64(hasher, ratio.range().min);
+        hash_optional_f64(hasher, ratio.range().max);
+        hash_kernel(hasher, ratio.kernel());
+    }
+    hasher.update(&(plan.distinct_counts().len() as u64).to_le_bytes());
+    for count in plan.distinct_counts() {
+        hasher.update(&(count.column_index() as u64).to_le_bytes());
+        hash_part(hasher, count.column().as_bytes());
+        hash_count_range(hasher, count.range());
+        hash_kernel(hasher, count.kernel());
+    }
+    hasher.update(&(plan.distinct_ratios().len() as u64).to_le_bytes());
+    for ratio in plan.distinct_ratios() {
+        hasher.update(&(ratio.column_index() as u64).to_le_bytes());
+        hash_part(hasher, ratio.column().as_bytes());
+        hash_optional_f64(hasher, ratio.range().min);
+        hash_optional_f64(hasher, ratio.range().max);
+        hash_kernel(hasher, ratio.kernel());
+    }
+    hasher.update(&(plan.composite_unique().len() as u64).to_le_bytes());
+    for composite in plan.composite_unique() {
+        hash_part(hasher, composite.name().as_bytes());
+        hasher.update(&(composite.columns().len() as u64).to_le_bytes());
+        for column in composite.columns() {
+            hasher.update(&(*column as u64).to_le_bytes());
+        }
+        hasher.update(&[match composite.nulls() {
+            CompositeNullPolicyAst::Equal => 0,
+            CompositeNullPolicyAst::Reject => 1,
+        }]);
+    }
+}
+
+fn hash_optional_count_range(hasher: &mut blake3::Hasher, range: Option<&CountRangeAst>) {
+    if let Some(range) = range {
+        hasher.update(&[1]);
+        hash_count_range(hasher, range);
+    } else {
+        hasher.update(&[0]);
+    }
+}
+
+fn hash_count_range(hasher: &mut blake3::Hasher, range: &CountRangeAst) {
+    hash_optional_u64(hasher, range.exact);
+    hash_optional_u64(hasher, range.min);
+    hash_optional_u64(hasher, range.max);
+}
+
+fn hash_optional_u64(hasher: &mut blake3::Hasher, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_f64(hasher: &mut blake3::Hasher, value: Option<f64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+const fn compare_op_tag(op: CompareOpAst) -> u8 {
+    match op {
+        CompareOpAst::Eq => 0,
+        CompareOpAst::Ne => 1,
+        CompareOpAst::Lt => 2,
+        CompareOpAst::Lte => 3,
+        CompareOpAst::Gt => 4,
+        CompareOpAst::Gte => 5,
+    }
+}
+
+const fn null_policy_tag(policy: NullPolicyAst) -> u8 {
+    match policy {
+        NullPolicyAst::Skip => 0,
+        NullPolicyAst::Fail => 1,
+        NullPolicyAst::Equal => 2,
+    }
+}
+
+fn hash_compiled_rules(hasher: &mut blake3::Hasher, rules: &CompiledRules) {
+    hasher.update(&[
+        u8::from(rules.required),
+        u8::from(rules.not_null),
+        u8::from(rules.unique),
+        u8::from(rules.validate_nan),
+        match rules.nan {
+            NaNPolicy::Reject => 0,
+            NaNPolicy::Allow => 1,
+        },
+    ]);
+    hash_optional_bound(hasher, rules.min.as_ref());
+    hash_optional_bound(hasher, rules.max.as_ref());
+    hash_optional_part(
+        hasher,
+        rules
+            .pattern
+            .as_ref()
+            .map(|value| value.as_str().as_bytes()),
+    );
+    if let Some(allowed) = rules.allowed.as_deref() {
+        hasher.update(&[1]);
+        let mut values = allowed.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        values.sort_unstable();
+        hasher.update(&(values.len() as u64).to_le_bytes());
+        for value in values {
+            hash_part(hasher, value.as_bytes());
+        }
+    } else {
+        hasher.update(&[0]);
+    }
+}
+
+fn has_v2_value_rules(rules: &RuleAstV2) -> bool {
+    rules.not_null
+        || rules.unique
+        || rules.expected_type.is_some()
+        || rules.min.is_some()
+        || rules.max.is_some()
+        || rules.nan.is_some()
+        || rules.pattern.is_some()
+        || rules.allowed.is_some()
+}
+
+fn v2_rules_as_v1(rules: &RuleAstV2) -> RuleAst {
+    RuleAst {
+        required: rules.required,
+        not_null: rules.not_null,
+        unique: rules.unique,
+        min: rules.min.clone(),
+        max: rules.max.clone(),
+        nan: rules.nan,
+        pattern: rules.pattern.clone(),
+        allowed: rules.allowed.clone(),
+    }
+}
+
+fn expected_type_matches(expected: &TypeAst, actual: &DataType) -> bool {
+    match expected {
+        TypeAst::Primitive(expected) => matches_primitive_type(*expected, actual),
+        TypeAst::Parameterized(ParameterizedTypeAst::Decimal128 { precision, scale }) => {
+            matches!(actual, DataType::Decimal128(actual_precision, actual_scale) if actual_precision == precision && actual_scale == scale)
+        }
+        TypeAst::Parameterized(ParameterizedTypeAst::Timestamp { unit, timezone }) => {
+            matches!(actual, DataType::Timestamp(actual_unit, actual_timezone)
+                if time_unit_matches(*unit, *actual_unit)
+                    && actual_timezone.as_deref() == timezone.as_deref())
+        }
+    }
+}
+
+fn matches_primitive_type(expected: PrimitiveTypeAst, actual: &DataType) -> bool {
+    matches!(
+        (expected, actual),
+        (PrimitiveTypeAst::Boolean, DataType::Boolean)
+            | (PrimitiveTypeAst::Int8, DataType::Int8)
+            | (PrimitiveTypeAst::Int16, DataType::Int16)
+            | (PrimitiveTypeAst::Int32, DataType::Int32)
+            | (PrimitiveTypeAst::Int64, DataType::Int64)
+            | (PrimitiveTypeAst::Uint8, DataType::UInt8)
+            | (PrimitiveTypeAst::Uint16, DataType::UInt16)
+            | (PrimitiveTypeAst::Uint32, DataType::UInt32)
+            | (PrimitiveTypeAst::Uint64, DataType::UInt64)
+            | (PrimitiveTypeAst::Float32, DataType::Float32)
+            | (PrimitiveTypeAst::Float64, DataType::Float64)
+            | (PrimitiveTypeAst::Date32, DataType::Date32)
+            | (PrimitiveTypeAst::Date64, DataType::Date64)
+            | (PrimitiveTypeAst::Utf8, DataType::Utf8)
+            | (PrimitiveTypeAst::LargeUtf8, DataType::LargeUtf8)
+            | (PrimitiveTypeAst::Utf8View, DataType::Utf8View)
+            | (PrimitiveTypeAst::Binary, DataType::Binary)
+            | (PrimitiveTypeAst::LargeBinary, DataType::LargeBinary)
+            | (PrimitiveTypeAst::BinaryView, DataType::BinaryView)
+    )
+}
+
+fn time_unit_matches(expected: TimeUnitAst, actual: TimeUnit) -> bool {
+    matches!(
+        (expected, actual),
+        (TimeUnitAst::S, TimeUnit::Second)
+            | (TimeUnitAst::Ms, TimeUnit::Millisecond)
+            | (TimeUnitAst::Us, TimeUnit::Microsecond)
+            | (TimeUnitAst::Ns, TimeUnit::Nanosecond)
+    )
 }
 
 fn tagged_digest(prefix: &str, digest: blake3::Hash) -> String {
@@ -476,7 +864,7 @@ fn has_runtime_rules(rules: &RuleAst) -> bool {
     has_value_rules(rules)
 }
 
-fn compile_rules(
+pub(super) fn compile_rules(
     column: &str,
     data_type: &DataType,
     kernel: &KernelKind,

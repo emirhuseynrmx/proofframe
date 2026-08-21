@@ -17,6 +17,9 @@ pub enum ContractVersion {
     /// Initial strict contract language used by ProofFrame 0.5.
     #[serde(rename = "proofframe.contract.v1")]
     V1,
+    /// Relational and dataset-level contract language introduced in ProofFrame 0.5.1.
+    #[serde(rename = "proofframe.contract.v2")]
+    V2,
 }
 
 /// Source-level floating-point NaN policy.
@@ -102,13 +105,21 @@ impl ContractAst {
         })?;
 
         validate_known_fields(&value)?;
-        serde_json::from_value(value).map_err(|error| {
+        let contract: Self = serde_json::from_value(value).map_err(|error| {
             ProofFrameError::contract(
                 ErrorCode::ContractInvalidJson,
                 format!("Invalid contract value: {error}"),
                 None,
             )
-        })
+        })?;
+        if contract.version != ContractVersion::V1 {
+            return Err(ProofFrameError::contract(
+                ErrorCode::ContractInvalidJson,
+                "ContractAst accepts only proofframe.contract.v1; use ContractDocument for V2",
+                Some("$.version".to_string()),
+            ));
+        }
+        Ok(contract)
     }
 }
 

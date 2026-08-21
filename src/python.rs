@@ -18,7 +18,7 @@ use crate::evidence::{
     validation_report_digest, validation_result_digest,
 };
 use crate::{
-    CompiledContract, ContractAst, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
+    CompiledContract, ContractDocument, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
     ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions,
     PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy,
     detect_leakage_with_options, diff_readers_with_options, execute_reader,
@@ -121,8 +121,8 @@ fn check_arrow(
     let result = py.detach(move || {
         let schema = source.0.schema();
         let contract_source_digest = contract_source_digest(&contract_json)?;
-        let ast = ContractAst::from_json(&contract_json)?;
-        let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+        let document = ContractDocument::from_json(&contract_json)?;
+        let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
         let options = ExecutionOptions {
             row_count_hint,
             resources: limits(
@@ -151,8 +151,8 @@ fn assemble_evidence_unchecked_arrow(
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
         let schema = source.0.schema();
-        let ast = ContractAst::from_json(&contract_json)?;
-        let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+        let document = ContractDocument::from_json(&contract_json)?;
+        let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
         let source_digest = contract_source_digest(&contract_json)?;
         let compiled_plan_digest = plan.compiled_plan_digest()?;
         let schema_digest = plan.schema_digest()?;
@@ -242,8 +242,8 @@ fn check_with_evidence_arrow(
     let result = py.detach(move || {
         let schema = source.0.schema();
         let source_digest = contract_source_digest(&contract_json)?;
-        let ast = ContractAst::from_json(&contract_json)?;
-        let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+        let document = ContractDocument::from_json(&contract_json)?;
+        let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
         let options = ExecutionOptions {
             row_count_hint,
             resources: limits(

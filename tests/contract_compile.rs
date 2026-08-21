@@ -1,5 +1,8 @@
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use proofframe::{CompiledContract, ContractAst, ErrorCode, KernelKind, NaNPolicy, TypedBound};
+use proofframe::{
+    CompiledContract, ContractAst, ContractDocument, ContractVersion, ErrorCode, KernelKind,
+    NaNPolicy, TypedBound,
+};
 
 fn contract_with_columns(columns: &str) -> ContractAst {
     ContractAst::from_json(&format!(
@@ -295,4 +298,159 @@ fn integer_bounds_must_fit_the_physical_arrow_domain() {
         assert_eq!(error.code(), ErrorCode::ContractInvalidBound);
         assert_eq!(error.path(), Some(expected_path.as_str()));
     }
+}
+
+#[test]
+fn contract_v2_parses_relational_and_dataset_rules_strictly() {
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{
+                "order_id":{"required":true,"not_null":true,"type":"int64"}
+            },
+            "row_rules":[{
+                "name":"valid_window",
+                "compare":{
+                    "left":{"column":"start_at"},
+                    "op":"lte",
+                    "right":{"column":"end_at"},
+                    "nulls":"skip"
+                }
+            }],
+            "dataset_rules":{
+                "row_count":{"min":1},
+                "null_ratio":{"order_id":{"max":0.01}},
+                "composite_unique":[{
+                    "name":"order_line_key",
+                    "columns":["order_id","line_id"],
+                    "nulls":"equal"
+                }]
+            }
+        }"#,
+    )
+    .expect("a valid V2 contract must parse");
+
+    assert_eq!(document.version(), ContractVersion::V2);
+    let v2 = document
+        .as_v2()
+        .expect("the dispatcher must retain the V2 AST");
+    assert_eq!(v2.row_rules.len(), 1);
+    assert_eq!(v2.dataset_rules.composite_unique.len(), 1);
+}
+
+#[test]
+fn contract_v2_rejects_unknown_fields_with_an_exact_path() {
+    let error = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{"name":"broken","comprae":{}}]
+        }"#,
+    )
+    .expect_err("unknown V2 fields must fail closed");
+
+    assert_eq!(error.code(), ErrorCode::ContractUnknownField);
+    assert_eq!(error.path(), Some("$.row_rules[0].comprae"));
+}
+
+#[test]
+fn contract_v2_rejects_duplicate_rule_names() {
+    let error = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[
+                {"name":"same","compare":{"left":{"column":"a"},"op":"eq","right":{"column":"b"}}},
+                {"name":"same","compare":{"left":{"column":"a"},"op":"ne","right":{"column":"b"}}}
+            ]
+        }"#,
+    )
+    .expect_err("rule names identify findings and must be unique");
+
+    assert_eq!(error.code(), ErrorCode::ContractDuplicateRule);
+    assert_eq!(error.path(), Some("$.row_rules[1].name"));
+}
+
+#[test]
+fn contract_v2_rejects_ratios_outside_the_unit_interval() {
+    let error = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "dataset_rules":{"null_ratio":{"email":{"max":1.01}}}
+        }"#,
+    )
+    .expect_err("ratios above one must fail before compilation");
+
+    assert_eq!(error.code(), ErrorCode::ContractInvalidRatio);
+    assert_eq!(error.path(), Some("$.dataset_rules.null_ratio.email.max"));
+}
+
+#[test]
+fn contract_v2_compiles_relational_and_dataset_plans_against_arrow_schema() {
+    let schema = Schema::new(vec![
+        Field::new("order_id", DataType::Int64, false),
+        Field::new("line_id", DataType::Int64, false),
+        Field::new("start_at", DataType::Int64, true),
+        Field::new("end_at", DataType::Int64, true),
+    ]);
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{"order_id":{"required":true,"type":"int64"}},
+            "row_rules":[{
+                "name":"valid_window",
+                "compare":{"left":{"column":"start_at"},"op":"lte","right":{"column":"end_at"}}
+            }],
+            "dataset_rules":{
+                "row_count":{"min":1},
+                "composite_unique":[{"name":"line_key","columns":["order_id","line_id"]}]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let plan = CompiledContract::compile_document(&document, &schema)
+        .expect("valid V2 rules must compile before scanning");
+
+    assert_eq!(plan.row_plans().len(), 1);
+    assert_eq!(plan.row_plans()[0].name(), "valid_window");
+    assert_eq!(plan.dataset_plan().composite_unique().len(), 1);
+    assert!(
+        plan.compiled_plan_digest()
+            .unwrap()
+            .starts_with("pf-plan-v2:")
+    );
+}
+
+#[test]
+fn contract_v2_exact_type_assertions_fail_before_scanning() {
+    let schema = Schema::new(vec![Field::new("order_id", DataType::UInt64, false)]);
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{"order_id":{"type":"int64"}}
+        }"#,
+    )
+    .unwrap();
+
+    let error = CompiledContract::compile_document(&document, &schema)
+        .expect_err("V2 type assertions never cast the Arrow input");
+
+    assert_eq!(error.code(), ErrorCode::ContractTypeMismatch);
+    assert_eq!(error.path(), Some("$.columns.order_id.type"));
+}
+
+#[test]
+fn compile_document_preserves_the_frozen_v1_plan_digest() {
+    let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+    let source =
+        r#"{"version":"proofframe.contract.v1","columns":{"id":{"min":0}},"max_findings":8}"#;
+    let document = ContractDocument::from_json(source).unwrap();
+    let plan = CompiledContract::compile_document(&document, &schema).unwrap();
+
+    assert_eq!(
+        plan.compiled_plan_digest().unwrap(),
+        "pf-plan-v1:3a243dfa197e9fa4858c58f334333c0b4ed48bef82aeaa3751912d1092d74c2c"
+    );
 }

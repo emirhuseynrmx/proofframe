@@ -7,8 +7,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use proofframe::{
-    CancellationToken, ColumnContract, CompiledContract, Contract, ContractAst, ErrorCode,
-    ExecutionOptions, ResourceLimits, execute_reader, validate_fast_reader,
+    CancellationToken, ColumnContract, CompiledContract, Contract, ContractAst, ContractDocument,
+    ErrorCode, ExecutionOptions, ResourceLimits, execute_reader, validate_fast_reader,
 };
 
 use support::reader_from_batches;
@@ -18,6 +18,11 @@ fn compile(columns: &str, schema: &Schema) -> CompiledContract {
         format!(r#"{{"version":"proofframe.contract.v1","columns":{columns},"max_findings":16}}"#);
     let ast = ContractAst::from_json(&source).unwrap();
     CompiledContract::compile(&ast, schema).unwrap()
+}
+
+fn compile_v2(source: &str, schema: &Schema) -> CompiledContract {
+    let document = ContractDocument::from_json(source).unwrap();
+    CompiledContract::compile_document(&document, schema).unwrap()
 }
 
 #[test]
@@ -206,4 +211,111 @@ fn execution_checks_cancellation_before_scanning_a_batch() {
     .unwrap_err();
 
     assert_eq!(error.code(), ErrorCode::Cancelled);
+}
+
+#[test]
+fn relational_comparison_respects_null_policy_and_global_rows() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("start", DataType::Int64, true),
+        Field::new("end", DataType::Int64, true),
+    ]));
+    let first = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![Some(1), Some(3)])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![Some(2), Some(2)])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let second = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![None])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![Some(4)])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let plan = compile_v2(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"valid_window",
+                "compare":{
+                    "left":{"column":"start"},"op":"lte",
+                    "right":{"column":"end"},"nulls":"fail"
+                }
+            }]
+        }"#,
+        schema.as_ref(),
+    );
+
+    let report = execute_reader(
+        reader_from_batches(vec![first, second]),
+        &plan,
+        &ExecutionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.violation_count, 2);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|finding| finding.row)
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(2)]
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.rule == "compare")
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.message.contains("valid_window"))
+    );
+}
+
+#[test]
+fn conditional_rule_evaluates_native_utf8_and_asserts_not_null() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("status", DataType::Utf8, false),
+        Field::new("shipped_at", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["shipped", "pending"])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![None, None])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let plan = compile_v2(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"shipped_has_timestamp",
+                "when":{"left":{"column":"status"},"op":"eq","right":{"literal":"shipped"}},
+                "assert":{"column":"shipped_at","not_null":true}
+            }]
+        }"#,
+        schema.as_ref(),
+    );
+
+    let report = execute_reader(
+        reader_from_batches(vec![batch]),
+        &plan,
+        &ExecutionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.violation_count, 1);
+    assert_eq!(report.findings[0].row, Some(0));
+    assert_eq!(report.findings[0].rule, "conditional");
+    assert!(report.findings[0].message.contains("shipped_has_timestamp"));
 }
