@@ -25,11 +25,11 @@ pairs fail during compilation before a row is scanned. Timestamp bounds are sign
 the Arrow field's declared unit, expressed as JSON numbers or decimal strings; ISO-8601 strings are
 not accepted by contract V1.
 
-Evidence V2 binds three independent contract identities:
-
-- `pf-contract-v1` over validated RFC 8785-canonical source JSON;
-- `pf-plan-v1` over the schema-resolved typed execution plan;
-- `pf-schema-v1` over the Arrow schema used for compilation.
+Evidence V2 binds three independent identities. Contract V1 uses `pf-contract-v1` and
+`pf-plan-v1`; Contract V2 uses the domain-separated `pf-contract-v2` and `pf-plan-v2` forms. The
+contract digest covers validated RFC 8785-canonical source JSON, the plan digest covers the
+schema-resolved typed execution plan, and `pf-schema-v1` covers the Arrow schema used for
+compilation.
 
 It also binds the V2 dataset fingerprint, row count, engine version, operation, effective resource
 limits, exact violation count, and retained output count. Receipt V2 signs the entire strict evidence

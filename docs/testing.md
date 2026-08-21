@@ -24,10 +24,10 @@ explicitly compatible tests with `cargo +nightly miri test --lib miri_tests::`. 
 exercise PyO3 or Arrow FFI; those boundaries are covered by built-wheel tests on three operating
 systems and Python 3.10–3.13.
 
-Three 60-second libFuzzer jobs feed bounded arbitrary input into the strict contract parser, the
-V1/V2 receipt dispatcher, and the production checksummed partition decoder. The partition target
-caps input at one MiB before writing or decoding it, and the decoder checks declared lengths before
-allocation.
+Four 60-second libFuzzer jobs feed bounded arbitrary input into the strict contract parser, the
+V1/V2 receipt dispatcher, the production checksummed partition decoder, and the partition-manifest
+JSON decoder. The binary partition target caps input at one MiB before writing or decoding it, and
+both partition decoders check their input limits before allocation.
 
 Partition workers use scoped standard threads, a mutex-protected bounded work queue, ordered result
 slots, and the existing hierarchical resource account. No custom synchronization primitive or
