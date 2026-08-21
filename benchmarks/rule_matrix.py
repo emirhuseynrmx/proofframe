@@ -189,9 +189,7 @@ def main() -> None:
         print(json.dumps(summarize(args.case, args.rows, samples, baseline_rss, peak_rss)))
         return
 
-    table = build_table(args.rows)
-    arrow_schema = str(table.schema)
-    del table
+    arrow_schema = str(build_table(args.rows).schema)
     results = {}
     for case in cases:
         results[case] = run_isolated_case(case, args.rows, args.warmups, args.repeats)

@@ -224,6 +224,10 @@ fn source_plan_and_schema_digests_are_separate_versioned_contracts() {
             .unwrap()
             .starts_with("pf-plan-v1:")
     );
+    assert_eq!(
+        plan.compiled_plan_digest().unwrap(),
+        "pf-plan-v1:3a243dfa197e9fa4858c58f334333c0b4ed48bef82aeaa3751912d1092d74c2c"
+    );
     assert!(plan.schema_digest().unwrap().starts_with("pf-schema-v1:"));
     assert_ne!(
         source_digest[15..],

@@ -362,7 +362,12 @@ fn hash_optional_part(hasher: &mut blake3::Hasher, bytes: Option<&[u8]>) {
 }
 
 fn hash_kernel(hasher: &mut blake3::Hasher, kernel: &KernelKind) {
-    let tag = match kernel {
+    hasher.update(&[kernel_tag(kernel)]);
+    hash_kernel_payload(hasher, kernel);
+}
+
+fn scalar_kernel_tag(kernel: &KernelKind) -> Option<u8> {
+    Some(match kernel {
         KernelKind::Boolean => 0,
         KernelKind::I8 => 1,
         KernelKind::I16 => 2,
@@ -374,10 +379,22 @@ fn hash_kernel(hasher: &mut blake3::Hasher, kernel: &KernelKind) {
         KernelKind::U64 => 8,
         KernelKind::F32 => 9,
         KernelKind::F64 => 10,
-        KernelKind::Date32 => 11,
-        KernelKind::Date64 => 12,
-        KernelKind::Decimal128 { .. } => 13,
-        KernelKind::Timestamp(_) => 14,
+        _ => return None,
+    })
+}
+
+fn temporal_kernel_tag(kernel: &KernelKind) -> Option<u8> {
+    match kernel {
+        KernelKind::Date32 => Some(11),
+        KernelKind::Date64 => Some(12),
+        KernelKind::Decimal128 { .. } => Some(13),
+        KernelKind::Timestamp(_) => Some(14),
+        _ => None,
+    }
+}
+
+fn variable_kernel_tag(kernel: &KernelKind) -> u8 {
+    match kernel {
         KernelKind::Utf8 => 15,
         KernelKind::LargeUtf8 => 16,
         KernelKind::Binary => 17,
@@ -386,8 +403,21 @@ fn hash_kernel(hasher: &mut blake3::Hasher, kernel: &KernelKind) {
         KernelKind::NullOnly => 20,
         KernelKind::Utf8View => 21,
         KernelKind::BinaryView => 22,
-    };
-    hasher.update(&[tag]);
+        _ => unreachable!("scalar and temporal kernels are handled first"),
+    }
+}
+
+fn kernel_tag(kernel: &KernelKind) -> u8 {
+    if let Some(tag) = scalar_kernel_tag(kernel) {
+        return tag;
+    }
+    if let Some(tag) = temporal_kernel_tag(kernel) {
+        return tag;
+    }
+    variable_kernel_tag(kernel)
+}
+
+fn hash_kernel_payload(hasher: &mut blake3::Hasher, kernel: &KernelKind) {
     match kernel {
         KernelKind::Decimal128 { precision, scale } => {
             hasher.update(&[*precision, *scale as u8]);
