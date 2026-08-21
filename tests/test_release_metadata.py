@@ -108,7 +108,9 @@ def test_crate_and_python_publication_depend_on_the_same_verified_release_gate()
 def test_crate_is_packaged_checksummed_sbomed_and_attested_before_publication() -> None:
     publish = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
     crate_package = publish.index("cargo package --locked")
-    crate_attestation = publish.index('subject-path: "target/package/*.crate"')
+    crate_attestation = publish.index(
+        'subject-path: "${{ steps.crate-source.outputs.root }}/target/package/*.crate"'
+    )
     crate_publish = publish.index("cargo publish --locked")
 
     assert "crate-SHA256SUMS" in publish

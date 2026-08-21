@@ -87,19 +87,8 @@ where
     R: RecordBatchReader,
 {
     let reader_schema = reader.schema();
-    if reader_schema.as_ref() != plan.schema() {
-        return Err(ProofFrameError::SchemaMismatch(
-            "reader schema differs from the schema used to compile the contract".to_string(),
-        ));
-    }
-    let mut fingerprint = fingerprint
-        .then(|| {
-            V2FingerprintState::new(
-                reader_schema.as_ref(),
-                &FingerprintOptions::new(FingerprintVersion::V2),
-            )
-        })
-        .transpose()?;
+    validate_reader_schema(reader_schema.as_ref(), plan)?;
+    let mut fingerprint = initialize_fingerprint(reader_schema.as_ref(), fingerprint)?;
     let finding_limit = plan.max_findings().min(options.resources.max_samples);
     let mut validation = ValidationState::new_accounted(finding_limit, resource_root.clone());
     let mut dataset_state = dataset_state::DatasetState::new(
@@ -108,16 +97,72 @@ where
         options.row_count_hint,
         &options.cancellation,
     )?;
+    let (_unique_directory, mut unique_states) =
+        initialize_unique_states(plan, options, &resource_root)?;
+    let rows = scan_reader(
+        reader,
+        plan,
+        options,
+        &mut fingerprint,
+        &mut validation,
+        &mut unique_states,
+        &mut dataset_state,
+    )?;
+    let mut metrics = finish_unique_states(plan, unique_states, &mut validation)?;
+    let dataset_metrics = dataset_state.finish(rows, &mut validation)?;
+    metrics.spill_bytes = metrics
+        .spill_bytes
+        .saturating_add(dataset_metrics.spill_bytes);
+    metrics.exact_runs = metrics
+        .exact_runs
+        .saturating_add(dataset_metrics.exact_runs);
+    validation.check_resources()?;
+    let report = build_report(plan, options, &resource_root, validation, rows, metrics)?;
+    Ok((report, fingerprint.map(V2FingerprintState::finish)))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExactMetrics {
+    spill_bytes: u64,
+    exact_runs: u64,
+}
+
+fn validate_reader_schema(
+    reader_schema: &arrow::datatypes::Schema,
+    plan: &CompiledContract,
+) -> Result<(), ProofFrameError> {
+    if reader_schema == plan.schema() {
+        return Ok(());
+    }
+    Err(ProofFrameError::SchemaMismatch(
+        "reader schema differs from the schema used to compile the contract".to_string(),
+    ))
+}
+
+fn initialize_fingerprint(
+    schema: &arrow::datatypes::Schema,
+    enabled: bool,
+) -> Result<Option<V2FingerprintState>, ProofFrameError> {
+    enabled
+        .then(|| V2FingerprintState::new(schema, &FingerprintOptions::new(FingerprintVersion::V2)))
+        .transpose()
+}
+
+fn initialize_unique_states(
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    resource_root: &ResourceAccount,
+) -> Result<(Option<tempfile::TempDir>, Vec<Option<ExactState>>), ProofFrameError> {
     let has_unique = plan.columns().iter().any(|column| column.rules().unique());
-    let unique_directory = has_unique.then(tempfile::TempDir::new).transpose()?;
-    let mut unique_states = plan
+    let directory = has_unique.then(tempfile::TempDir::new).transpose()?;
+    let states = plan
         .columns()
         .iter()
         .map(|column| {
             if !column.rules().unique() {
                 return Ok(None);
             }
-            let directory = unique_directory
+            let directory = directory
                 .as_ref()
                 .expect("a unique plan owns a temporary directory");
             ExactState::new_with_cancellation(
@@ -133,6 +178,21 @@ where
             .map(Some)
         })
         .collect::<Result<Vec<_>, ProofFrameError>>()?;
+    Ok((directory, states))
+}
+
+fn scan_reader<R>(
+    reader: R,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    fingerprint: &mut Option<V2FingerprintState>,
+    validation: &mut ValidationState,
+    unique_states: &mut [Option<ExactState>],
+    dataset_state: &mut dataset_state::DatasetState,
+) -> Result<u64, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
     let mut rows = 0_u64;
     for maybe_batch in reader {
         options.cancellation.check()?;
@@ -151,33 +211,41 @@ where
                 column,
                 array.as_ref(),
                 rows,
-                &mut validation,
+                validation,
                 unique_states[plan_index].as_mut(),
             )?;
             validation.check_resources()?;
         }
         for row_plan in plan.row_plans() {
-            row_kernels::scan_row_plan(row_plan, &batch, rows, &mut validation)?;
+            row_kernels::scan_row_plan(row_plan, &batch, rows, validation)?;
             validation.check_resources()?;
         }
-        dataset_state.update(&batch, rows, &mut validation)?;
+        dataset_state.update(&batch, rows, validation)?;
         validation.check_resources()?;
         rows += batch.num_rows() as u64;
     }
+    Ok(rows)
+}
 
-    let mut spill_bytes = 0_u64;
-    let mut exact_runs = 0_u64;
+fn finish_unique_states(
+    plan: &CompiledContract,
+    unique_states: Vec<Option<ExactState>>,
+    validation: &mut ValidationState,
+) -> Result<ExactMetrics, ProofFrameError> {
+    let mut metrics = ExactMetrics::default();
     for (column, state) in plan.columns().iter().zip(unique_states) {
         let Some(state) = state else {
             continue;
         };
         let summary = state.finish()?;
-        spill_bytes = spill_bytes.saturating_add(summary.metrics.spill_bytes);
-        exact_runs = exact_runs.saturating_add(summary.metrics.runs);
+        metrics.spill_bytes = metrics
+            .spill_bytes
+            .saturating_add(summary.metrics.spill_bytes);
+        metrics.exact_runs = metrics.exact_runs.saturating_add(summary.metrics.runs);
         let sampled = summary.duplicate_samples.len() as u64;
         for duplicate in summary.duplicate_samples {
             record_lazy(
-                &mut validation,
+                validation,
                 "unique",
                 column.field().name(),
                 Some(duplicate.duplicate_row),
@@ -187,14 +255,19 @@ where
         }
         validation.violation_count += summary.duplicate_count.saturating_sub(sampled);
     }
+    Ok(metrics)
+}
 
-    let dataset_metrics = dataset_state.finish(rows, &mut validation)?;
-    spill_bytes = spill_bytes.saturating_add(dataset_metrics.spill_bytes);
-    exact_runs = exact_runs.saturating_add(dataset_metrics.exact_runs);
-    validation.check_resources()?;
-
+fn build_report(
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    resource_root: &ResourceAccount,
+    validation: ValidationState,
+    rows: u64,
+    metrics: ExactMetrics,
+) -> Result<FastValidationReport, ProofFrameError> {
     let outcome = validation.finish();
-    let report = FastValidationReport {
+    Ok(FastValidationReport {
         valid: outcome.violation_count == 0,
         violation_count: outcome.violation_count,
         truncated: outcome.truncated,
@@ -204,15 +277,14 @@ where
         metrics: ExecutionMetrics {
             peak_memory_bytes: resource_root.peak_memory_used(),
             peak_temp_bytes: resource_root.peak_temp_used(),
-            spill_bytes,
-            exact_runs,
+            spill_bytes: metrics.spill_bytes,
+            exact_runs: metrics.exact_runs,
             capacity_growth_events: 0,
         },
         resources: options.resources,
         compiled_plan_digest: plan.compiled_plan_digest()?,
         schema_digest: plan.schema_digest()?,
-    };
-    Ok((report, fingerprint.map(V2FingerprintState::finish)))
+    })
 }
 
 pub(super) fn exact_kind(kernel: &KernelKind) -> ValueKind {

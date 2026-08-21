@@ -975,9 +975,20 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn register_data_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_profile_functions(module)?;
+    register_contract_functions(module)?;
+    register_analysis_functions(module)?;
+    Ok(())
+}
+
+fn register_profile_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(benchmark_fingerprint_arrow, module)?)?;
+    Ok(())
+}
+
+fn register_contract_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(check_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(benchmark_check_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(check_partitions_arrow, module)?)?;
@@ -987,6 +998,10 @@ fn register_data_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(check_with_evidence_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(assemble_evidence_unchecked_arrow, module)?)?;
+    Ok(())
+}
+
+fn register_analysis_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_fast_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;

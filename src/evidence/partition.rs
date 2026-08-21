@@ -62,16 +62,17 @@ impl PartitionManifestV1 {
         global_result_digest: String,
         resources: ResourceLimits,
     ) -> Result<Self, ProofFrameError> {
-        let mut manifest = Self {
-            schema: PartitionManifestSchema::V1,
+        let schema = PartitionManifestSchema::V1;
+        Self::validate_body_parts(schema, &partitions, &global_result_digest)?;
+        let root_digest =
+            Self::compute_root_digest_parts(schema, &partitions, &global_result_digest, resources)?;
+        Ok(Self {
+            schema,
             partitions,
             global_result_digest,
             resources,
-            root_digest: String::new(),
-        };
-        manifest.validate_body()?;
-        manifest.root_digest = manifest.compute_root_digest()?;
-        Ok(manifest)
+            root_digest,
+        })
     }
 
     pub fn validate(&self) -> Result<(), ProofFrameError> {
@@ -103,21 +104,29 @@ impl PartitionManifestV1 {
     }
 
     fn validate_body(&self) -> Result<(), ProofFrameError> {
-        if self.schema != PartitionManifestSchema::V1 {
+        Self::validate_body_parts(self.schema, &self.partitions, &self.global_result_digest)
+    }
+
+    fn validate_body_parts(
+        schema: PartitionManifestSchema,
+        partitions: &[PartitionEvidenceV1],
+        global_result_digest: &str,
+    ) -> Result<(), ProofFrameError> {
+        if schema != PartitionManifestSchema::V1 {
             return Err(invalid("Unsupported partition manifest schema"));
         }
-        if self.partitions.is_empty() {
+        if partitions.is_empty() {
             return Err(invalid(
                 "Partition manifest must contain at least one partition",
             ));
         }
         validate_tagged_digest(
-            &self.global_result_digest,
+            global_result_digest,
             "pf-result-v1:",
             "global partition result",
         )?;
-        let first = &self.partitions[0];
-        for (position, partition) in self.partitions.iter().enumerate() {
+        let first = &partitions[0];
+        for (position, partition) in partitions.iter().enumerate() {
             if partition.index != position as u64 {
                 return Err(invalid(
                     "Partition indices must be contiguous, unique, and logically ordered",
@@ -159,11 +168,25 @@ impl PartitionManifestV1 {
     }
 
     fn compute_root_digest(&self) -> Result<String, ProofFrameError> {
+        Self::compute_root_digest_parts(
+            self.schema,
+            &self.partitions,
+            &self.global_result_digest,
+            self.resources,
+        )
+    }
+
+    fn compute_root_digest_parts(
+        schema: PartitionManifestSchema,
+        partitions: &[PartitionEvidenceV1],
+        global_result_digest: &str,
+        resources: ResourceLimits,
+    ) -> Result<String, ProofFrameError> {
         let body = ManifestBody {
-            schema: self.schema,
-            partitions: &self.partitions,
-            global_result_digest: &self.global_result_digest,
-            resources: self.resources,
+            schema,
+            partitions,
+            global_result_digest,
+            resources,
         };
         let canonical = serde_json_canonicalizer::to_vec(&body)
             .map_err(|error| ProofFrameError::InvalidReceipt(error.to_string()))?;

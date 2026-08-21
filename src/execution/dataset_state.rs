@@ -227,7 +227,7 @@ impl DatasetState {
                 });
             }
         }
-        for ((ratio, nulls), _) in self.null_ratios.iter().zip(self.null_counts).zip(0..) {
+        for (ratio, nulls) in self.null_ratios.iter().zip(self.null_counts) {
             let value = if rows == 0 {
                 0.0
             } else {
