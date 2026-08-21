@@ -69,3 +69,50 @@ def test_release_gate_remains_compatible_with_python_310() -> None:
     assert "from datetime import UTC" not in source
     assert "datetime.now(UTC)" not in source
     assert "datetime.now(timezone.utc)" in source
+
+
+def test_ci_and_manual_release_benchmarks_require_seven_samples() -> None:
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    benchmarks = (ROOT / ".github/workflows/benchmarks.yml").read_text(encoding="utf-8")
+
+    assert "--runs 7" in ci
+    assert 'default: "7"' in benchmarks
+    assert "minimum 7" in benchmarks
+
+
+def test_release_artifacts_are_checksummed_sbomed_and_attested_before_publish() -> None:
+    publish = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+
+    assert "attestations: write" in publish
+    assert "id-token: write" in publish
+    assert "SHA256SUMS" in publish
+    assert "format: spdx-json" in publish
+    assert "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610" in publish
+    assert (
+        "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be"
+        in publish
+    )
+    assert "actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b" in publish
+    assert "subject-path: \"dist/*\"" in publish
+    assert "sbom-path: release-metadata/proofframe.spdx.json" in publish
+
+
+def test_crate_and_python_publication_depend_on_the_same_verified_release_gate() -> None:
+    publish = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+
+    assert "cargo publish --locked" in publish
+    assert "CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}" in publish
+    assert "needs: [gate, wheels, sdist]" in publish
+
+
+def test_crate_is_packaged_checksummed_sbomed_and_attested_before_publication() -> None:
+    publish = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+    crate_package = publish.index("cargo package --locked")
+    crate_attestation = publish.index('subject-path: "target/package/*.crate"')
+    crate_publish = publish.index("cargo publish --locked")
+
+    assert "crate-SHA256SUMS" in publish
+    assert "proofframe-crate.spdx.json" in publish
+    assert crate_package < crate_attestation < crate_publish
+    assert publish.count("attestations: write") >= 2
+    assert publish.count("id-token: write") >= 2
