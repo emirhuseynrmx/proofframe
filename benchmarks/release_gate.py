@@ -388,7 +388,7 @@ def _summarize_case(
     }
 
 
-def validate_artifact(artifact: dict[str, Any]) -> None:
+def _validate_artifact_identity(artifact: dict[str, Any]) -> None:
     if artifact.get("schema_version") != SCHEMA_VERSION:
         raise ArtifactError("unsupported benchmark artifact schema")
     if not isinstance(artifact.get("run_count"), int) or artifact["run_count"] < 5:
@@ -396,12 +396,18 @@ def validate_artifact(artifact: dict[str, Any]) -> None:
     dataset_sha = artifact.get("dataset", {}).get("sha256", "")
     if len(dataset_sha) != 64 or any(character not in "0123456789abcdef" for character in dataset_sha):
         raise ArtifactError("dataset SHA-256 is absent or malformed")
+
+
+def _validate_artifact_guards(artifact: dict[str, Any]) -> None:
     if not artifact.get("correctness_guards", {}).get("all_cases_passed"):
         raise ArtifactError("correctness guards are absent or failed")
     allocation_contract = artifact.get("allocation_contract", {})
     if not allocation_contract.get("passed"):
         reason = allocation_contract.get("error") or "no diagnostic was captured"
         raise ArtifactError(f"allocation contract did not pass: {reason}")
+
+
+def _validate_artifact_cases(artifact: dict[str, Any]) -> None:
     cases = artifact.get("cases", {})
     if set(cases) != set(CASES):
         raise ArtifactError("artifact case matrix is incomplete")
@@ -425,6 +431,12 @@ def validate_artifact(artifact: dict[str, Any]) -> None:
         ):
             if field not in case:
                 raise ArtifactError(f"{name} is missing {field}")
+
+
+def validate_artifact(artifact: dict[str, Any]) -> None:
+    _validate_artifact_identity(artifact)
+    _validate_artifact_guards(artifact)
+    _validate_artifact_cases(artifact)
 
 
 def validate_comparison(baseline: dict[str, Any], candidate: dict[str, Any]) -> None:

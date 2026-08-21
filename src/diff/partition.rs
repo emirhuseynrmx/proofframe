@@ -113,7 +113,7 @@ impl PartitionWriter {
     pub(super) fn finish(mut self) -> Result<(), ProofFrameError> {
         self.writer.flush()?;
         let checksum = *self.hasher.finalize().as_bytes();
-        self.writer.seek(SeekFrom::Start(0))?;
+        self.writer.rewind()?;
         write_header(
             &mut self.writer,
             self.schema_digest,

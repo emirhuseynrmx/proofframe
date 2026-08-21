@@ -72,7 +72,7 @@ impl AtomicSink {
         let parent = target
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+            .unwrap_or_else(|| Path::new("."));
         if !parent.is_dir() {
             return Err(ProofFrameError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,

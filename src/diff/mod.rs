@@ -830,6 +830,13 @@ fn options_memory_cap(account: &ResourceAccount) -> u64 {
     account.limits().max_memory_bytes
 }
 
+fn ledger_charge(needed: u64, remaining: u64) -> u64 {
+    if remaining < LEDGER_CHUNK_BYTES {
+        return remaining;
+    }
+    needed.clamp(LEDGER_CHUNK_BYTES, remaining)
+}
+
 struct TempLedger {
     account: ResourceAccount,
     reservations: Vec<TempReservation>,
@@ -864,7 +871,7 @@ impl TempLedger {
                 .limits()
                 .max_temp_bytes
                 .saturating_sub(self.reserved);
-            let charge = LEDGER_CHUNK_BYTES.max(needed).min(remaining);
+            let charge = ledger_charge(needed, remaining);
             if charge == 0 {
                 return Err(ProofFrameError::ResourceLimit {
                     resource: "temporary storage",
@@ -915,7 +922,7 @@ impl MemoryLedger {
                 .limits()
                 .max_memory_bytes
                 .saturating_sub(self.reserved);
-            let charge = LEDGER_CHUNK_BYTES.max(needed).min(remaining);
+            let charge = ledger_charge(needed, remaining);
             if charge == 0 {
                 return Err(ProofFrameError::ResourceLimit {
                     resource: "diff partition memory",
@@ -929,5 +936,31 @@ impl MemoryLedger {
             self.reserved += charge;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::{LEDGER_CHUNK_BYTES, ledger_charge};
+
+    #[test]
+    fn ledger_charge_respects_small_remaining_budgets() {
+        assert_eq!(
+            ledger_charge(1, LEDGER_CHUNK_BYTES - 1),
+            LEDGER_CHUNK_BYTES - 1
+        );
+    }
+
+    #[test]
+    fn ledger_charge_uses_chunks_without_exceeding_the_budget() {
+        assert_eq!(ledger_charge(1, LEDGER_CHUNK_BYTES * 2), LEDGER_CHUNK_BYTES);
+        assert_eq!(
+            ledger_charge(LEDGER_CHUNK_BYTES + 7, LEDGER_CHUNK_BYTES * 2),
+            LEDGER_CHUNK_BYTES + 7
+        );
+        assert_eq!(
+            ledger_charge(LEDGER_CHUNK_BYTES * 3, LEDGER_CHUNK_BYTES * 2),
+            LEDGER_CHUNK_BYTES * 2
+        );
     }
 }
