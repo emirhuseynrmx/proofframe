@@ -2,6 +2,17 @@
 
 ## 0.5.1
 
+- Added strict Contract V2 cross-column comparisons and conditional assertions compiled to typed
+  Arrow kernels without Python row evaluation or implicit casts.
+- Added exact dataset row-count, null-ratio, distinct-count, distinct-ratio, and composite-unique
+  rules across record-batch boundaries. Ratio boundaries use integer comparison rather than rounded
+  division; exact identities spill through resource-accounted checksummed runs.
+- Added deterministic bounded partition validation with stable finding order, global row offsets,
+  exact cross-partition state, Python/Rust parity, and ordered verifiable partition manifests.
+- Added a release benchmark v2 matrix for V1 regression, relational, conditional, dataset,
+  in-memory/spill composite, fingerprint, allocation, and Python/native timing evidence.
+- Added deterministic checksums, SPDX JSON SBOMs, and build/SBOM attestations for wheel, sdist, and
+  crate subjects before trusted publication.
 - Promoted the 0.5 line to a stable release with project-focused PyPI, crates.io, and GitHub
   documentation.
 - Decomposed exact-run compaction, typed encoder selection, column scanning, batch inspection, and

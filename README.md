@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)](https://www.rust-lang.org/)
 
-**Data contracts with receipts. Deterministic evidence for DataFrames.**
+**Relational Arrow contracts, exact dataset rules, and verifiable evidence.**
 
 ProofFrame is a Rust-native data quality engine for PyArrow, Pandas, Polars, CSV, Parquet, and Arrow
 streams. It compiles strict contracts against the physical schema, scans record batches without
@@ -34,9 +34,9 @@ temporary data, incompatible schemas, ambiguous contracts, and exceeded limits f
 
 > **Current release — 0.5.1**
 >
-> The current stable release keeps the 0.5 API and fingerprint protocols intact while simplifying
-> native execution paths, hardening source packages, and keeping Python, Rust, and secret-analysis
-> quality gates clean. See the [changelog](CHANGELOG.md) for release details.
+> 0.5.1 adds strict cross-column and conditional rules, exact dataset-level constraints,
+> deterministic partition validation, and ordered partition manifests. Python and Rust execute the
+> same native plan. V1 contracts and both fingerprint protocols remain frozen.
 
 ## Install
 
@@ -59,17 +59,26 @@ import pyarrow as pa
 import proofframe as pf
 
 orders = pa.table({
-    "order_id": [101, 102, 102],
-    "amount": [12.50, 8.00, -1.00],
+    "order_id": [101, 102, 103],
+    "subtotal": [12.50, 8.00, 10.00],
+    "total": [12.50, 7.50, 10.00],
 })
 
 contract = {
-    "version": "proofframe.contract.v1",
-    "columns": {
-        "order_id": {"required": True, "not_null": True, "unique": True},
-        "amount": {"required": True, "min": 0},
+    "version": "proofframe.contract.v2",
+    "columns": {},
+    "row_rules": [{
+        "name": "total_covers_subtotal",
+        "compare": {
+            "left": {"column": "total"},
+            "op": "gte",
+            "right": {"column": "subtotal"},
+        },
+    }],
+    "dataset_rules": {
+        "row_count": {"min": 1},
+        "distinct_ratio": {"order_id": {"min": 1.0}},
     },
-    "max_findings": 20,
 }
 
 report = pf.check(
@@ -81,12 +90,90 @@ report = pf.check(
 )
 
 assert report["valid"] is False
-assert report["violation_count"] == 2
+assert report["violation_count"] == 1
 ```
 
 The contract is compiled before scanning. Unknown fields, missing required columns, invalid bounds,
 and rules that do not match the Arrow type are rejected before the first row is processed.
 `violation_count` remains exact even when the retained `findings` sample is truncated.
+
+## Cross-column and conditional rules
+
+V2 compares Arrow values in their physical type. It does not cast through Python objects or parse
+an expression language at runtime.
+
+```python
+shipments = pa.table({
+    "ordered_at": [1, 3],
+    "delivered_at": [2, 2],
+    "status": ["delivered", "pending"],
+    "tracking_id": ["TR-1", None],
+})
+
+contract = {
+    "version": "proofframe.contract.v2",
+    "columns": {},
+    "row_rules": [
+        {
+            "name": "delivery_window",
+            "compare": {
+                "left": {"column": "ordered_at"},
+                "op": "lte",
+                "right": {"column": "delivered_at"},
+            },
+        },
+        {
+            "name": "delivered_has_tracking",
+            "when": {
+                "left": {"column": "status"},
+                "op": "eq",
+                "right": {"literal": "delivered"},
+            },
+            "assert": {"column": "tracking_id", "not_null": True},
+        },
+    ],
+}
+
+report = pf.check(shipments, contract)
+```
+
+Comparisons support signed and unsigned integers, floats, booleans, UTF-8, dates, timestamps, and
+decimal128 where the Arrow types are compatible. Null behavior is explicit. Conditional assertions
+cover nullability, numeric bounds, allowlists, patterns, and NaN policy without building a row mask.
+
+## Dataset-level rules and partitions
+
+Dataset rules keep exact state across record-batch and partition boundaries. Distinct and composite
+keys use canonical values, not hash-only identity. When the memory budget is reached, sorted,
+checksummed runs spill under the configured temporary-storage limit.
+
+```python
+partitions = [
+    pa.table({"order_id": [101, 101], "line_id": [1, 2]}),
+    pa.table({"order_id": [102], "line_id": [1]}),
+]
+
+contract = {
+    "version": "proofframe.contract.v2",
+    "columns": {},
+    "dataset_rules": {
+        "row_count": {"min": 3},
+        "distinct_ratio": {"order_id": {"min": 0.5}},
+        "composite_unique": [{
+            "name": "line_key",
+            "columns": ["order_id", "line_id"],
+        }],
+    },
+}
+
+report = pf.check_partitions(partitions, contract, threads=2)
+assert report["valid"] is True
+```
+
+`pf.check_partitions_with_evidence` additionally returns an ordered manifest binding every
+partition's V2 fingerprint, row count, schema, contract, compiled plan, result contribution, global
+result, and resource settings. Reordering, omission, duplication, or mixed identities fails
+verification.
 
 ## One engine, several proof operations
 
@@ -204,6 +291,14 @@ Performance claims are tied to raw samples, dataset hashes, compiler and package
 machine metadata. The committed smoke harness is deterministic; the pinned 7,645,034-row Bitcoin
 comparison remains a dedicated-runner gate rather than a published benchmark claim. See
 [testing and benchmark methodology](docs/testing.md).
+
+## Release integrity
+
+The release workflow packages the exact wheel, sdist, and crate subjects before publication. It
+emits deterministic SHA-256 checksums, SPDX JSON SBOMs, GitHub build-provenance attestations, and
+SBOM attestations. PyPI uses trusted publishing; crates.io publication is gated by the same tagged
+commit and CI evidence. These controls support provenance verification, but they are not a claim of
+formal SLSA certification.
 
 ## Development
 

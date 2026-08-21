@@ -1,5 +1,9 @@
+from pathlib import Path
+
 import proofframe as pf
 import pyarrow as pa
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_readme_check_example_stays_executable() -> None:
@@ -28,3 +32,77 @@ def test_readme_check_example_stays_executable() -> None:
 
     assert report["valid"] is False
     assert report["violation_count"] == 2
+
+
+def test_readme_relational_and_conditional_example_stays_executable() -> None:
+    shipments = pa.table(
+        {
+            "ordered_at": [1, 3],
+            "delivered_at": [2, 2],
+            "status": ["delivered", "pending"],
+            "tracking_id": ["TR-1", None],
+        }
+    )
+    contract = {
+        "version": "proofframe.contract.v2",
+        "columns": {},
+        "row_rules": [
+            {
+                "name": "delivery_window",
+                "compare": {
+                    "left": {"column": "ordered_at"},
+                    "op": "lte",
+                    "right": {"column": "delivered_at"},
+                },
+            },
+            {
+                "name": "delivered_has_tracking",
+                "when": {
+                    "left": {"column": "status"},
+                    "op": "eq",
+                    "right": {"literal": "delivered"},
+                },
+                "assert": {"column": "tracking_id", "not_null": True},
+            },
+        ],
+    }
+
+    report = pf.check(shipments, contract)
+
+    assert report["valid"] is False
+    assert any(
+        finding["rule"] == "compare" and "delivery_window" in finding["message"]
+        for finding in report["findings"]
+    )
+
+
+def test_readme_dataset_and_partition_example_stays_executable() -> None:
+    contract = {
+        "version": "proofframe.contract.v2",
+        "columns": {},
+        "dataset_rules": {
+            "row_count": {"min": 3},
+            "distinct_ratio": {"order_id": {"min": 0.5}},
+            "composite_unique": [
+                {"name": "line_key", "columns": ["order_id", "line_id"]}
+            ],
+        },
+    }
+    partitions = [
+        pa.table({"order_id": [101, 101], "line_id": [1, 2]}),
+        pa.table({"order_id": [102], "line_id": [1]}),
+    ]
+
+    report = pf.check_partitions(partitions, contract, threads=2)
+
+    assert report["valid"] is True
+    assert report["rows"] == 3
+
+
+def test_readme_documents_the_051_contract_surface() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "Cross-column and conditional rules" in readme
+    assert "Dataset-level rules" in readme
+    assert "pf.check_partitions" in readme
+    assert "SLSA" in readme and "SBOM" in readme

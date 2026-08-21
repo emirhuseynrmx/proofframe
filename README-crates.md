@@ -20,8 +20,8 @@ bounded findings, keyed diffs, evidence records, and signed proof receipts from 
 
 > **Current release — 0.5.1**
 >
-> The current stable release preserves the 0.5 API and fingerprint protocols while simplifying
-> execution internals and tightening release-package quality gates.
+> The current stable release adds compiled cross-column, conditional, and exact dataset-level
+> rules plus deterministic partition execution. V1 plans and fingerprint protocols remain frozen.
 
 ```bash
 cargo add proofframe@0.5.1
@@ -42,27 +42,44 @@ when building the PyO3 extension.
 ## Compiled contract API
 
 ```rust
-use proofframe::{CompiledContract, ContractAst, ExecutionOptions, execute_reader};
+use proofframe::{CompiledContract, ContractDocument, ExecutionOptions, execute_reader};
 
 let schema = reader.schema();
-let ast = ContractAst::from_json(r#"{
-  "version": "proofframe.contract.v1",
-  "columns": {
-    "order_id": {"required": true, "not_null": true, "unique": true},
-    "amount": {"min": 0}
-  },
-  "max_findings": 100
+let document = ContractDocument::from_json(r#"{
+  "version": "proofframe.contract.v2",
+  "columns": {},
+  "row_rules": [{
+    "name": "total_covers_subtotal",
+    "compare": {
+      "left": {"column": "total"},
+      "op": "gte",
+      "right": {"column": "subtotal"}
+    }
+  }],
+  "dataset_rules": {
+    "distinct_ratio": {"order_id": {"min": 1.0}}
+  }
 }"#)?;
-let plan = CompiledContract::compile(&ast, schema.as_ref())?;
+let plan = CompiledContract::compile_document(&document, schema.as_ref())?;
 let report = execute_reader(reader, &plan, &ExecutionOptions::default())?;
 
 assert_eq!(report.valid, report.violation_count == 0);
 # Ok::<(), proofframe::ProofFrameError>(())
 ```
 
-Compilation resolves columns, converts exact bounds to Arrow-native values, compiles regular
-expressions, and selects kernels once. Unknown fields, invalid bounds, missing required columns,
-and incompatible rule/type pairs fail before execution.
+Compilation resolves columns and operands, converts exact bounds to Arrow-native values, compiles
+regular expressions, and selects row and dataset kernels once. Unknown fields, invalid ratios,
+duplicate rule names, missing columns, and incompatible operands fail before execution.
+
+## Deterministic partitions
+
+`check_partition_readers` accepts ordered `PartitionReader` streams and a worker count in
+`ExecutionOptions`. Stateless work may execute concurrently, but reports merge in logical partition
+order. Rules that require global exact state retain one ordered traversal so composite uniqueness
+and distinct counts never become partition-local approximations.
+
+`check_partition_readers_with_evidence` returns the same report plus a domain-separated partition
+manifest. The manifest can be signed and verified without changing Receipt V2 bytes.
 
 ## Fingerprint protocols
 
@@ -97,8 +114,8 @@ when signer identity matters.
 ## Compatibility
 
 The 0.5 line preserves V1 fingerprints and established compatibility entry points. New Rust code
-should use `ContractAst`, `CompiledContract`, `execute_reader`, explicit fingerprint versions, and
-Receipt V2 with a trust policy.
+should use `ContractDocument`, `CompiledContract::compile_document`, explicit fingerprint versions,
+and Receipt V2 or partition-manifest receipts with a trust policy.
 
 The MSRV is Rust 1.85. Full API documentation is available on [docs.rs](https://docs.rs/proofframe),
 and release history is recorded in the [changelog](CHANGELOG.md).
