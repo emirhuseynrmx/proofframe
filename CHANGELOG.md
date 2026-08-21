@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1
+
+- Promoted the 0.5 line to a stable release with project-focused PyPI, crates.io, and GitHub
+  documentation.
+- Decomposed exact-run compaction, typed encoder selection, column scanning, batch inspection, and
+  Python module registration into focused paths without changing the public API or fingerprint
+  protocols.
+- Hardened source archive verification with explicit path, content, duplicate-member, required-file,
+  and executable-resolution checks.
+- Removed overlapping Python exception handling and other analyzer findings while preserving the
+  0.5 compatibility surface.
+- Synchronized Python, Rust, source-distribution, workflow, and release metadata for 0.5.1.
+
 ## 0.5.0
 
 - Added `check_with_evidence`, which validates and fingerprints the same Arrow batches in one

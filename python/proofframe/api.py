@@ -171,13 +171,17 @@ def validate(
     **options: Any,
 ) -> dict[str, Any]:
     """Compatibility alias for :func:`check` retained for the 0.5 release line."""
+    profile_note = (
+        " The requested compatibility profile is no longer materialized."
+        if include_profile
+        else " Profile materialization remains disabled."
+    )
     warnings.warn(
         "validate() is retained for 0.5 compatibility; use check(). "
-        "Validation no longer builds an implicit unbounded profile.",
+        "Validation no longer builds an implicit unbounded profile." + profile_note,
         DeprecationWarning,
         stacklevel=2,
     )
-    del include_profile
     return check(data, contract, **options)
 
 

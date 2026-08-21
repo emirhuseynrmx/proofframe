@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import zipfile
@@ -66,6 +67,36 @@ def _members(path: Path) -> list[tuple[str, bytes]]:
     raise ArchiveHygieneError(f"unsupported source archive: {path.name}")
 
 
+def _validate_member_path(raw_name: str, expected_root: str) -> PurePosixPath:
+    if "\\" in raw_name:
+        raise ArchiveHygieneError(f"archive path is not POSIX-normalized: {raw_name}")
+    member = PurePosixPath(raw_name)
+    if member.is_absolute() or ".." in member.parts:
+        raise ArchiveHygieneError(f"archive path escapes its root: {raw_name}")
+    if not member.parts or member.parts[0] != expected_root:
+        raise ArchiveHygieneError(f"archive member is outside {expected_root}: {raw_name}")
+    return PurePosixPath(*member.parts[1:])
+
+
+def _validate_member_content(raw_name: str, relative: PurePosixPath, content: bytes) -> str:
+    if any(part in _FORBIDDEN_SEGMENTS for part in relative.parts):
+        raise ArchiveHygieneError(f"archive contains generated directory: {raw_name}")
+    if relative.name in _FORBIDDEN_NAMES or relative.suffix.lower() in _FORBIDDEN_SUFFIXES:
+        raise ArchiveHygieneError(f"archive contains generated/native file: {raw_name}")
+    normalized = relative.as_posix()
+    if normalized not in _LOCAL_PATH_SCAN_EXEMPT and any(
+        pattern.search(content) for pattern in _LOCAL_PATHS
+    ):
+        raise ArchiveHygieneError(f"archive contains a local absolute path: {raw_name}")
+    return normalized
+
+
+def _validate_required_paths(relative_paths: set[str]) -> None:
+    missing = sorted(_REQUIRED_PATHS - relative_paths)
+    if missing:
+        raise ArchiveHygieneError(f"source archive is incomplete: missing {', '.join(missing)}")
+
+
 def verify_source_archive(path: Path, *, expected_root: str) -> None:
     """Reject archives that are ambiguous, unsafe, generated, or machine-local."""
 
@@ -74,31 +105,14 @@ def verify_source_archive(path: Path, *, expected_root: str) -> None:
         raise ArchiveHygieneError("source archive is empty")
     relative_paths: set[str] = set()
     for raw_name, content in members:
-        if "\\" in raw_name:
-            raise ArchiveHygieneError(f"archive path is not POSIX-normalized: {raw_name}")
-        member = PurePosixPath(raw_name)
-        if member.is_absolute() or ".." in member.parts:
-            raise ArchiveHygieneError(f"archive path escapes its root: {raw_name}")
-        if not member.parts or member.parts[0] != expected_root:
-            raise ArchiveHygieneError(f"archive member is outside {expected_root}: {raw_name}")
-        relative = PurePosixPath(*member.parts[1:])
+        relative = _validate_member_path(raw_name, expected_root)
         if not relative.parts:
             continue
-        if any(part in _FORBIDDEN_SEGMENTS for part in relative.parts):
-            raise ArchiveHygieneError(f"archive contains generated directory: {raw_name}")
-        if relative.name in _FORBIDDEN_NAMES or relative.suffix.lower() in _FORBIDDEN_SUFFIXES:
-            raise ArchiveHygieneError(f"archive contains generated/native file: {raw_name}")
-        normalized = relative.as_posix()
-        if normalized not in _LOCAL_PATH_SCAN_EXEMPT and any(
-            pattern.search(content) for pattern in _LOCAL_PATHS
-        ):
-            raise ArchiveHygieneError(f"archive contains a local absolute path: {raw_name}")
+        normalized = _validate_member_content(raw_name, relative, content)
         if normalized in relative_paths:
             raise ArchiveHygieneError(f"archive contains a duplicate path: {raw_name}")
         relative_paths.add(normalized)
-    missing = sorted(_REQUIRED_PATHS - relative_paths)
-    if missing:
-        raise ArchiveHygieneError(f"source archive is incomplete: missing {', '.join(missing)}")
+    _validate_required_paths(relative_paths)
 
 
 def _project_version(root: Path) -> str:
@@ -108,6 +122,13 @@ def _project_version(root: Path) -> str:
     return match.group(1)
 
 
+def _git_executable() -> str:
+    executable = shutil.which("git")
+    if executable is None:
+        raise ArchiveHygieneError("Git executable is unavailable")
+    return str(Path(executable).resolve())
+
+
 def build_source_zip(root: Path, output_directory: Path) -> Path:
     """Archive exactly Git-tracked regular files with stable metadata."""
 
@@ -115,7 +136,7 @@ def build_source_zip(root: Path, output_directory: Path) -> Path:
     version = _project_version(root)
     prefix = f"proofframe-{version}"
     tracked = subprocess.run(
-        ["git", "ls-files", "-z"],
+        [_git_executable(), "ls-files", "-z"],
         cwd=root,
         check=True,
         capture_output=True,

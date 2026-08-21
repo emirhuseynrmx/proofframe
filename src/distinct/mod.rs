@@ -597,8 +597,7 @@ fn allocate_byte_segment(
     let mut record_capacity = desired_records;
     let mut byte_capacity = desired_records
         .saturating_mul(ASSUMED_BYTES_PER_VALUE)
-        .max(minimum_bytes)
-        .min(u32::MAX as usize);
+        .clamp(minimum_bytes, u32::MAX as usize);
     loop {
         let index_bytes = record_capacity
             .checked_mul(std::mem::size_of::<ByteIndex>())

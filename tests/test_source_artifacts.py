@@ -4,7 +4,7 @@ import zipfile
 
 import pytest
 
-from scripts.source_artifacts import ArchiveHygieneError, verify_source_archive
+from scripts.source_artifacts import ArchiveHygieneError, build_source_zip, verify_source_archive
 
 
 def _zip(entries: dict[str, bytes]) -> bytes:
@@ -83,4 +83,46 @@ def test_source_archive_rejects_local_absolute_path_leaks(tmp_path):
     )
 
     with pytest.raises(ArchiveHygieneError, match="local absolute path"):
+        verify_source_archive(artifact, expected_root="proofframe-0.5.0")
+
+
+def test_build_source_zip_fails_closed_when_git_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.source_artifacts._project_version", lambda _: "0.5.0")
+    monkeypatch.setattr("scripts.source_artifacts.shutil.which", lambda _: None)
+
+    with pytest.raises(ArchiveHygieneError, match="Git executable is unavailable"):
+        build_source_zip(tmp_path, tmp_path / "dist")
+
+
+@pytest.mark.parametrize(
+    ("member_name", "message"),
+    [
+        (r"proofframe-0.5.0\Cargo.toml", "POSIX-normalized"),
+        ("proofframe-0.5.0/../Cargo.toml", "escapes its root"),
+        ("another-root/Cargo.toml", "outside proofframe-0.5.0"),
+    ],
+)
+def test_source_archive_rejects_unsafe_member_paths(tmp_path, member_name, message):
+    artifact = tmp_path / "proofframe-0.5.0.tar.gz"
+    artifact.write_bytes(_sdist({member_name: b"unsafe"}))
+
+    with pytest.raises(ArchiveHygieneError, match=message):
+        verify_source_archive(artifact, expected_root="proofframe-0.5.0")
+
+
+def test_source_archive_rejects_duplicate_members(tmp_path):
+    artifact = tmp_path / "proofframe-0.5.0.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("proofframe-0.5.0/Cargo.toml", b"first")
+        archive.writestr("proofframe-0.5.0/Cargo.toml", b"second")
+
+    with pytest.raises(ArchiveHygieneError, match="duplicate path"):
+        verify_source_archive(artifact, expected_root="proofframe-0.5.0")
+
+
+def test_source_archive_rejects_missing_required_paths(tmp_path):
+    artifact = tmp_path / "proofframe-0.5.0.zip"
+    artifact.write_bytes(_zip({"proofframe-0.5.0/Cargo.toml": b"incomplete"}))
+
+    with pytest.raises(ArchiveHygieneError, match="source archive is incomplete"):
         verify_source_archive(artifact, expected_root="proofframe-0.5.0")

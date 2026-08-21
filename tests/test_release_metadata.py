@@ -8,11 +8,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_rust_and_python_versions_match_release() -> None:
-    assert read_versions(ROOT) == ("0.5.0", "0.5.0")
-    verify_versions(ROOT, "v0.5.0")
+    assert read_versions(ROOT) == ("0.5.1", "0.5.1")
+    verify_versions(ROOT, "v0.5.1")
 
 
-@pytest.mark.parametrize("tag", ["0.5.0", "v0.5.1", "v0.5.0-rc.1"])
+def test_python_package_is_classified_as_stable() -> None:
+    metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"Development Status :: 5 - Production/Stable"' in metadata
+    assert '"Development Status :: 4 - Beta"' not in metadata
+
+
+def test_crate_publishes_only_the_public_testing_document() -> None:
+    package = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+
+    assert '"/docs/testing.md"' in package
+    assert '"/docs/**"' not in package
+
+
+@pytest.mark.parametrize("tag", ["0.5.1", "v0.5.0", "v0.5.1-rc.1"])
 def test_release_tag_must_match_exact_pep440_and_semver_version(tag: str) -> None:
     with pytest.raises(ValueError):
         verify_versions(ROOT, tag)
