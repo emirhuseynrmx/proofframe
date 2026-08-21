@@ -234,6 +234,33 @@ fn compile_compare(
             ));
         }
     }
+    let kernel = left
+        .kernel()
+        .or_else(|| right.kernel())
+        .expect("relational comparisons always contain a column operand");
+    if matches!(kernel, KernelKind::Boolean)
+        && !matches!(source.op, CompareOpAst::Eq | CompareOpAst::Ne)
+    {
+        return Err(ProofFrameError::contract(
+            ErrorCode::ContractTypeMismatch,
+            "Boolean relational rules support only `eq` and `ne`",
+            Some(format!("{path}.op")),
+        ));
+    }
+    if matches!(
+        kernel,
+        KernelKind::Binary
+            | KernelKind::LargeBinary
+            | KernelKind::BinaryView
+            | KernelKind::Nested
+            | KernelKind::NullOnly
+    ) {
+        return Err(ProofFrameError::contract(
+            ErrorCode::ContractTypeMismatch,
+            format!("Arrow type cannot be used in a relational rule at `{path}`"),
+            Some(path.to_string()),
+        ));
+    }
     Ok(ComparePlan {
         left,
         op: source.op,
@@ -270,18 +297,41 @@ fn compile_literal(
 ) -> Result<ScalarValuePlan, ProofFrameError> {
     let parsed = match data_type {
         arrow::datatypes::DataType::Boolean => value.as_bool().map(ScalarValuePlan::Boolean),
-        arrow::datatypes::DataType::Int8
-        | arrow::datatypes::DataType::Int16
-        | arrow::datatypes::DataType::Int32
-        | arrow::datatypes::DataType::Int64
-        | arrow::datatypes::DataType::Date32
+        arrow::datatypes::DataType::Int8 => value
+            .as_i64()
+            .and_then(|value| i8::try_from(value).ok())
+            .map(|value| ScalarValuePlan::I64(i64::from(value))),
+        arrow::datatypes::DataType::Int16 => value
+            .as_i64()
+            .and_then(|value| i16::try_from(value).ok())
+            .map(|value| ScalarValuePlan::I64(i64::from(value))),
+        arrow::datatypes::DataType::Int32 | arrow::datatypes::DataType::Date32 => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(|value| ScalarValuePlan::I64(i64::from(value))),
+        arrow::datatypes::DataType::Int64
         | arrow::datatypes::DataType::Date64
         | arrow::datatypes::DataType::Timestamp(_, _) => value.as_i64().map(ScalarValuePlan::I64),
-        arrow::datatypes::DataType::UInt8
-        | arrow::datatypes::DataType::UInt16
-        | arrow::datatypes::DataType::UInt32
-        | arrow::datatypes::DataType::UInt64 => value.as_u64().map(ScalarValuePlan::U64),
-        arrow::datatypes::DataType::Float32 | arrow::datatypes::DataType::Float64 => value
+        arrow::datatypes::DataType::UInt8 => value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .map(|value| ScalarValuePlan::U64(u64::from(value))),
+        arrow::datatypes::DataType::UInt16 => value
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(|value| ScalarValuePlan::U64(u64::from(value))),
+        arrow::datatypes::DataType::UInt32 => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(|value| ScalarValuePlan::U64(u64::from(value))),
+        arrow::datatypes::DataType::UInt64 => value.as_u64().map(ScalarValuePlan::U64),
+        arrow::datatypes::DataType::Float32 => value.as_f64().and_then(|value| {
+            let narrowed = value as f32;
+            narrowed
+                .is_finite()
+                .then_some(ScalarValuePlan::F64(f64::from(narrowed)))
+        }),
+        arrow::datatypes::DataType::Float64 => value
             .as_f64()
             .filter(|value| value.is_finite())
             .map(ScalarValuePlan::F64),

@@ -2,8 +2,11 @@ mod support;
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{
+    ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, LargeStringArray,
+    StringArray, StringViewArray, TimestampNanosecondArray, UInt64Array,
+};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use proofframe::{
@@ -318,4 +321,216 @@ fn conditional_rule_evaluates_native_utf8_and_asserts_not_null() {
     assert_eq!(report.findings[0].row, Some(0));
     assert_eq!(report.findings[0].rule, "conditional");
     assert!(report.findings[0].message.contains("shipped_has_timestamp"));
+}
+
+#[test]
+fn relational_unsigned_comparison_preserves_values_above_f64_precision() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("observed", DataType::UInt64, false),
+        Field::new("expected", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from_iter_values([
+                9_007_199_254_740_993,
+                9_007_199_254_740_995,
+            ])) as ArrayRef,
+            Arc::new(UInt64Array::from_iter_values([
+                9_007_199_254_740_994,
+                9_007_199_254_740_994,
+            ])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let plan = compile_v2(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"unsigned_order",
+                "compare":{"left":{"column":"observed"},"op":"lte","right":{"column":"expected"}}
+            }]
+        }"#,
+        schema.as_ref(),
+    );
+
+    let report = execute_reader(
+        reader_from_batches(vec![batch]),
+        &plan,
+        &ExecutionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.violation_count, 1);
+    assert_eq!(report.findings[0].row, Some(1));
+}
+
+#[test]
+fn relational_boolean_and_text_view_equality_use_native_arrow_values() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("enabled", DataType::Boolean, false),
+        Field::new("label", DataType::Utf8View, false),
+        Field::new("alias", DataType::LargeUtf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BooleanArray::from(vec![true, false])) as ArrayRef,
+            Arc::new(StringViewArray::from(vec!["primary", "secondary"])) as ArrayRef,
+            Arc::new(LargeStringArray::from(vec!["primary", "wrong"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let plan = compile_v2(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[
+                {"name":"enabled_only","compare":{"left":{"column":"enabled"},"op":"eq","right":{"literal":true}}},
+                {"name":"label_is_primary","compare":{"left":{"column":"label"},"op":"eq","right":{"literal":"primary"}}},
+                {"name":"alias_is_primary","compare":{"left":{"column":"alias"},"op":"eq","right":{"literal":"primary"}}}
+            ]
+        }"#,
+        schema.as_ref(),
+    );
+
+    let report = execute_reader(
+        reader_from_batches(vec![batch]),
+        &plan,
+        &ExecutionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.violation_count, 3);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|finding| (finding.column.as_str(), finding.row))
+            .collect::<Vec<_>>(),
+        vec![("enabled", Some(1)), ("label", Some(1)), ("alias", Some(1))]
+    );
+}
+
+#[test]
+fn relational_decimal_and_timestamp_comparisons_keep_physical_precision() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("amount", DataType::Decimal128(20, 2), false),
+        Field::new("limit", DataType::Decimal128(20, 2), false),
+        Field::new(
+            "created_at",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new(
+            "expires_at",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+    ]));
+    let amount = Decimal128Array::from_iter_values([10_001_i128, 20_001])
+        .with_precision_and_scale(20, 2)
+        .unwrap();
+    let limit = Decimal128Array::from_iter_values([10_002_i128, 20_000])
+        .with_precision_and_scale(20, 2)
+        .unwrap();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(amount) as ArrayRef,
+            Arc::new(limit) as ArrayRef,
+            Arc::new(TimestampNanosecondArray::from_iter_values([
+                1_000_000_000_000_000_001_i64,
+                1_000_000_000_000_000_003,
+            ])) as ArrayRef,
+            Arc::new(TimestampNanosecondArray::from_iter_values([
+                1_000_000_000_000_000_002_i64,
+                1_000_000_000_000_000_002,
+            ])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let plan = compile_v2(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[
+                {"name":"amount_within_limit","compare":{"left":{"column":"amount"},"op":"lte","right":{"column":"limit"}}},
+                {"name":"time_window","compare":{"left":{"column":"created_at"},"op":"lte","right":{"column":"expires_at"}}}
+            ]
+        }"#,
+        schema.as_ref(),
+    );
+
+    let report = execute_reader(
+        reader_from_batches(vec![batch]),
+        &plan,
+        &ExecutionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.violation_count, 2);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|finding| (finding.column.as_str(), finding.row))
+            .collect::<Vec<_>>(),
+        vec![("amount", Some(1)), ("created_at", Some(1))]
+    );
+}
+
+#[test]
+fn conditional_assertion_applies_bounds_pattern_and_allowlist_only_when_selected() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("score", DataType::Int64, false),
+        Field::new("code", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["strict", "strict", "relaxed"])) as ArrayRef,
+            Arc::new(Int64Array::from_iter_values([4, 11, 99])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["bad", "OK", "bad"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let plan = compile_v2(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[
+                {
+                    "name":"strict_score",
+                    "when":{"left":{"column":"kind"},"op":"eq","right":{"literal":"strict"}},
+                    "assert":{"column":"score","min":5,"max":10}
+                },
+                {
+                    "name":"strict_code",
+                    "when":{"left":{"column":"kind"},"op":"eq","right":{"literal":"strict"}},
+                    "assert":{"column":"code","pattern":"^[A-Z]{2}$","allowed":["OK"]}
+                }
+            ]
+        }"#,
+        schema.as_ref(),
+    );
+
+    let report = execute_reader(
+        reader_from_batches(vec![batch]),
+        &plan,
+        &ExecutionOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.violation_count, 4);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|finding| finding.row)
+            .collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(0), Some(0)]
+    );
 }

@@ -132,6 +132,7 @@ fn check_arrow(
                 max_samples,
             ),
             cancellation: crate::CancellationToken::new(),
+            threads: None,
         };
         execute_reader(source.0, &plan, &options).map(|report| (report, contract_source_digest))
     });
@@ -253,6 +254,7 @@ fn check_with_evidence_arrow(
                 max_samples,
             ),
             cancellation: crate::CancellationToken::new(),
+            threads: None,
         };
         let (report, fingerprint) = execute_reader_with_fingerprint(source.0, &plan, &options)?;
         let mut report_value = serde_json::to_value(&report)?;

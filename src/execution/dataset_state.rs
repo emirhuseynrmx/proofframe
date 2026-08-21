@@ -1,4 +1,10 @@
-use arrow::array::{Array, Int64Array, LargeStringArray, StringArray, StringViewArray};
+use arrow::array::{
+    Array, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, StringArray, StringViewArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
+};
 use arrow::record_batch::RecordBatch;
 
 use super::record_lazy;
@@ -303,26 +309,93 @@ fn insert_exact_scalar(
     row: usize,
     global_row: u64,
 ) -> Result<(), ProofFrameError> {
+    macro_rules! signed {
+        ($variant:pat, $array:ty) => {
+            if matches!(kernel, $variant) {
+                return exact.insert(
+                    ValueRef::I64(downcast::<$array>(array).value(row) as i64),
+                    global_row,
+                );
+            }
+        };
+    }
+    macro_rules! unsigned {
+        ($variant:pat, $array:ty) => {
+            if matches!(kernel, $variant) {
+                return exact.insert(
+                    ValueRef::U64(downcast::<$array>(array).value(row) as u64),
+                    global_row,
+                );
+            }
+        };
+    }
+    signed!(KernelKind::I8, Int8Array);
+    signed!(KernelKind::I16, Int16Array);
+    signed!(KernelKind::I32, Int32Array);
+    signed!(KernelKind::I64, Int64Array);
+    signed!(KernelKind::Date32, Date32Array);
+    signed!(KernelKind::Date64, Date64Array);
+    signed!(
+        KernelKind::Timestamp(arrow::datatypes::TimeUnit::Second),
+        TimestampSecondArray
+    );
+    signed!(
+        KernelKind::Timestamp(arrow::datatypes::TimeUnit::Millisecond),
+        TimestampMillisecondArray
+    );
+    signed!(
+        KernelKind::Timestamp(arrow::datatypes::TimeUnit::Microsecond),
+        TimestampMicrosecondArray
+    );
+    signed!(
+        KernelKind::Timestamp(arrow::datatypes::TimeUnit::Nanosecond),
+        TimestampNanosecondArray
+    );
+    unsigned!(KernelKind::U8, UInt8Array);
+    unsigned!(KernelKind::U16, UInt16Array);
+    unsigned!(KernelKind::U32, UInt32Array);
+    unsigned!(KernelKind::U64, UInt64Array);
     match kernel {
-        KernelKind::I64 => exact.insert(
-            ValueRef::I64(
-                array
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .expect("kernel matches Arrow array")
-                    .value(row),
-            ),
+        KernelKind::Boolean => exact.insert(
+            ValueRef::U64(u64::from(downcast::<BooleanArray>(array).value(row))),
             global_row,
         ),
+        KernelKind::F32 => exact.insert(
+            ValueRef::F64(u64::from(
+                downcast::<Float32Array>(array).value(row).to_bits(),
+            )),
+            global_row,
+        ),
+        KernelKind::F64 => exact.insert(
+            ValueRef::F64(downcast::<Float64Array>(array).value(row).to_bits()),
+            global_row,
+        ),
+        KernelKind::Decimal128 { .. } => {
+            let encoded = downcast::<Decimal128Array>(array).value(row).to_le_bytes();
+            exact.insert(ValueRef::Bytes(&encoded), global_row)
+        }
         KernelKind::Utf8 => exact.insert(
-            ValueRef::Bytes(
-                array
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("kernel matches Arrow array")
-                    .value(row)
-                    .as_bytes(),
-            ),
+            ValueRef::Bytes(downcast::<StringArray>(array).value(row).as_bytes()),
+            global_row,
+        ),
+        KernelKind::LargeUtf8 => exact.insert(
+            ValueRef::Bytes(downcast::<LargeStringArray>(array).value(row).as_bytes()),
+            global_row,
+        ),
+        KernelKind::Utf8View => exact.insert(
+            ValueRef::Bytes(downcast::<StringViewArray>(array).value(row).as_bytes()),
+            global_row,
+        ),
+        KernelKind::Binary => exact.insert(
+            ValueRef::Bytes(downcast::<BinaryArray>(array).value(row)),
+            global_row,
+        ),
+        KernelKind::LargeBinary => exact.insert(
+            ValueRef::Bytes(downcast::<LargeBinaryArray>(array).value(row)),
+            global_row,
+        ),
+        KernelKind::BinaryView => exact.insert(
+            ValueRef::Bytes(downcast::<BinaryViewArray>(array).value(row)),
             global_row,
         ),
         _ => Err(ProofFrameError::UnsupportedType(format!(
@@ -346,7 +419,27 @@ fn append_scalar(
             }
         };
     }
+    primitive!(Int8Array, 1);
+    primitive!(Int16Array, 2);
+    primitive!(Int32Array, 3);
     primitive!(Int64Array, 4);
+    primitive!(UInt8Array, 5);
+    primitive!(UInt16Array, 6);
+    primitive!(UInt32Array, 7);
+    primitive!(UInt64Array, 8);
+    primitive!(Float32Array, 9);
+    primitive!(Float64Array, 10);
+    primitive!(Date32Array, 11);
+    primitive!(Date64Array, 12);
+    primitive!(TimestampSecondArray, 13);
+    primitive!(TimestampMillisecondArray, 14);
+    primitive!(TimestampMicrosecondArray, 15);
+    primitive!(TimestampNanosecondArray, 16);
+    primitive!(Decimal128Array, 17);
+    if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
+        output.extend_from_slice(&[18, u8::from(values.value(row))]);
+        return Ok(());
+    }
     if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
         return append_bytes(output, 19, values.value(row).as_bytes());
     }
@@ -356,10 +449,26 @@ fn append_scalar(
     if let Some(values) = array.as_any().downcast_ref::<StringViewArray>() {
         return append_bytes(output, 28, values.value(row).as_bytes());
     }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+        return append_bytes(output, 21, values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        return append_bytes(output, 22, values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
+        return append_bytes(output, 29, values.value(row));
+    }
     Err(ProofFrameError::UnsupportedType(format!(
         "composite uniqueness for {}",
         array.data_type()
     )))
+}
+
+fn downcast<T: 'static>(array: &dyn Array) -> &T {
+    array
+        .as_any()
+        .downcast_ref::<T>()
+        .expect("kernel matches the compiled Arrow array")
 }
 
 fn append_bytes(output: &mut Vec<u8>, tag: u8, value: &[u8]) -> Result<(), ProofFrameError> {

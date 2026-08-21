@@ -2,14 +2,18 @@
 
 mod dataset_state;
 mod kernels;
+mod partition;
 mod resource;
 mod row_kernels;
+
+pub use partition::{PartitionReader, check_partition_readers};
 
 pub use resource::{
     CancellationToken, MemoryReservation, ResourceAccount, ResourceLimits, TempReservation,
 };
 
 use arrow::record_batch::RecordBatchReader;
+use std::num::NonZeroUsize;
 
 use crate::{
     CompiledContract, ExactState, ExecutionMetrics, FastValidationReport, Finding, Fingerprint,
@@ -24,6 +28,8 @@ pub struct ExecutionOptions {
     pub row_count_hint: Option<u64>,
     pub resources: ResourceLimits,
     pub cancellation: CancellationToken,
+    /// Maximum partition workers. `None` uses bounded host parallelism.
+    pub threads: Option<NonZeroUsize>,
 }
 
 /// Execute a compiled contract without reparsing or performing rule-map lookups.
@@ -64,13 +70,26 @@ fn execute_reader_inner<R>(
 where
     R: RecordBatchReader,
 {
+    let resource_root = ResourceAccount::root(options.resources);
+    execute_reader_inner_with_account(reader, plan, options, fingerprint, resource_root)
+}
+
+pub(super) fn execute_reader_inner_with_account<R>(
+    reader: R,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    fingerprint: bool,
+    resource_root: ResourceAccount,
+) -> Result<(FastValidationReport, Option<Fingerprint>), ProofFrameError>
+where
+    R: RecordBatchReader,
+{
     let reader_schema = reader.schema();
     if reader_schema.as_ref() != plan.schema() {
         return Err(ProofFrameError::SchemaMismatch(
             "reader schema differs from the schema used to compile the contract".to_string(),
         ));
     }
-    let resource_root = ResourceAccount::root(options.resources);
     let mut fingerprint = fingerprint
         .then(|| {
             V2FingerprintState::new(

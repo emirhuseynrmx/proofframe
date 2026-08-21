@@ -454,3 +454,47 @@ fn compile_document_preserves_the_frozen_v1_plan_digest() {
         "pf-plan-v1:3a243dfa197e9fa4858c58f334333c0b4ed48bef82aeaa3751912d1092d74c2c"
     );
 }
+
+#[test]
+fn contract_v2_rejects_relational_literals_outside_the_arrow_physical_type() {
+    let schema = Schema::new(vec![Field::new("tiny", DataType::Int8, false)]);
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"tiny_limit",
+                "compare":{"left":{"column":"tiny"},"op":"lte","right":{"literal":128}}
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    let error = CompiledContract::compile_document(&document, &schema)
+        .expect_err("an Int8 literal must never be truncated at execution time");
+
+    assert_eq!(error.code(), ErrorCode::ContractTypeMismatch);
+    assert_eq!(error.path(), Some("$.row_rules[0].compare.right.literal"));
+}
+
+#[test]
+fn contract_v2_rejects_ordering_for_unordered_relational_types() {
+    let schema = Schema::new(vec![Field::new("enabled", DataType::Boolean, false)]);
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"invalid_boolean_order",
+                "compare":{"left":{"column":"enabled"},"op":"lt","right":{"literal":true}}
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    let error = CompiledContract::compile_document(&document, &schema)
+        .expect_err("boolean contracts support equality, not invented ordering semantics");
+
+    assert_eq!(error.code(), ErrorCode::ContractTypeMismatch);
+    assert_eq!(error.path(), Some("$.row_rules[0].compare.op"));
+}

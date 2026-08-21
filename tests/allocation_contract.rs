@@ -185,3 +185,52 @@ fn relational_i64_validation_does_not_allocate_per_row() {
     );
     assert_eq!(reallocations, 0, "relational buffers must not reallocate");
 }
+
+#[test]
+fn conditional_i64_validation_does_not_allocate_a_selection_mask() {
+    const ROWS: usize = 100_000;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("selected", DataType::Int64, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(1, ROWS))) as ArrayRef,
+            Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(10, ROWS))) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let document = ContractDocument::from_json(
+        r#"{
+            "version":"proofframe.contract.v2",
+            "columns":{},
+            "row_rules":[{
+                "name":"selected_value",
+                "when":{"left":{"column":"selected"},"op":"eq","right":{"literal":1}},
+                "assert":{"column":"value","min":0,"max":10}
+            }]
+        }"#,
+    )
+    .unwrap();
+    let plan = CompiledContract::compile_document(&document, schema.as_ref()).unwrap();
+
+    let (report, allocations, reallocations) = measure(|| {
+        execute_reader(
+            reader_from_batches(vec![batch]),
+            &plan,
+            &ExecutionOptions::default(),
+        )
+        .unwrap()
+    });
+
+    assert!(report.valid);
+    assert!(
+        allocations <= 8,
+        "conditional scan allocated {allocations} times for {ROWS} selected rows"
+    );
+    assert_eq!(
+        reallocations, 0,
+        "conditional scan must not build a row mask"
+    );
+}

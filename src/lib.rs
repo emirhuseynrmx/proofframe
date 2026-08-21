@@ -32,8 +32,9 @@ pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, Valu
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
 pub use execution::{
-    CancellationToken, ExecutionOptions, MemoryReservation, ResourceAccount, ResourceLimits,
-    TempReservation, execute_reader, execute_reader_with_fingerprint,
+    CancellationToken, ExecutionOptions, MemoryReservation, PartitionReader, ResourceAccount,
+    ResourceLimits, TempReservation, check_partition_readers, execute_reader,
+    execute_reader_with_fingerprint,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
 

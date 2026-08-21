@@ -89,6 +89,14 @@ pub struct DatasetPlan {
 }
 
 impl DatasetPlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.row_count.is_none()
+            && self.null_ratios.is_empty()
+            && self.distinct_counts.is_empty()
+            && self.distinct_ratios.is_empty()
+            && self.composite_unique.is_empty()
+    }
+
     pub(crate) fn compile(
         source: &ContractAstV2,
         schema: &Schema,
