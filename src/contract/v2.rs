@@ -62,6 +62,37 @@ pub enum TimeUnitAst {
     Ns,
 }
 
+/// Operational lifecycle state for a V2 contract document.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractStatus {
+    /// A reviewed contract that can be compiled and executed.
+    #[default]
+    Active,
+    /// A generated suggestion that must be reviewed before execution.
+    Draft,
+}
+
+/// A reason a generated suggestion deliberately omitted a potentially brittle rule.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestedReviewAst {
+    pub column: String,
+    pub reason: String,
+}
+
+/// Immutable observations from which a suggested contract was generated.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestedFromAst {
+    pub proofframe_version: String,
+    pub dataset_fingerprint: String,
+    pub rows_observed: u64,
+    pub uniqueness_inferred: bool,
+    #[serde(default)]
+    pub review: Vec<SuggestedReviewAst>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleAstV2 {
@@ -203,6 +234,9 @@ pub struct DatasetRulesAst {
 pub struct ContractAstV2 {
     pub version: ContractVersion,
     #[serde(default)]
+    pub status: ContractStatus,
+    pub suggested_from: Option<SuggestedFromAst>,
+    #[serde(default)]
     pub columns: BTreeMap<String, RuleAstV2>,
     #[serde(default)]
     pub row_rules: Vec<RowRuleAst>,
@@ -308,6 +342,8 @@ fn validate_known_fields(value: &Value) -> Result<(), ProofFrameError> {
             "dataset_rules",
             "max_findings",
             "row_rules",
+            "status",
+            "suggested_from",
             "version",
         ],
         "$",

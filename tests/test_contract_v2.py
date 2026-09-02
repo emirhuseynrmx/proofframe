@@ -117,3 +117,22 @@ def test_release_benchmark_can_time_only_the_compiled_native_scan():
 
     assert result["report"]["valid"] is True
     assert result["native_elapsed_ns"] > 0
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda data, contract: pf.check(data, contract),
+        lambda data, contract: pf.check_with_evidence(data, contract),
+        lambda data, contract: pf.check_partitions([data], contract),
+        lambda data, contract: pf.check_partitions_with_evidence([data], contract),
+        lambda data, contract: pf.validate(data, contract),
+    ],
+)
+def test_draft_contract_is_rejected_by_every_validation_entry_point(operation):
+    draft = {"version": "proofframe.contract.v2", "status": "draft", "columns": {}}
+
+    with pytest.raises(pf.ContractError) as caught:
+        operation(pa.table({"id": [1]}), draft)
+
+    assert caught.value.code == "PF_DRAFT_CONTRACT"

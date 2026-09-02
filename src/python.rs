@@ -924,6 +924,7 @@ fn map_error(py: Python<'_>, error: ProofFrameError) -> PyErr {
         ErrorCode::ContractInvalidJson
         | ErrorCode::ContractUnknownField
         | ErrorCode::ContractInvalidBound
+        | ErrorCode::ContractDraft
         | ErrorCode::ContractTypeMismatch => ContractError::new_err(message),
         ErrorCode::SchemaMismatch | ErrorCode::MissingColumn | ErrorCode::UnsupportedType => {
             SchemaError::new_err(message)

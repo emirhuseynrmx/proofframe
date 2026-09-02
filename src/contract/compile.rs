@@ -287,6 +287,7 @@ impl CompiledContract {
         document: &ContractDocument,
         schema: &Schema,
     ) -> Result<Self, ProofFrameError> {
+        document.ensure_active()?;
         match document {
             ContractDocument::V1(contract) => Self::compile(contract, schema),
             ContractDocument::V2(contract) => Self::compile_v2(contract, schema),
