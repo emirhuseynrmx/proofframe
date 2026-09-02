@@ -1,0 +1,40 @@
+name: Validate a data artifact with ProofFrame
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Replace these paths with a small, non-sensitive artifact and its contract.
+  DATA_PATH: tests/fixtures/orders.parquet
+  CONTRACT_PATH: contracts/orders.json
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ProofFrame
+        run: python -m pip install --upgrade proofframe
+      - name: Verify configured inputs
+        run: |
+          test -f "$DATA_PATH"
+          test -f "$CONTRACT_PATH"
+      - name: Enforce the contract
+        run: proofframe check "$DATA_PATH" --contract "$CONTRACT_PATH"
+      - name: Write validation evidence
+        run: >-
+          proofframe evidence "$DATA_PATH" --contract "$CONTRACT_PATH"
+          --output proofframe-evidence.json
+      - name: Upload validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proofframe-evidence
+          path: proofframe-evidence.json
+          if-no-files-found: error

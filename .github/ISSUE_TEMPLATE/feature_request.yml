@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a scoped improvement to ProofFrame.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem before proposing a solution. Do not include credentials, private keys, PII, or production data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who is affected, and what cannot be done today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the API, CLI, or workflow behavior you would like to see. Examples are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe workarounds or other approaches you considered.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable outcomes that would make this request complete.
+      placeholder: |
+        - A contract can ...
+        - The CLI returns ...
+        - Documentation explains ...
+    validations:
+      required: true
