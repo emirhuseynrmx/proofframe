@@ -154,10 +154,25 @@ def fingerprint(data: Any, *, version: str = "v1") -> str:
     return fingerprint_arrow(_as_reader(data), version)
 
 
+def _reference_readers(
+    references: Mapping[str, Any] | None,
+) -> list[tuple[str, Any]]:
+    """Turn the caller's mapping into the name/stream pairs the native layer takes.
+
+    Nothing is filtered here. A contract that declares a reference the caller did not
+    bind, and a binding no rule uses, are both rejected by the engine rather than
+    quietly skipped, because a foreign key that is not checked reports as one that held.
+    """
+    if not references:
+        return []
+    return [(str(name), _as_reader(data)) for name, data in references.items()]
+
+
 def check(
     data: Any,
     contract: Mapping[str, Any],
     *,
+    references: Mapping[str, Any] | None = None,
     max_memory: int = 512 * 1024 * 1024,
     max_temp: int = 4 * 1024 * 1024 * 1024,
     max_output_records: int = 100_000,
@@ -179,6 +194,7 @@ def check(
         max_output_records,
         max_samples,
         _threads(threads),
+        _reference_readers(references),
     )
 
 
@@ -186,6 +202,7 @@ def check_partitions(
     partitions: Sequence[Any],
     contract: Mapping[str, Any],
     *,
+    references: Mapping[str, Any] | None = None,
     max_memory: int = 512 * 1024 * 1024,
     max_temp: int = 4 * 1024 * 1024 * 1024,
     max_output_records: int = 100_000,
@@ -207,6 +224,7 @@ def check_partitions(
         max_output_records,
         max_samples,
         _threads(threads),
+        _reference_readers(references),
     )
 
 
@@ -214,6 +232,7 @@ def check_partitions_with_evidence(
     partitions: Sequence[Any],
     contract: Mapping[str, Any],
     *,
+    references: Mapping[str, Any] | None = None,
     max_memory: int = 512 * 1024 * 1024,
     max_temp: int = 4 * 1024 * 1024 * 1024,
     max_output_records: int = 100_000,
@@ -235,6 +254,7 @@ def check_partitions_with_evidence(
         max_output_records,
         max_samples,
         _threads(threads),
+        _reference_readers(references),
     )
 
 
@@ -242,6 +262,7 @@ def check_with_evidence(
     data: Any,
     contract: Mapping[str, Any],
     *,
+    references: Mapping[str, Any] | None = None,
     max_memory: int = 512 * 1024 * 1024,
     max_temp: int = 4 * 1024 * 1024 * 1024,
     max_output_records: int = 100_000,
@@ -263,6 +284,7 @@ def check_with_evidence(
         max_output_records,
         max_samples,
         _threads(threads),
+        _reference_readers(references),
     )
 
 

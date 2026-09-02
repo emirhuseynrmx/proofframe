@@ -11,8 +11,8 @@ use super::bounds::parse_bound;
 use super::{
     CompareOpAst, ComparePlan, CompositeNullPolicyAst, ContractAst, ContractAstV2,
     ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, NaNPolicyAst, NullPolicyAst,
-    OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst, RowPlan, RowPlanKind, RuleAst, RuleAstV2,
-    ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
+    OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan,
+    RowPlan, RowPlanKind, RuleAst, RuleAstV2, ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
 };
 use crate::{ErrorCode, ProofFrameError};
 
@@ -557,6 +557,42 @@ fn hash_dataset_plan(hasher: &mut blake3::Hasher, plan: &DatasetPlan) {
         hasher.update(&[match composite.nulls() {
             CompositeNullPolicyAst::Equal => 0,
             CompositeNullPolicyAst::Reject => 1,
+        }]);
+    }
+    hash_reference_plans(hasher, plan.references());
+}
+
+/// Append referential rules only when the plan carries them.
+///
+/// A plan without references and a plan with an empty reference list execute
+/// identically, so collapsing them is not a collision. Appending an unconditional
+/// zero count would instead be a silent break: every contract written before
+/// references existed would change its `pf-plan-v2` digest and stop matching the
+/// receipts already issued for it.
+fn hash_reference_plans(hasher: &mut blake3::Hasher, references: &[ReferencePlan]) {
+    if references.is_empty() {
+        return;
+    }
+    hasher.update(b"proofframe:compiled-plan:references:v1\0");
+    hasher.update(&(references.len() as u64).to_le_bytes());
+    for reference in references {
+        hash_part(hasher, reference.name().as_bytes());
+        hash_part(hasher, reference.reference().as_bytes());
+        hasher.update(&(reference.columns().len() as u64).to_le_bytes());
+        for (column, field) in reference.columns().iter().zip(reference.fields()) {
+            hasher.update(&(*column as u64).to_le_bytes());
+            hash_part(hasher, field.name().as_bytes());
+            hash_kernel(
+                hasher,
+                &KernelKind::from_data_type_for_plan(field.data_type()),
+            );
+        }
+        for column in reference.reference_columns() {
+            hash_part(hasher, column.as_bytes());
+        }
+        hasher.update(&[match reference.nulls() {
+            ReferenceNullPolicyAst::Skip => 0,
+            ReferenceNullPolicyAst::Reject => 1,
         }]);
     }
 }

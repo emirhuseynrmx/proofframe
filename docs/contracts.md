@@ -106,6 +106,7 @@ The conditional assertion supports `not_null`, `min`, `max`, `nan`, `pattern`, a
 | `distinct_count` | `{column: {"exact": n, "min": n, "max": n}}` | Exact distinct non-null count. |
 | `distinct_ratio` | `{column: {"min": x, "max": x}}` | Exact distinct count divided by total rows. |
 | `composite_unique` | array | Exact unique combinations of named columns. |
+| `references` | array | Every key must also appear in a named reference dataset. |
 
 ```json
 {
@@ -121,6 +122,75 @@ The conditional assertion supports `not_null`, `min`, `max`, `nan`, `pattern`, a
 
 For `composite_unique`, `nulls` is `"equal"` (the default) or `"reject"`. Exact distinct and
 composite state follow the resource limits supplied to the API or CLI.
+
+## Referential integrity
+
+A `references` rule states that every key in this dataset also exists in another one.
+
+```json
+{
+  "dataset_rules": {
+    "references": [{
+      "name": "orders_customer_fk",
+      "columns": ["customer_id"],
+      "reference": "customers",
+      "reference_columns": ["id"],
+      "nulls": "skip"
+    }]
+  }
+}
+```
+
+`reference` is a logical name, not a path. The contract says *what* must hold; the caller
+supplies the dataset it holds against:
+
+```python
+report = pf.check(orders, contract, references={"customers": customers})
+```
+
+```bash
+proofframe check orders.parquet --contract contract.json \
+  --reference customers=customers.parquet
+```
+
+**The rule is checked or the run fails.** A contract that declares a reference the caller did
+not bind is an error, not a skipped rule, because a foreign key that is never evaluated
+reports as one that held. A bound dataset that no rule uses is an error too: it is almost
+always a misspelled name, which would otherwise look like it had been checked.
+
+`columns` and `reference_columns` pair **by position**, so the two datasets may name the same
+identity differently, and both sides must have equal length. The Arrow types must match at
+each position — the key encoding is type-tagged, so an `Int32` key would never match an
+`Int64` one and every row would report as a violation. Rejecting the pair is the honest
+answer. Timestamps compare by unit; a timezone is display metadata over the same ticks.
+
+`nulls` is `"skip"` (the default) or `"reject"`. Skipping matches SQL: a key that is partly
+unknown is not a claim about membership. Nulls on the *reference* side are never identities
+anything can match, whichever policy the rule sets.
+
+Findings report the first row that carried each absent key, and `violation_count` counts
+**distinct absent keys** rather than the rows carrying them. The report also records what the
+keys were resolved against:
+
+```json
+"references": [{
+  "name": "orders_customer_fk",
+  "reference": "customers",
+  "reference_fingerprint": "pf-fp-v2:…",
+  "reference_rows": 4096,
+  "reference_distinct_keys": 4096,
+  "checked_distinct_keys": 812,
+  "missing_distinct_keys": 0
+}]
+```
+
+The fingerprint is the point of that record: "the foreign key held" is not a verifiable claim
+unless it also says which dataset it held against. Reference rules use the same bounded,
+spilling exact-set machinery as uniqueness and stay within the supplied resource limits.
+
+Under `check_partitions`, a reference rule puts the run on the single ordered traversal, so
+every key resolves against the whole reference dataset exactly once however the subject was
+partitioned.
 
 ## Suggestion provenance
 

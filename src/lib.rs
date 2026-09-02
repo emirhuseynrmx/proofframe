@@ -25,17 +25,20 @@ pub use contract::{
     CompiledRules, CompositeNullPolicyAst, CompositeUniqueAst, CompositeUniquePlan, ContractAst,
     ContractAstV2, ContractDocument, ContractVersion, CountPlan, CountRangeAst, DatasetPlan,
     DatasetRulesAst, KernelKind, NaNPolicy, NaNPolicyAst, NullPolicyAst, OperandAst, OperandPlan,
-    ParameterizedTypeAst, PrimitiveTypeAst, RatioPlan, RatioRangeAst, RowPlan, RowPlanKind,
-    RowRuleAst, RuleAst, RuleAstV2, ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
+    ParameterizedTypeAst, PrimitiveTypeAst, RatioPlan, RatioRangeAst, ReferenceAst,
+    ReferenceNullPolicyAst, ReferencePlan, RowPlan, RowPlanKind, RowRuleAst, RuleAst, RuleAstV2,
+    ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
 };
 pub use diff::{DiffMetrics, DiffOptions, DiffOutput, SpillPolicy, diff_readers_with_options};
 pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};
 pub use encoding::{Fingerprint, FingerprintOptions, FingerprintVersion};
 pub use error::{ErrorCode, ProofFrameError};
 pub use execution::{
-    CancellationToken, ExecutionOptions, MemoryReservation, PartitionReader, ResourceAccount,
-    ResourceLimits, TempReservation, check_partition_readers,
-    check_partition_readers_with_evidence, execute_reader, execute_reader_with_fingerprint,
+    CancellationToken, ExecutionOptions, MemoryReservation, PartitionReader, ReferenceBindings,
+    ReferenceOutcome, ResourceAccount, ResourceLimits, TempReservation, check_partition_readers,
+    check_partition_readers_with_evidence, check_partition_readers_with_evidence_and_references,
+    check_partition_readers_with_references, execute_reader, execute_reader_with_fingerprint,
+    execute_reader_with_fingerprint_and_references, execute_reader_with_references,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
 pub use suggest::{SuggestOptions, suggest_reader_with_options};
@@ -272,6 +275,8 @@ pub struct FastValidationReport {
     pub compiled_plan_digest: String,
     /// Arrow schema identity used for plan compilation and every scanned batch.
     pub schema_digest: String,
+    /// One entry per reference rule, naming and fingerprinting the dataset it resolved against.
+    pub references: Vec<ReferenceOutcome>,
 }
 
 struct ValidationOutcome {

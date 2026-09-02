@@ -1,7 +1,51 @@
-use arrow::datatypes::Schema;
+use arrow::datatypes::{FieldRef, Schema};
 
-use super::{CompositeNullPolicyAst, ContractAstV2, CountRangeAst, RatioRangeAst};
+use super::{
+    CompositeNullPolicyAst, ContractAstV2, CountRangeAst, RatioRangeAst, ReferenceNullPolicyAst,
+};
 use crate::{ErrorCode, KernelKind, ProofFrameError};
+
+/// One resolved referential integrity rule.
+///
+/// Only the local side resolves at compile time. The reference columns stay as names
+/// because the reference dataset is supplied per execution, not per contract, and its
+/// schema is therefore unknown until the caller binds it.
+#[derive(Debug, Clone)]
+pub struct ReferencePlan {
+    name: Box<str>,
+    pub(crate) columns: Vec<usize>,
+    pub(crate) fields: Vec<FieldRef>,
+    pub(crate) reference: Box<str>,
+    pub(crate) reference_columns: Vec<Box<str>>,
+    pub(crate) nulls: ReferenceNullPolicyAst,
+}
+
+impl ReferencePlan {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub fn columns(&self) -> &[usize] {
+        &self.columns
+    }
+    #[must_use]
+    pub fn fields(&self) -> &[FieldRef] {
+        &self.fields
+    }
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+    #[must_use]
+    pub fn reference_columns(&self) -> &[Box<str>] {
+        &self.reference_columns
+    }
+    #[must_use]
+    pub const fn nulls(&self) -> ReferenceNullPolicyAst {
+        self.nulls
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RatioPlan {
@@ -86,6 +130,7 @@ pub struct DatasetPlan {
     pub(crate) distinct_counts: Vec<CountPlan>,
     pub(crate) distinct_ratios: Vec<RatioPlan>,
     pub(crate) composite_unique: Vec<CompositeUniquePlan>,
+    pub(crate) references: Vec<ReferencePlan>,
 }
 
 impl DatasetPlan {
@@ -95,6 +140,7 @@ impl DatasetPlan {
             && self.distinct_counts.is_empty()
             && self.distinct_ratios.is_empty()
             && self.composite_unique.is_empty()
+            && self.references.is_empty()
     }
 
     pub(crate) fn compile(
@@ -145,18 +191,57 @@ impl DatasetPlan {
                 })
             })
             .collect::<Result<Vec<_>, ProofFrameError>>()?;
+        let references = rules
+            .references
+            .iter()
+            .enumerate()
+            .map(|(rule_index, rule)| {
+                let mut columns = Vec::with_capacity(rule.columns.len());
+                let mut fields = Vec::with_capacity(rule.columns.len());
+                for (column_index, column) in rule.columns.iter().enumerate() {
+                    let resolved = schema.index_of(column).map_err(|_| {
+                        ProofFrameError::contract(
+                            ErrorCode::MissingColumn,
+                            format!("Reference key column `{column}` is absent"),
+                            Some(format!(
+                                "$.dataset_rules.references[{rule_index}].columns[{column_index}]"
+                            )),
+                        )
+                    })?;
+                    columns.push(resolved);
+                    fields.push(schema.field(resolved).clone().into());
+                }
+                Ok(ReferencePlan {
+                    name: rule.name.clone().into_boxed_str(),
+                    columns,
+                    fields,
+                    reference: rule.reference.clone().into_boxed_str(),
+                    reference_columns: rule
+                        .reference_columns
+                        .iter()
+                        .map(|column| column.clone().into_boxed_str())
+                        .collect(),
+                    nulls: rule.nulls,
+                })
+            })
+            .collect::<Result<Vec<_>, ProofFrameError>>()?;
         Ok(Self {
             row_count: rules.row_count.clone(),
             null_ratios,
             distinct_counts,
             distinct_ratios,
             composite_unique,
+            references,
         })
     }
 
     #[must_use]
     pub fn composite_unique(&self) -> &[CompositeUniquePlan] {
         &self.composite_unique
+    }
+    #[must_use]
+    pub fn references(&self) -> &[ReferencePlan] {
+        &self.references
     }
     #[must_use]
     pub const fn row_count(&self) -> Option<&CountRangeAst> {

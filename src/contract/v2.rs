@@ -215,12 +215,37 @@ pub struct CompositeUniqueAst {
     pub nulls: CompositeNullPolicyAst,
 }
 
+/// Null handling for the local key of a referential integrity rule.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceNullPolicyAst {
+    /// A key with any null part is not looked up in the reference.
+    #[default]
+    Skip,
+    /// A key with any null part is a violation without a lookup.
+    Reject,
+}
+
+/// Every local key must also appear in a named reference dataset.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceAst {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub reference: String,
+    pub reference_columns: Vec<String>,
+    #[serde(default)]
+    pub nulls: ReferenceNullPolicyAst,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetRulesAst {
     pub row_count: Option<CountRangeAst>,
     #[serde(default)]
     pub composite_unique: Vec<CompositeUniqueAst>,
+    #[serde(default)]
+    pub references: Vec<ReferenceAst>,
     #[serde(default)]
     pub null_ratio: BTreeMap<String, RatioRangeAst>,
     #[serde(default)]
@@ -302,7 +327,60 @@ fn validate_semantics(contract: &ContractAstV2) -> Result<(), ProofFrameError> {
             ));
         }
     }
+    validate_references(contract)?;
     Ok(())
+}
+
+fn validate_references(contract: &ContractAstV2) -> Result<(), ProofFrameError> {
+    let mut names = BTreeSet::new();
+    for (index, rule) in contract.dataset_rules.references.iter().enumerate() {
+        let path = format!("$.dataset_rules.references[{index}]");
+        if rule.name.is_empty() || !names.insert(rule.name.as_str()) {
+            return Err(ProofFrameError::contract(
+                ErrorCode::ContractDuplicateRule,
+                format!("Reference rule name `{}` is empty or duplicated", rule.name),
+                Some(format!("{path}.name")),
+            ));
+        }
+        if rule.reference.is_empty() {
+            return Err(invalid(
+                "A reference rule must name the reference dataset it binds to",
+                &format!("{path}.reference"),
+            ));
+        }
+        if rule.columns.is_empty() {
+            return Err(invalid(
+                "A reference rule requires at least one local key column",
+                &format!("{path}.columns"),
+            ));
+        }
+        // The two key sides are matched by position, so an unequal arity has no
+        // reading that is not a guess about which column pairs with which.
+        if rule.columns.len() != rule.reference_columns.len() {
+            return Err(invalid(
+                "A reference rule pairs key columns by position, so both sides need equal lengths",
+                &format!("{path}.reference_columns"),
+            ));
+        }
+        if has_duplicate(&rule.columns) {
+            return Err(invalid(
+                "A reference key repeats a local column",
+                &format!("{path}.columns"),
+            ));
+        }
+        if has_duplicate(&rule.reference_columns) {
+            return Err(invalid(
+                "A reference key repeats a reference column",
+                &format!("{path}.reference_columns"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn has_duplicate(columns: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    !columns.iter().all(|column| seen.insert(column.as_str()))
 }
 
 fn validate_ratio(range: &RatioRangeAst, path: &str) -> Result<(), ProofFrameError> {

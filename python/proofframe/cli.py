@@ -146,9 +146,27 @@ def _add_resource_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-samples", type=_non_negative_int, default=DEFAULT_SAMPLES)
 
 
+def _reference_binding(value: str) -> tuple[str, str]:
+    """Parse one `name=path` binding for a contract's reference rules."""
+    name, separator, path = value.partition("=")
+    if not separator or not name or not path:
+        raise argparse.ArgumentTypeError(
+            f"expected a reference binding as name=path, got {value!r}"
+        )
+    return name, path
+
+
 def _add_check_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("path")
     parser.add_argument("--contract", required=True)
+    parser.add_argument(
+        "--reference",
+        action="append",
+        default=[],
+        type=_reference_binding,
+        metavar="NAME=PATH",
+        help="bind a dataset to a referential integrity rule; repeatable",
+    )
     _add_stream_options(parser)
     _add_resource_options(parser)
 
@@ -186,6 +204,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     evidence_parser.add_argument("path")
     evidence_parser.add_argument("--contract", required=True)
+    evidence_parser.add_argument(
+        "--reference",
+        action="append",
+        default=[],
+        type=_reference_binding,
+        metavar="NAME=PATH",
+        help="bind a dataset to a referential integrity rule; repeatable",
+    )
     evidence_parser.add_argument("--output")
     _add_stream_options(evidence_parser)
     _add_resource_options(evidence_parser)
@@ -261,11 +287,26 @@ def _write_json_atomic(path: str | Path, value: Mapping[str, Any]) -> None:
             Path(temporary_name).unlink(missing_ok=True)
 
 
+def _references(args: argparse.Namespace) -> dict[str, Any]:
+    """Open every bound reference dataset as its own stream.
+
+    A repeated name would silently keep only the last binding, which is the kind of
+    typo that makes a foreign key look checked when it was not.
+    """
+    streams: dict[str, Any] = {}
+    for name, path in getattr(args, "reference", []) or []:
+        if name in streams:
+            raise ValueError(f"reference dataset `{name}` was bound more than once")
+        streams[name] = _open_reader(path, args.batch_size)
+    return streams
+
+
 def _check(args: argparse.Namespace) -> dict[str, Any]:
     contract = _load_mapping(args.contract, "contract")
     return check(
         _open_reader(args.path, args.batch_size),
         contract,
+        references=_references(args),
         max_memory=args.max_memory,
         max_temp=args.max_temp,
         max_output_records=args.max_output_records,
@@ -302,6 +343,7 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         checked = check_with_evidence(
             _open_reader(args.path, args.batch_size),
             _load_mapping(args.contract, "contract"),
+            references=_references(args),
             max_memory=args.max_memory,
             max_temp=args.max_temp,
             max_output_records=args.max_output_records,

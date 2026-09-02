@@ -5,7 +5,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 
-use super::{ExecutionOptions, ResourceAccount, execute_reader, execute_reader_inner_with_account};
+use super::{ExecutionOptions, ResourceAccount, execute_reader_inner_with_account};
 use crate::encoding::V2FingerprintState;
 use crate::evidence::{
     PartitionEvidenceV1, PartitionManifestV1, partition_result_digest, validation_result_digest,
@@ -27,6 +27,20 @@ pub fn check_partition_readers(
     plan: &CompiledContract,
     options: &ExecutionOptions,
 ) -> Result<FastValidationReport, ProofFrameError> {
+    check_partition_readers_with_references(readers, plan, options, super::ReferenceBindings::new())
+}
+
+/// Validate ordered partitions whose reference rules resolve against `references`.
+///
+/// A reference rule makes the dataset plan non-empty, so the partitions are traversed as one
+/// ordered sequence and every key is resolved against the whole reference dataset exactly
+/// once, independently of how the data was partitioned.
+pub fn check_partition_readers_with_references(
+    readers: Vec<PartitionReader>,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    references: super::ReferenceBindings,
+) -> Result<FastValidationReport, ProofFrameError> {
     options.cancellation.check()?;
     for reader in &readers {
         if reader.schema().as_ref() != plan.schema() {
@@ -36,11 +50,21 @@ pub fn check_partition_readers(
         }
     }
     if readers.is_empty() || requires_global_state(plan) {
-        return execute_reader(
+        return super::execute_reader_with_references(
             PartitionSequence::new(readers, Arc::new(plan.schema().clone())),
             plan,
             options,
+            references,
         );
+    }
+    // Without global state there are no reference rules, so an unused binding here is the
+    // same caller mistake `prepare` rejects on the ordered path.
+    if !references.is_empty() {
+        return Err(ProofFrameError::contract(
+            crate::ErrorCode::ReferenceUnbound,
+            "No reference rule uses the bound reference datasets",
+            None,
+        ));
     }
     execute_independent_partitions(readers, plan, options)
 }
@@ -51,6 +75,23 @@ pub fn check_partition_readers_with_evidence(
     plan: &CompiledContract,
     contract_source_digest: &str,
     options: &ExecutionOptions,
+) -> Result<(FastValidationReport, PartitionManifestV1), ProofFrameError> {
+    check_partition_readers_with_evidence_and_references(
+        readers,
+        plan,
+        contract_source_digest,
+        options,
+        super::ReferenceBindings::new(),
+    )
+}
+
+/// Bind partition fingerprints into a manifest while resolving reference rules.
+pub fn check_partition_readers_with_evidence_and_references(
+    readers: Vec<PartitionReader>,
+    plan: &CompiledContract,
+    contract_source_digest: &str,
+    options: &ExecutionOptions,
+    references: super::ReferenceBindings,
 ) -> Result<(FastValidationReport, PartitionManifestV1), ProofFrameError> {
     if readers.is_empty() {
         return Err(ProofFrameError::InvalidContract(
@@ -75,7 +116,7 @@ pub fn check_partition_readers_with_evidence(
         Arc::new(plan.schema().clone()),
         Arc::clone(&fingerprints),
     )?;
-    let report = execute_reader(sequence, plan, options)?;
+    let report = super::execute_reader_with_references(sequence, plan, options, references)?;
     let schema_digest = report.schema_digest.clone();
     let compiled_plan_digest = report.compiled_plan_digest.clone();
     let report_value = serde_json::to_value(&report)?;
@@ -157,9 +198,18 @@ fn execute_independent_partitions(
                         options.resources.max_memory_bytes,
                         options.resources.max_temp_bytes,
                     );
-                    let result =
-                        execute_reader_inner_with_account(reader, plan, options, false, account)
-                            .map(|(report, _)| report);
+                    // Reference rules live in the dataset plan, so `requires_global_state`
+                    // has already routed them to the single ordered traversal; a partition
+                    // reaching this worker never has one to resolve.
+                    let result = execute_reader_inner_with_account(
+                        reader,
+                        plan,
+                        options,
+                        false,
+                        account,
+                        super::ReferenceBindings::new(),
+                    )
+                    .map(|(report, _)| report);
                     results
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())[index] = Some(result);
@@ -218,6 +268,7 @@ fn merge_reports(
             .saturating_add(report.metrics.capacity_growth_events);
     }
     Ok(FastValidationReport {
+        references: Vec::new(),
         valid: violation_count == 0,
         violation_count,
         truncated: (findings.len() as u64) < violation_count,
