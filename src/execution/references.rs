@@ -216,7 +216,7 @@ fn scan_reference(
             // A null on the reference side is not an identity anything can match, so it
             // never enters the set. Local nulls are governed separately by the rule's
             // null policy.
-            if let Some(()) = encode_key(&batch, &indexes, row, &mut scratch)? {
+            if encode_key(&batch, &indexes, row, &mut scratch)? {
                 state.insert(ValueRef::Bytes(&scratch), rows + row as u64)?;
             }
         }
@@ -330,9 +330,7 @@ impl ReferenceState {
         for entry in &mut self.entries {
             for row in 0..batch.num_rows() {
                 let global_row = row_offset + row as u64;
-                let encoded =
-                    encode_key(batch, entry.plan.columns(), row, &mut entry.scratch)?.is_some();
-                if encoded {
+                if encode_key(batch, entry.plan.columns(), row, &mut entry.scratch)? {
                     entry
                         .local
                         .insert(ValueRef::Bytes(&entry.scratch), global_row)?;
@@ -395,7 +393,7 @@ impl ReferenceState {
     }
 }
 
-/// Encode one composite key, or report that it carried a null.
+/// Encode one composite key into `output`, reporting `false` when it carried a null.
 ///
 /// The key is positional and type-tagged, never named: the two sides of a reference rule
 /// routinely use different column names for the same identity.
@@ -404,15 +402,15 @@ fn encode_key(
     indexes: &[usize],
     row: usize,
     output: &mut Vec<u8>,
-) -> Result<Option<()>, ProofFrameError> {
+) -> Result<bool, ProofFrameError> {
     output.clear();
     for (ordinal, index) in indexes.iter().enumerate() {
         let array = batch.column(*index);
         if array.is_null(row) {
-            return Ok(None);
+            return Ok(false);
         }
         output.extend_from_slice(&(ordinal as u64).to_le_bytes());
         super::dataset_state::append_scalar(array.as_ref(), row, output)?;
     }
-    Ok(Some(()))
+    Ok(true)
 }
