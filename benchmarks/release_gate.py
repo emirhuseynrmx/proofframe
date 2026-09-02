@@ -375,6 +375,24 @@ def _perf_counters(args: argparse.Namespace, case: str) -> dict[str, Any]:
     return counters
 
 
+def _measured_proofframe_version() -> str:
+    """Return the version of the module the benchmark actually exercised.
+
+    `importlib.metadata` reports the installed distribution, which is not
+    necessarily the module on `sys.path`. Recording the installed version would
+    let an artifact carry a subject it never measured, so a disagreement is an
+    error rather than a silent relabelling.
+    """
+    imported = proofframe.__version__
+    installed = version("proofframe")
+    if imported != installed:
+        raise ArtifactError(
+            "benchmark subject is ambiguous: imported proofframe "
+            f"{imported} but the installed distribution is {installed}"
+        )
+    return imported
+
+
 def _iqr(samples: list[float]) -> float:
     quartiles = statistics.quantiles(samples, n=4, method="inclusive")
     return quartiles[2] - quartiles[0]
@@ -661,7 +679,7 @@ def main() -> None:
         "compiler": _compiler(),
         "runtime": {
             "python": platform.python_version(),
-            "proofframe": version("proofframe"),
+            "proofframe": _measured_proofframe_version(),
             "pyarrow": version("pyarrow"),
             "numpy": version("numpy"),
         },
