@@ -32,24 +32,24 @@ ProofFrame keeps these answers deterministic and resource-bounded. Exact uniquen
 leakage operations have explicit memory, temporary-storage, sample, and output limits. Corrupt
 temporary data, incompatible schemas, ambiguous contracts, and exceeded limits fail closed.
 
-> **Current release — 0.5.1**
+> **Current release — 0.6.0**
 >
-> 0.5.1 adds strict cross-column and conditional rules, exact dataset-level constraints,
-> deterministic partition validation, and ordered partition manifests. Python and Rust execute the
-> same native plan. V1 contracts and both fingerprint protocols remain frozen.
+> 0.6.0 adds review-required contract suggestions, complete contract and API guides, runnable
+> workflows, and practical integration examples. Existing V1/V2 contract and fingerprint protocols
+> remain compatible.
 
 ## Install
 
 Python 3.10–3.13:
 
 ```bash
-pip install proofframe==0.5.1
+pip install proofframe==0.6.0
 ```
 
 Rust 1.85 or newer:
 
 ```bash
-cargo add proofframe@0.5.1
+cargo add proofframe@0.6.0
 ```
 
 ## The 30-second demo
@@ -96,6 +96,23 @@ assert report["violation_count"] == 1
 The contract is compiled before scanning. Unknown fields, missing required columns, invalid bounds,
 and rules that do not match the Arrow type are rejected before the first row is processed.
 `violation_count` remains exact even when the retained `findings` sample is truncated.
+
+## Start from a reviewable draft
+
+Use the native suggestion scanner to create a V2 draft, then inspect it before activation:
+
+```bash
+proofframe suggest data.parquet > contract.json
+# Review contract.json and set "status" to "active" before checking it.
+proofframe check data.parquet --contract contract.json
+```
+
+`suggest` performs its own Arrow scan so it can preserve exact integer bounds. It infers
+types and non-null columns by default; uniqueness, required columns, and category allowlists
+are explicit opt-ins. Timestamp and monotonically increasing numeric ranges are deliberately
+omitted and recorded in `suggested_from.review`. A `draft` is rejected with
+`PF_DRAFT_CONTRACT` until a reviewer changes its status to `active`. See the
+[five-minute guide](docs/getting-started.md) and [contract reference](docs/contracts.md).
 
 ## Cross-column and conditional rules
 
@@ -255,6 +272,22 @@ Known DataFrame containers provide exact row and logical-byte hints. Stream-only
 streaming. The Rust scan releases the Python GIL, and the ProofFrame crate itself uses
 `#![forbid(unsafe_code)]`.
 
+## Where ProofFrame fits
+
+ProofFrame is strongest when you need Arrow-native, exact checks with bounded resources and
+evidence that records both the contract source and executable plan. It is deliberately smaller
+than established data-quality platforms.
+
+| Tool | Prefer it when | ProofFrame trade-off |
+| --- | --- | --- |
+| [Pandera](https://pandera.readthedocs.io/) | You want Python-first dataframe schemas, typing, and familiar pandas workflows. | ProofFrame prioritizes Arrow streams, exact global rules, and evidence over dataframe typing ergonomics. |
+| [Great Expectations](https://docs.greatexpectations.io/) | You need a large expectation library, data docs, and broad orchestration connectors. | ProofFrame has a narrower rule surface and fewer integrations, but keeps validation and proof artifacts compact. |
+| [Soda](https://docs.soda.io/) | You want monitors, alerting, and a mature data-observability workflow. | ProofFrame is a library/CLI for deterministic checks; it does not replace an observability platform. |
+| [Deequ](https://github.com/awslabs/deequ) | Your data platform is Spark/Scala and you value its constraint-suggestion ecosystem. | ProofFrame avoids a Spark dependency and works directly with Arrow, but does not provide Deequ's Spark ecosystem. |
+
+These tools can coexist: use ProofFrame at an Arrow boundary when repeatable checks, resource
+limits, and independently verifiable evidence matter.
+
 ## CLI
 
 ```bash
@@ -284,7 +317,7 @@ by the Python wheels. See the [crate guide](README-crates.md) and [API documenta
 
 ## Compatibility and performance evidence
 
-The 0.5 line preserves V1 fingerprints and the established compatibility entry points. New work
+Version 0.6.0 preserves V1 fingerprints and the established compatibility entry points. New work
 should use `check`, explicit fingerprint versions, Evidence V2, and Receipt V2.
 
 Performance claims are tied to raw samples, dataset hashes, compiler and package versions, and

@@ -4,13 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "proofframe"
-version = "0.5.1"
-description = "Rust-native data contracts, canonical fingerprints, and proof receipts for DataFrames."
+version = "0.6.0"
+description = "Rust-native Arrow contracts, exact checks, fingerprints, and verifiable evidence."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Emir Huseyin Inci" }]
-keywords = ["data-quality", "dataframe", "arrow", "parquet", "pandas", "polars"]
+keywords = ["data-quality", "data-contracts", "arrow", "parquet", "pandas", "polars"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Programming Language :: Python :: 3",

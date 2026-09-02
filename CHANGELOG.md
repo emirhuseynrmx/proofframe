@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- Added review-required V2 contract suggestions for Arrow, pandas, and Polars data, with typed
+  schema rules, exact optional uniqueness, bounded optional categories, and safe range omissions.
+- Added `proofframe suggest` plus complete getting-started, contract, API, and concepts guides.
+- Added runnable workflows, integration examples, contributor guidance, and a refreshed release banner.
+
 ## 0.5.1
 
 - Added strict Contract V2 cross-column comparisons and conditional assertions compiled to typed

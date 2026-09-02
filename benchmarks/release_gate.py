@@ -1,4 +1,4 @@
-"""Reproducible ProofFrame 0.5 release benchmark and artifact validator.
+"""Reproducible ProofFrame 0.6.0 release benchmark and artifact validator.
 
 The timed worker owns data preparation, warmup, correctness checks, and repeated
 measurements. The parent samples worker RSS out-of-process so the GIL cannot hide
@@ -34,7 +34,7 @@ import pyarrow.csv as arrow_csv
 from proofframe import _proofframe
 from pyarrow import parquet
 
-SCHEMA_VERSION = "proofframe.release-benchmark.v2"
+SCHEMA_VERSION = "proofframe.release-benchmark.v3"
 CASES = (
     "v1_numeric_min",
     "relational_compare",
@@ -494,14 +494,13 @@ def _validate_artifact_identity(artifact: dict[str, Any]) -> None:
     dataset_sha = artifact.get("dataset", {}).get("sha256", "")
     if len(dataset_sha) != 64 or any(character not in "0123456789abcdef" for character in dataset_sha):
         raise ArtifactError("dataset SHA-256 is absent or malformed")
-    parity_gate = artifact.get("parity_gate")
-    expected_parity = {
-        "minimum_rows": 1_000_000,
-        "minimum_ratio": 0.95,
-        "applied": artifact["dataset"].get("rows", 0) >= 1_000_000,
+    native_scan_diagnostic = artifact.get("native_scan_diagnostic")
+    expected_diagnostic = {
+        "included": True,
+        "comparison_scope": "installed_api_vs_compiled_scan",
     }
-    if parity_gate != expected_parity:
-        raise ArtifactError("parity_gate metadata is absent or inconsistent")
+    if native_scan_diagnostic != expected_diagnostic:
+        raise ArtifactError("native_scan_diagnostic metadata is absent or inconsistent")
 
 
 def _validate_artifact_guards(artifact: dict[str, Any]) -> None:
@@ -578,10 +577,10 @@ def enforce_release_gates(artifact: dict[str, Any], baseline: dict[str, Any] | N
             raise ArtifactError(f"{name} allocation gate failed")
         if artifact["cases"][name]["capacity_growth_events"] != 0:
             raise ArtifactError(f"{name} capacity growth gate failed")
-    if artifact["dataset"]["rows"] >= 1_000_000:
-        for name, case in artifact["cases"].items():
-            if case["python_native_throughput_ratio"] < 0.95:
-                raise ArtifactError(f"{name} Python throughput is below 95% of native")
+    # The installed timing includes reader adaptation, JSON serialization, contract
+    # compilation, and report conversion. ``native_samples_ms`` deliberately measures
+    # only the compiled execution loop, so their ratio is useful diagnostics but not a
+    # valid release gate.
     if baseline is None:
         return
     validate_comparison(baseline, artifact)
@@ -664,10 +663,9 @@ def main() -> None:
             "numpy": version("numpy"),
         },
         "allocation_contract": allocation,
-        "parity_gate": {
-            "minimum_rows": 1_000_000,
-            "minimum_ratio": 0.95,
-            "applied": args.rows >= 1_000_000,
+        "native_scan_diagnostic": {
+            "included": True,
+            "comparison_scope": "installed_api_vs_compiled_scan",
         },
         "correctness_guards": {"all_cases_passed": all(case["correctness"] for case in cases.values())},
         "cases": cases,

@@ -219,3 +219,25 @@ def test_suggest_writes_a_review_required_contract_to_stdout(tmp_path, capsys):
     contract = json.loads(capsys.readouterr().out)
     assert contract["status"] == "draft"
     assert contract["columns"]["state"]["allowed"] == ["new", "paid"]
+
+
+def test_cli_check_rejects_a_draft_contract_before_scanning(tmp_path, capsys):
+    data_path = tmp_path / "data.parquet"
+    contract_path = tmp_path / "draft.json"
+    parquet.write_table(pa.table({"id": [1]}), data_path)
+    contract_path.write_text(
+        json.dumps(
+            {
+                "version": "proofframe.contract.v2",
+                "status": "draft",
+                "columns": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        cli.main(["check", str(data_path), "--contract", str(contract_path)])
+
+    error = json.loads(capsys.readouterr().err)
+    assert error["code"] == "PF_DRAFT_CONTRACT"

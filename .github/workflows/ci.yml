@@ -50,7 +50,7 @@ jobs:
           args: --release --locked --out dist --compatibility pypi
       - run: python -m pip install --no-index --find-links dist --no-deps proofframe
       - run: python -m pytest -q --basetemp target/pytest-ci
-      - run: python -c "import proofframe; assert proofframe.__version__ == '0.5.1'"
+      - run: python -c "import proofframe; assert proofframe.__version__ == '0.6.0'"
 
   python-quality:
     name: Python quality and coverage
@@ -80,8 +80,8 @@ jobs:
           maturin sdist --out target/source-artifacts
           python scripts/source_artifacts.py \
             --output target/source-artifacts \
-            --verify target/source-artifacts/proofframe-0.5.1.tar.gz
-          python -m twine check target/source-artifacts/proofframe-0.5.1.tar.gz
+            --verify target/source-artifacts/proofframe-0.6.0.tar.gz
+          python -m twine check target/source-artifacts/proofframe-0.6.0.tar.gz
       - uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: ./coverage.xml

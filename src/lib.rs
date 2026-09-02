@@ -3,7 +3,7 @@
 //!
 //! The crate exposes a Rust-native API by default. The Python extension module is available behind
 //! the `python` feature and is enabled by the PyPI build configuration. Core invariants are stable
-//! enough for the stable 0.5 line: versioned canonical dataset fingerprints, compiled relational
+//! enough for the stable 0.6.0 release: versioned canonical dataset fingerprints, compiled relational
 //! and dataset contracts, disk-backed exact state, deterministic partitions, and signed evidence.
 
 mod contract;

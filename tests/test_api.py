@@ -2,6 +2,7 @@ import base64
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 import polars as pl
@@ -80,6 +81,62 @@ def test_suggest_contract_defaults_to_safe_inference_and_exact_integer_bounds():
     assert contract["suggested_from"]["uniqueness_inferred"] is False
     assert "distinct_ratio" not in contract["dataset_rules"]
     assert "allowed" not in contract["columns"]["state"]
+
+
+def test_suggest_contract_makes_costly_and_brittle_rules_explicitly_opt_in():
+    source = pa.table(
+        {
+            "id": [1, 3, 2],
+            "event_at": pa.array(
+                [
+                    datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    datetime(2026, 1, 2, tzinfo=timezone.utc),
+                    datetime(2026, 1, 3, tzinfo=timezone.utc),
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "state": ["paid", "new", "paid"],
+            "optional_note": [None, "review", None],
+        }
+    )
+
+    contract = proofframe.suggest_contract(
+        source,
+        infer_uniqueness=True,
+        infer_categories=True,
+        max_categories=2,
+        infer_required=True,
+        range_tolerance=0.2,
+    )
+
+    assert contract["columns"]["id"] == {
+        "type": "int64",
+        "not_null": True,
+        "required": True,
+        "min": 0,
+        "max": 4,
+    }
+    assert contract["columns"]["state"]["allowed"] == ["new", "paid"]
+    assert "not_null" not in contract["columns"]["optional_note"]
+    assert contract["dataset_rules"]["distinct_ratio"]["id"] == {"min": 1.0}
+    assert contract["dataset_rules"]["row_count"] == {"min": 3}
+    assert {
+        "column": "event_at",
+        "reason": "timestamp_range_omitted",
+    } in contract["suggested_from"]["review"]
+
+
+def test_suggest_contract_omits_monotonic_numeric_ranges_and_validates_options():
+    contract = proofframe.suggest_contract(pa.table({"sequence": [10, 11, 12]}))
+
+    assert "min" not in contract["columns"]["sequence"]
+    assert "max" not in contract["columns"]["sequence"]
+    assert {
+        "column": "sequence",
+        "reason": "monotonic_range_omitted",
+    } in contract["suggested_from"]["review"]
+    with pytest.raises(ValueError, match="finite"):
+        proofframe.suggest_contract(pa.table({"id": [1]}), range_tolerance=float("nan"))
 
 
 def test_exact_profile_accepts_hard_resource_limits():

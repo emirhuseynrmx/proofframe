@@ -1,0 +1,372 @@
+{
+  "allocation_contract": {
+    "command": "C:\\Users\\emirh\\.cargo\\bin\\cargo.EXE test --release --locked --test allocation_contract",
+    "error": null,
+    "passed": true
+  },
+  "cases": {
+    "composite_memory": {
+      "allocation_evidence": "not instrumented for this case",
+      "allocations_per_row": null,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 48001600,
+      "engine_peak_temp_bytes": 48000120,
+      "fingerprint_version": "v1",
+      "iqr_ms": 105.48845000000006,
+      "median_ms": 1431.5701,
+      "native_median_ms": 1401.5338,
+      "native_rows_per_second": 713504.0196675956,
+      "native_samples_ms": [
+        1323.2488,
+        1364.8924,
+        1399.2762,
+        1449.403,
+        1401.5338,
+        1483.9654,
+        1610.32
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 171237376,
+      "python_native_throughput_ratio": 0.979018631361468,
+      "rows_per_second": 698533.7288058755,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        1269.1236,
+        1431.5701,
+        1391.1463,
+        1409.7282,
+        1513.6513,
+        1514.9714,
+        1498.2001
+      ],
+      "spill_bytes": 48000120
+    },
+    "composite_spill": {
+      "allocation_evidence": "not instrumented for this case",
+      "allocations_per_row": null,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 189096,
+      "engine_peak_temp_bytes": 93496056,
+      "fingerprint_version": "v1",
+      "iqr_ms": 667.7063500000004,
+      "median_ms": 11066.2241,
+      "native_median_ms": 10841.7083,
+      "native_rows_per_second": 92236.38676941713,
+      "native_samples_ms": [
+        10841.7083,
+        11915.8837,
+        11710.9794,
+        10655.7202,
+        10785.5427,
+        10012.1598,
+        11364.6608
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 125128704,
+      "python_native_throughput_ratio": 0.9797116163588265,
+      "rows_per_second": 90365.05956896355,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        11336.8724,
+        12413.2831,
+        11640.2077,
+        11066.2241,
+        10591.9504,
+        11049.717,
+        9158.0916
+      ],
+      "spill_bytes": 48000600
+    },
+    "conditional_assertion": {
+      "allocation_evidence": "tests/allocation_contract.rs",
+      "allocations_per_row": 0.0,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 0,
+      "engine_peak_temp_bytes": 0,
+      "fingerprint_version": "v1",
+      "iqr_ms": 1.1302999999999983,
+      "median_ms": 11.9758,
+      "native_median_ms": 11.1632,
+      "native_rows_per_second": 89580048.7315465,
+      "native_samples_ms": [
+        10.504,
+        11.551,
+        11.3099,
+        10.9821,
+        10.3872,
+        11.1632,
+        11.5265
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 125317120,
+      "python_native_throughput_ratio": 0.9321464954324554,
+      "rows_per_second": 83501728.48577966,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        13.5602,
+        11.6577,
+        11.9758,
+        11.9237,
+        12.2818,
+        15.4628,
+        11.2221
+      ],
+      "spill_bytes": 0
+    },
+    "dataset_ratios": {
+      "allocation_evidence": "not instrumented for this case",
+      "allocations_per_row": null,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 16001600,
+      "engine_peak_temp_bytes": 0,
+      "fingerprint_version": "v1",
+      "iqr_ms": 1.7086000000000006,
+      "median_ms": 25.8922,
+      "native_median_ms": 28.7663,
+      "native_rows_per_second": 34762899.642985016,
+      "native_samples_ms": [
+        23.7138,
+        28.7663,
+        26.6415,
+        28.1447,
+        29.9074,
+        32.3795,
+        31.8235
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 140951552,
+      "python_native_throughput_ratio": 1.111002541305876,
+      "rows_per_second": 38621669.84651748,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        25.8291,
+        26.7858,
+        24.8054,
+        29.7079,
+        24.9337,
+        27.3942,
+        25.8922
+      ],
+      "spill_bytes": 0
+    },
+    "fingerprint": {
+      "allocation_evidence": "tests/allocation_contract.rs",
+      "allocations_per_row": 0.0,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 0,
+      "engine_peak_temp_bytes": 0,
+      "fingerprint_version": "v1",
+      "iqr_ms": 67.35290000000009,
+      "median_ms": 588.501,
+      "native_median_ms": 599.6043,
+      "native_rows_per_second": 1667766.5587121374,
+      "native_samples_ms": [
+        512.157,
+        639.136,
+        604.4768,
+        578.3573,
+        648.9874,
+        596.5615,
+        599.6043
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 124342272,
+      "python_native_throughput_ratio": 1.0188670877364694,
+      "rows_per_second": 1699232.4566993092,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        504.8803,
+        516.4553,
+        616.4866,
+        576.5143,
+        588.501,
+        611.1888,
+        635.9583
+      ],
+      "spill_bytes": 0
+    },
+    "relational_compare": {
+      "allocation_evidence": "tests/allocation_contract.rs",
+      "allocations_per_row": 0.0,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 0,
+      "engine_peak_temp_bytes": 0,
+      "fingerprint_version": "v1",
+      "iqr_ms": 1.7179000000000002,
+      "median_ms": 3.4153,
+      "native_median_ms": 4.7831,
+      "native_rows_per_second": 209069431.95835337,
+      "native_samples_ms": [
+        3.1245,
+        3.839,
+        3.1394,
+        6.2841,
+        4.7831,
+        5.281,
+        5.3227
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 124977152,
+      "python_native_throughput_ratio": 1.4004919040787047,
+      "rows_per_second": 292800046.84800756,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        3.2369,
+        3.3279,
+        3.3848,
+        5.3537,
+        3.4153,
+        6.4449,
+        4.7948
+      ],
+      "spill_bytes": 0
+    },
+    "v1_numeric_min": {
+      "allocation_evidence": "tests/allocation_contract.rs",
+      "allocations_per_row": 0.0,
+      "capacity_growth_events": 0,
+      "correctness": true,
+      "engine_peak_bytes": 0,
+      "engine_peak_temp_bytes": 0,
+      "fingerprint_version": "v1",
+      "iqr_ms": 2.2285000000000004,
+      "median_ms": 14.1014,
+      "native_median_ms": 12.6795,
+      "native_rows_per_second": 78867463.22804525,
+      "native_samples_ms": [
+        9.976,
+        12.6795,
+        12.7292,
+        13.0091,
+        13.4809,
+        12.2477,
+        12.1239
+      ],
+      "perf": {
+        "branch-misses": null,
+        "cache-misses": null,
+        "cycles": null,
+        "instructions": null,
+        "stalled-cycles-backend": null,
+        "stalled-cycles-frontend": null,
+        "unavailable_reason": "perf collection not requested"
+      },
+      "process_peak_rss_bytes": 124698624,
+      "python_native_throughput_ratio": 0.8991660402513226,
+      "rows_per_second": 70914944.61542825,
+      "rss_sample_interval_seconds": 0.005,
+      "samples_ms": [
+        14.2317,
+        16.1172,
+        14.1014,
+        13.9743,
+        15.6385,
+        11.3695,
+        11.4389
+      ],
+      "spill_bytes": 0
+    }
+  },
+  "compiler": {
+    "error": null,
+    "rustc": "rustc 1.85.0 (4d91de4e4 2025-02-17)\nbinary: rustc\ncommit-hash: 4d91de4e48198da2e33413efdcd9cd2cc0c46688\ncommit-date: 2025-02-17\nhost: x86_64-pc-windows-msvc\nrelease: 1.85.0\nLLVM version: 19.1.7"
+  },
+  "correctness_guards": {
+    "all_cases_passed": true
+  },
+  "created_at": "2026-09-02T06:39:32.543014+03:00",
+  "dataset": {
+    "columns": [
+      "timestamp",
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ],
+    "generator": "proofframe-bitcoin-shaped-v1",
+    "kind": "synthetic",
+    "rows": 1000000,
+    "sha256": "42c5b33312d457660535318e8e5d52269f69c303dcc9d68c646b89155287b4b2"
+  },
+  "fingerprint_version": "v1",
+  "hardware": {
+    "cpu": "AMD64 Family 25 Model 33 Stepping 2, AuthenticAMD",
+    "logical_cpus": 12,
+    "machine": "AMD64",
+    "physical_memory_bytes": 17102315520,
+    "release": "11",
+    "system": "Windows"
+  },
+  "resources": {
+    "max_memory_bytes": 536870912,
+    "max_temp_bytes": 4294967296
+  },
+  "run_count": 7,
+  "runtime": {
+    "numpy": "2.5.2",
+    "proofframe": "0.6.0",
+    "pyarrow": "25.0.1",
+    "python": "3.13.15"
+  },
+  "schema_version": "proofframe.release-benchmark.v3",
+  "warmup_count": 1,
+  "native_scan_diagnostic": {
+    "included": true,
+    "comparison_scope": "installed_api_vs_compiled_scan"
+  }
+}

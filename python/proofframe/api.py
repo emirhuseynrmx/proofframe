@@ -23,8 +23,8 @@ from ._proofframe import (
     scan_pii_arrow,
     sign_evidence_receipt,
     sign_proof_receipt,
-    verify_proof_receipt_any,
     suggest_arrow,
+    verify_proof_receipt_any,
 )
 
 
