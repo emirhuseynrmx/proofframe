@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible ProofFrame defect without sharing sensitive data.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve ProofFrame. Do not include credentials, private keys, PII, or production data. Use a minimized synthetic example where possible.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and the behavior you expected.
+      placeholder: ProofFrame returned ...; I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest command or code sample that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: data-schema
+    attributes:
+      label: Data and Arrow schema
+      description: Provide a minimized, non-sensitive input sample and its Arrow schema, or explain why the schema cannot be shared.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Contract
+      description: Paste the minimized JSON contract used by the reproduction.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include ProofFrame, Python, PyArrow, Rust (if built from source), OS, and installation method.
+      placeholder: |
+        ProofFrame: 0.6.0
+        Python: 3.11
+        PyArrow: 19.0.0
+        OS: Ubuntu 24.04
+        Installed with: pip install proofframe
+    validations:
+      required: true
