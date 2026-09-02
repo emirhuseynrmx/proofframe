@@ -550,8 +550,14 @@ mod tests {
 
     #[test]
     fn a_decreasing_or_unordered_column_receives_a_range() {
-        assert_eq!(observe_i64(&[4, 3, 2, 1]).bounds(0.0), Some((json!(1), json!(4))));
-        assert_eq!(observe_i64(&[3, 1, 4, 1]).bounds(0.0), Some((json!(1), json!(4))));
+        assert_eq!(
+            observe_i64(&[4, 3, 2, 1]).bounds(0.0),
+            Some((json!(1), json!(4)))
+        );
+        assert_eq!(
+            observe_i64(&[3, 1, 4, 1]).bounds(0.0),
+            Some((json!(1), json!(4)))
+        );
     }
 
     #[test]
