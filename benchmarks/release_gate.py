@@ -391,7 +391,10 @@ def _allocation_contract() -> dict[str, Any]:
     )
     return {
         "passed": completed.returncode == 0,
-        "command": " ".join(command),
+        # The resolved executable path is machine-specific and would travel into
+        # the source archive, which the hygiene check rejects. Record the
+        # invocation as it is written, not as it was resolved.
+        "command": " ".join(["cargo", *command[1:]]),
         "error": (
             None
             if completed.returncode == 0

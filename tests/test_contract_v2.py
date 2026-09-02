@@ -122,11 +122,12 @@ def test_release_benchmark_can_time_only_the_compiled_native_scan():
 @pytest.mark.parametrize(
     "operation",
     [
-        lambda data, contract: pf.check(data, contract),
-        lambda data, contract: pf.check_with_evidence(data, contract),
+        pf.check,
+        pf.check_with_evidence,
+        # The partition entry points take a sequence, so these two wrap the table.
         lambda data, contract: pf.check_partitions([data], contract),
         lambda data, contract: pf.check_partitions_with_evidence([data], contract),
-        lambda data, contract: pf.validate(data, contract),
+        pf.validate,
     ],
 )
 def test_draft_contract_is_rejected_by_every_validation_entry_point(operation):

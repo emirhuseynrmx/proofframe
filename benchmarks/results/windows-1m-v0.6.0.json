@@ -1,6 +1,6 @@
 {
   "allocation_contract": {
-    "command": "C:\\Users\\emirh\\.cargo\\bin\\cargo.EXE test --release --locked --test allocation_contract",
+    "command": "cargo test --release --locked --test allocation_contract",
     "error": null,
     "passed": true
   },
