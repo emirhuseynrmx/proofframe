@@ -11,3 +11,7 @@
 *.pyd
 *.pdb
 *.so
+
+# Internal release planning notes. Tracked files ship via `git ls-files`, so an
+# ignore rule alone would not have kept these out of the source archive.
+docs/superpowers/
