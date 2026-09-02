@@ -15,6 +15,7 @@ from .api import (
     scan_pii,
     sign_evidence,
     sign_receipt,
+    suggest_contract,
     validate,
     verify_receipt,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "scan_pii",
     "sign_evidence",
     "sign_receipt",
+    "suggest_contract",
     "validate",
     "verify_receipt",
 ]

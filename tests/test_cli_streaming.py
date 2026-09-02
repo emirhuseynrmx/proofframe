@@ -208,3 +208,14 @@ def test_cli_evidence_sign_and_verify_defaults_to_v2(tmp_path, capsys):
         ]
     )
     assert json.loads(capsys.readouterr().out)["valid"] is True
+
+
+def test_suggest_writes_a_review_required_contract_to_stdout(tmp_path, capsys):
+    data_path = tmp_path / "data.parquet"
+    parquet.write_table(pa.table({"id": [2, 1], "state": ["new", "paid"]}), data_path)
+
+    cli.main(["suggest", str(data_path), "--infer-categories"])
+
+    contract = json.loads(capsys.readouterr().out)
+    assert contract["status"] == "draft"
+    assert contract["columns"]["state"]["allowed"] == ["new", "paid"]

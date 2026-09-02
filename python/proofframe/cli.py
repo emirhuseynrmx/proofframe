@@ -23,6 +23,7 @@ from .api import (
     fingerprint,
     profile,
     sign_receipt,
+    suggest_contract,
     verify_receipt,
 )
 from .errors import ContractError, ProofFrameError, ResourceLimitError
@@ -205,6 +206,22 @@ def _parser() -> argparse.ArgumentParser:
     _add_stream_options(profile_parser)
     _add_resource_options(profile_parser)
 
+    suggest_parser = commands.add_parser(
+        "suggest", help="generate a review-required V2 contract draft"
+    )
+    suggest_parser.add_argument("path")
+    suggest_parser.add_argument("--infer-uniqueness", action="store_true")
+    suggest_parser.add_argument("--infer-categories", action="store_true")
+    suggest_parser.add_argument("--max-categories", type=int, default=20)
+    suggest_parser.add_argument("--infer-required", action="store_true")
+    suggest_parser.add_argument("--no-infer-ranges", action="store_false", dest="infer_ranges")
+    suggest_parser.add_argument("--range-tolerance", type=float, default=0.0)
+    suggest_parser.add_argument(
+        "--no-infer-row-count", action="store_false", dest="infer_row_count"
+    )
+    _add_stream_options(suggest_parser)
+    _add_resource_options(suggest_parser)
+
     validate_parser = commands.add_parser("validate", help="deprecated alias for check")
     _add_check_arguments(validate_parser)
     return parser
@@ -318,6 +335,20 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return profile(
             _open_reader(args.path, args.batch_size),
             distinct=args.distinct,
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+            spill=args.spill,
+        ), 0
+    if args.command == "suggest":
+        return suggest_contract(
+            _open_reader(args.path, args.batch_size),
+            infer_uniqueness=args.infer_uniqueness,
+            infer_categories=args.infer_categories,
+            max_categories=args.max_categories,
+            infer_required=args.infer_required,
+            infer_ranges=args.infer_ranges,
+            range_tolerance=args.range_tolerance,
+            infer_row_count=args.infer_row_count,
             max_memory=args.max_memory,
             max_temp=args.max_temp,
             spill=args.spill,

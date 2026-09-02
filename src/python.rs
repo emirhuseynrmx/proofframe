@@ -22,10 +22,11 @@ use crate::evidence::{
 use crate::{
     CompiledContract, ContractDocument, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
     ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions, PartitionReader,
-    PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy, check_partition_readers,
-    check_partition_readers_with_evidence, detect_leakage_with_options, diff_readers_with_options,
-    execute_reader, execute_reader_with_fingerprint, fingerprint_reader_with_options,
-    profile_reader_with_resources_and_hint, scan_pii_reader_with_options,
+    PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy, SuggestOptions,
+    check_partition_readers, check_partition_readers_with_evidence, detect_leakage_with_options,
+    diff_readers_with_options, execute_reader, execute_reader_with_fingerprint,
+    fingerprint_reader_with_options, profile_reader_with_resources_and_hint,
+    scan_pii_reader_with_options, suggest_reader_with_options,
 };
 
 create_exception!(proofframe, ProofFrameException, PyValueError);
@@ -71,6 +72,55 @@ fn profile_arrow(
     result
         .map_err(|error| map_error(py, error))
         .and_then(|report| serialize_to_python(py, &report))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source,
+    infer_uniqueness=false,
+    infer_categories=false,
+    max_categories=20,
+    infer_required=false,
+    infer_ranges=true,
+    range_tolerance=0.0,
+    infer_row_count=true,
+    row_count_hint=None,
+    max_memory_bytes=DEFAULT_MEMORY_BYTES,
+    max_temp_bytes=DEFAULT_TEMP_BYTES
+))]
+#[allow(clippy::too_many_arguments)]
+fn suggest_arrow(
+    py: Python<'_>,
+    source: PyArrowType<ArrowArrayStreamReader>,
+    infer_uniqueness: bool,
+    infer_categories: bool,
+    max_categories: usize,
+    infer_required: bool,
+    infer_ranges: bool,
+    range_tolerance: f64,
+    infer_row_count: bool,
+    row_count_hint: Option<u64>,
+    max_memory_bytes: u64,
+    max_temp_bytes: u64,
+) -> PyResult<Py<PyAny>> {
+    let options = SuggestOptions {
+        infer_uniqueness,
+        infer_categories,
+        max_categories,
+        infer_required,
+        infer_ranges,
+        range_tolerance,
+        infer_row_count,
+        resources: limits(
+            max_memory_bytes,
+            max_temp_bytes,
+            DEFAULT_OUTPUT_RECORDS,
+            DEFAULT_SAMPLES,
+        ),
+    };
+    py.detach(move || suggest_reader_with_options(source.0, options, row_count_hint))
+        .map_err(|error| map_error(py, error))
+        .and_then(|value| serialize_to_python(py, &value))
 }
 
 #[pyfunction]
@@ -984,6 +1034,7 @@ fn register_data_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn register_profile_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(profile_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(suggest_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(benchmark_fingerprint_arrow, module)?)?;
     Ok(())
