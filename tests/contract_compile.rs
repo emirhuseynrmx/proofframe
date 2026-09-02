@@ -456,6 +456,20 @@ fn compile_document_preserves_the_frozen_v1_plan_digest() {
 }
 
 #[test]
+fn draft_v2_contract_is_rejected_at_the_shared_compile_boundary() {
+    let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+    let document = ContractDocument::from_json(
+        r#"{"version":"proofframe.contract.v2","status":"draft","columns":{}}"#,
+    )
+    .expect("draft metadata must parse so the compiler can reject execution");
+
+    let error = CompiledContract::compile_document(&document, &schema)
+        .expect_err("draft contracts must never compile into executable plans");
+
+    assert_eq!(error.code().as_str(), "PF_DRAFT_CONTRACT");
+}
+
+#[test]
 fn contract_v2_rejects_relational_literals_outside_the_arrow_physical_type() {
     let schema = Schema::new(vec![Field::new("tiny", DataType::Int8, false)]);
     let document = ContractDocument::from_json(

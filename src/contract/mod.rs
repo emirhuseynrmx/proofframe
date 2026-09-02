@@ -16,6 +16,7 @@ pub use document::ContractDocument;
 pub use row::{ComparePlan, OperandPlan, RowPlan, RowPlanKind, ScalarValuePlan};
 pub use v2::{
     AssertionAst, CompareAst, CompareOpAst, CompositeNullPolicyAst, CompositeUniqueAst,
-    ContractAstV2, CountRangeAst, DatasetRulesAst, NullPolicyAst, OperandAst, ParameterizedTypeAst,
-    PrimitiveTypeAst, RatioRangeAst, RowRuleAst, RuleAstV2, TimeUnitAst, TypeAst,
+    ContractAstV2, ContractStatus, CountRangeAst, DatasetRulesAst, NullPolicyAst, OperandAst,
+    ParameterizedTypeAst, PrimitiveTypeAst, RatioRangeAst, RowRuleAst, RuleAstV2, TimeUnitAst,
+    TypeAst,
 };

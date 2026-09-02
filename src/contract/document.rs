@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{ContractAst, ContractAstV2, ContractVersion, v2};
+use super::{ContractAst, ContractAstV2, ContractStatus, ContractVersion, v2};
 use crate::{ErrorCode, ProofFrameError};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,5 +54,17 @@ impl ContractDocument {
             Self::V1(_) => None,
             Self::V2(contract) => Some(contract),
         }
+    }
+
+    /// Reject generated drafts before they can reach an execution plan.
+    pub fn ensure_active(&self) -> Result<(), ProofFrameError> {
+        if matches!(self, Self::V2(contract) if contract.status == ContractStatus::Draft) {
+            return Err(ProofFrameError::contract(
+                ErrorCode::ContractDraft,
+                "Draft contracts cannot be executed; review the suggested rules and set `status` to `active`",
+                Some("$.status".to_string()),
+            ));
+        }
+        Ok(())
     }
 }
