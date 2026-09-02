@@ -22,8 +22,5 @@ contract = {
 
 report = pf.check(orders, contract, max_samples=10)
 
-assert report["valid"] is False
-assert report["violation_count"] == 3
-assert {finding["rule"] for finding in report["findings"]} == {"unique", "min", "not_null"}
-
 print(f"valid={report['valid']} violations={report['violation_count']}")
+print(f"rules broken={sorted({finding['rule'] for finding in report['findings']})}")

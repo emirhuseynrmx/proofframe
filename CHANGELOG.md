@@ -6,6 +6,9 @@
   schema rules, exact optional uniqueness, bounded optional categories, and safe range omissions.
 - Added `proofframe suggest` plus complete getting-started, contract, API, and concepts guides.
 - Added runnable workflows, integration examples, contributor guidance, and a refreshed release banner.
+- A range is omitted only when a column never decreased *and* actually increased. Constant columns
+  and single-row samples satisfy `value >= last` without any risk of outgrowing an observed bound,
+  so they now keep their suggested range instead of being reported as monotonic.
 
 ## 0.5.1
 

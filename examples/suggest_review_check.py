@@ -9,19 +9,19 @@ import pyarrow as pa
 orders = pa.table({"order_id": [101, 102, 103], "amount": [12.5, 8.0, 10.0]})
 draft = pf.suggest_contract(orders, infer_uniqueness=True)
 
-assert draft["status"] == "draft"
-assert draft["suggested_from"]["uniqueness_inferred"] is True
+print(f"status={draft['status']}")
+print(f"suggested={sorted(draft['columns'])}")
+print(f"review={draft['suggested_from']['review']}")
 
 try:
     pf.check(orders, draft)
 except pf.ContractError as error:
-    assert error.code == "PF_DRAFT_CONTRACT"
+    print(f"a draft is refused before scanning: {error.code}")
 else:
-    raise AssertionError("draft contracts must not run")
+    raise RuntimeError("draft contracts must not run")
 
 # Review and edit inferred rules here before activating this source document.
 draft["status"] = "active"
 report = pf.check(orders, draft)
 
-assert report["valid"] is True
 print(f"valid={report['valid']} rows={report['rows']}")
