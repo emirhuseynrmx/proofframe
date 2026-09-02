@@ -1,9 +1,27 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import proofframe as pf
 import pyarrow as pa
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "pandas_validation.py",
+        "polars_parquet_budget.py",
+        "keyed_diff.py",
+        "pii_and_leakage.py",
+        "evidence_and_receipt.py",
+    ],
+)
+def test_example_workflows_remain_executable(example: str) -> None:
+    """Catch examples that no longer exercise their documented workflow."""
+    subprocess.run([sys.executable, ROOT / "examples" / example], check=True)
 
 
 def test_readme_check_example_stays_executable() -> None:
