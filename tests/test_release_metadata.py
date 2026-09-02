@@ -8,8 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_rust_and_python_versions_match_release() -> None:
-    assert read_versions(ROOT) == ("0.5.1", "0.5.1")
-    verify_versions(ROOT, "v0.5.1")
+    assert read_versions(ROOT) == ("0.6.0", "0.6.0")
+    verify_versions(ROOT, "v0.6.0")
 
 
 def test_python_package_is_classified_as_stable() -> None:
@@ -17,6 +17,14 @@ def test_python_package_is_classified_as_stable() -> None:
 
     assert '"Development Status :: 5 - Production/Stable"' in metadata
     assert '"Development Status :: 4 - Beta"' not in metadata
+
+
+def test_license_contains_the_complete_apache_2_text() -> None:
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+    assert license_text.startswith("Copyright 2026 Emir Huseyin Inci\n\n")
+    assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in license_text
+    assert "END OF TERMS AND CONDITIONS" in license_text
 
 
 def test_crate_publishes_only_the_public_testing_document() -> None:

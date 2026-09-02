@@ -51,20 +51,23 @@ The v2 matrix covers frozen V1 numeric validation, cross-column comparisons, con
 assertions, dataset ratios, composite identity in memory and under forced spill, and fingerprints.
 `tests/test_release_gate.py` rejects artifacts with fewer than seven runs, a different dataset hash,
 missing correctness or native/Python timing fields, mixed fingerprint versions, allocation growth,
-or different CPU/compiler identity. Linux `perf` counters are optional diagnostics: unavailable
-permissions are recorded as `null` with the OS error and never replaced by estimates.
+or different CPU/compiler identity. The current artifact schema is v3 because this ratio is now
+explicitly labeled as a diagnostic rather than a release gate. Linux `perf` counters are optional
+diagnostics: unavailable permissions are recorded as `null` with the OS error and never replaced
+by estimates.
 
 The allocation fields are backed by the release-mode counting allocator in
 `tests/allocation_contract.rs`; production RSS and engine-accounted bytes are separate measures.
 Cross-version speed gates run only against a baseline captured on the same dataset, hardware,
-compiler, and fingerprint version. The 100k run is a correctness/resource smoke. The 95% installed
-Python/native throughput gate applies at one million rows or more, where fixed reader and FFI setup
-does not dominate sub-millisecond kernels.
+compiler, and fingerprint version. The 100k run is a correctness/resource smoke. The installed
+Python/native throughput ratio remains visible as a diagnostic, not a release gate: installed timing
+includes reader adaptation, JSON serialization, compilation, and report conversion, while the native
+sample intentionally isolates the compiled scan loop.
 
 ## Remaining dedicated-runner work
 
-1. Capture the 0.5 result on the pinned real Bitcoin file and archive the complete artifact.
-2. Capture a comparable 0.4 baseline on the same dedicated runner before enforcing ratio gates.
+1. Capture the 0.6.0 result on the pinned real Bitcoin file and archive the complete artifact.
+2. Capture a comparable baseline on the same dedicated runner before enforcing cross-version gates.
 3. Keep raw samples and unavailable hardware counters visible; never publish only a speedup ratio.
 
 No benchmark result is a universal performance claim. Data shape, null density, rule selection,

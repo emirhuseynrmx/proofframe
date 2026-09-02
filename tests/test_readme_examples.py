@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
         "keyed_diff.py",
         "pii_and_leakage.py",
         "evidence_and_receipt.py",
+        "suggest_review_check.py",
     ],
 )
 def test_example_workflows_remain_executable(example: str) -> None:
@@ -117,10 +118,15 @@ def test_readme_dataset_and_partition_example_stays_executable() -> None:
     assert report["rows"] == 3
 
 
-def test_readme_documents_the_051_contract_surface() -> None:
+def test_readme_documents_the_060_contract_surface_and_positioning() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "Cross-column and conditional rules" in readme
     assert "Dataset-level rules" in readme
     assert "pf.check_partitions" in readme
     assert "SLSA" in readme and "SBOM" in readme
+    assert "proofframe suggest" in readme
+    assert "Pandera" in readme
+    assert "Great Expectations" in readme
+    assert "Soda" in readme
+    assert "Deequ" in readme

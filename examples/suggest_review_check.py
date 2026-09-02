@@ -1,7 +1,6 @@
 """Generate a draft contract, review it, activate it, and then validate data.
 
-Requires ProofFrame 0.6.0 or newer. It intentionally is not executed by the
-0.5.1-compatible example test while ``suggest_contract`` is being introduced.
+Requires ProofFrame 0.6.0 or newer.
 """
 
 import proofframe as pf

@@ -38,7 +38,7 @@ def _case() -> dict:
 @pytest.fixture
 def valid_artifact() -> dict:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": "proofframe.release-benchmark.v3",
         "run_count": 7,
         "warmup_count": 1,
         "fingerprint_version": "v1",
@@ -52,18 +52,17 @@ def valid_artifact() -> dict:
         },
         "compiler": {"rustc": "rustc 1.85.0", "error": None},
         "allocation_contract": {"passed": True},
-        "parity_gate": {
-            "minimum_rows": 1_000_000,
-            "minimum_ratio": 0.95,
-            "applied": True,
+        "native_scan_diagnostic": {
+            "included": True,
+            "comparison_scope": "installed_api_vs_compiled_scan",
         },
         "correctness_guards": {"all_cases_passed": True},
         "cases": {name: _case() for name in CASES},
     }
 
 
-def test_v2_artifact_covers_relational_dataset_spill_and_v1_regression() -> None:
-    assert SCHEMA_VERSION == "proofframe.release-benchmark.v2"
+def test_v3_artifact_covers_relational_dataset_spill_and_v1_regression() -> None:
+    assert SCHEMA_VERSION == "proofframe.release-benchmark.v3"
     assert set(CASES) >= {
         "v1_numeric_min",
         "relational_compare",
@@ -115,14 +114,14 @@ def test_artifact_requires_native_python_parity_measurements(valid_artifact):
         validate_artifact(valid_artifact)
 
 
-def test_artifact_declares_whether_the_parity_gate_was_applied(valid_artifact):
-    del valid_artifact["parity_gate"]
+def test_artifact_declares_the_native_scan_diagnostic_scope(valid_artifact):
+    del valid_artifact["native_scan_diagnostic"]
 
-    with pytest.raises(ArtifactError, match="parity_gate"):
+    with pytest.raises(ArtifactError, match="native_scan_diagnostic"):
         validate_artifact(valid_artifact)
 
 
-def test_release_gates_reject_v1_regression_allocation_growth_and_slow_python(valid_artifact):
+def test_release_gates_reject_v1_regression_and_allocation_growth(valid_artifact):
     from benchmarks.release_gate import enforce_release_gates
 
     baseline = copy.deepcopy(valid_artifact)
@@ -137,10 +136,9 @@ def test_release_gates_reject_v1_regression_allocation_growth_and_slow_python(va
     with pytest.raises(ArtifactError, match="capacity growth"):
         enforce_release_gates(allocation_growth, None)
 
-    slow_python = copy.deepcopy(valid_artifact)
-    slow_python["cases"]["conditional_assertion"]["python_native_throughput_ratio"] = 0.949
-    with pytest.raises(ArtifactError, match="95%"):
-        enforce_release_gates(slow_python, None)
+    installed_overhead = copy.deepcopy(valid_artifact)
+    installed_overhead["cases"]["conditional_assertion"]["python_native_throughput_ratio"] = 0.8
+    enforce_release_gates(installed_overhead, None)
 
 
 def test_allocation_contract_failure_preserves_the_root_cause(valid_artifact):
