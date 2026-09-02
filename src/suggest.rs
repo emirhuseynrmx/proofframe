@@ -110,13 +110,11 @@ impl RangeStats {
     }
 
     fn bounds(&self, tolerance: f64) -> Option<(Value, Value)> {
+        if self.is_growing() {
+            return None;
+        }
         match self {
-            Self::Signed {
-                min,
-                max,
-                monotonic,
-                ..
-            } if !monotonic => {
+            Self::Signed { min, max, .. } => {
                 let span = (*max as i128 - *min as i128) as f64;
                 let delta = (span * tolerance).ceil() as i64;
                 Some((
@@ -124,36 +122,44 @@ impl RangeStats {
                     json!(max.saturating_add(delta)),
                 ))
             }
-            Self::Unsigned {
-                min,
-                max,
-                monotonic,
-                ..
-            } if !monotonic => {
+            Self::Unsigned { min, max, .. } => {
                 let delta = ((*max - *min) as f64 * tolerance).ceil() as u64;
                 Some((
                     json!(min.saturating_sub(delta)),
                     json!(max.saturating_add(delta)),
                 ))
             }
+            Self::Float { min, max, .. } => {
+                let delta = (*max - *min) * tolerance;
+                Some((json!(min - delta), json!(max + delta)))
+            }
+        }
+    }
+
+    /// A column only risks outgrowing an observed bound when it never decreased
+    /// *and* actually increased. A constant column, or a single observed row,
+    /// satisfies `value >= last` without carrying that risk, so it still gets a
+    /// range.
+    fn is_growing(&self) -> bool {
+        match self {
+            Self::Signed {
+                min,
+                max,
+                monotonic,
+                ..
+            } => *monotonic && max > min,
+            Self::Unsigned {
+                min,
+                max,
+                monotonic,
+                ..
+            } => *monotonic && max > min,
             Self::Float {
                 min,
                 max,
                 monotonic,
                 ..
-            } if !monotonic => {
-                let delta = (*max - *min) * tolerance;
-                Some((json!(min - delta), json!(max + delta)))
-            }
-            _ => None,
-        }
-    }
-
-    fn is_monotonic(&self) -> bool {
-        match self {
-            Self::Signed { monotonic, .. }
-            | Self::Unsigned { monotonic, .. }
-            | Self::Float { monotonic, .. } => *monotonic,
+            } => *monotonic && max > min,
         }
     }
 }
@@ -319,7 +325,7 @@ fn render_contract(
                 if let Some((min, max)) = range.bounds(options.range_tolerance) {
                     rules.insert("min".to_string(), min);
                     rules.insert("max".to_string(), max);
-                } else if range.is_monotonic() {
+                } else if range.is_growing() {
                     review
                         .push(json!({"column": field.name(), "reason": "monotonic_range_omitted"}));
                 }
@@ -481,5 +487,111 @@ fn float_value(array: &dyn Array, row: usize) -> Option<f64> {
             .as_any()
             .downcast_ref::<Float64Array>()
             .map(|values| values.value(row))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::ArrayRef;
+    use std::sync::Arc;
+
+    /// Feed one column's values through `observe` the way the scanner does.
+    fn observe_i64(values: &[i64]) -> RangeStats {
+        let array: ArrayRef = Arc::new(Int64Array::from(values.to_vec()));
+        let mut stats = range_for(&DataType::Int64).expect("int64 is a ranged type");
+        for row in 0..array.len() {
+            stats.observe(array.as_ref(), row);
+        }
+        stats
+    }
+
+    fn observe_u64(values: &[u64]) -> RangeStats {
+        let array: ArrayRef = Arc::new(UInt64Array::from(values.to_vec()));
+        let mut stats = range_for(&DataType::UInt64).expect("uint64 is a ranged type");
+        for row in 0..array.len() {
+            stats.observe(array.as_ref(), row);
+        }
+        stats
+    }
+
+    fn observe_f64(values: &[f64]) -> RangeStats {
+        let array: ArrayRef = Arc::new(Float64Array::from(values.to_vec()));
+        let mut stats = range_for(&DataType::Float64).expect("float64 is a ranged type");
+        for row in 0..array.len() {
+            stats.observe(array.as_ref(), row);
+        }
+        stats
+    }
+
+    #[test]
+    fn a_constant_column_still_receives_a_range() {
+        // `value >= last` holds for equal values, so a constant column reads as
+        // monotonic. It cannot outgrow its own bound, so it keeps one.
+        let stats = observe_i64(&[7, 7, 7, 7]);
+        assert!(!stats.is_growing());
+        assert_eq!(stats.bounds(0.0), Some((json!(7), json!(7))));
+    }
+
+    #[test]
+    fn a_single_observed_row_still_receives_a_range() {
+        let stats = observe_i64(&[42]);
+        assert!(!stats.is_growing());
+        assert_eq!(stats.bounds(0.0), Some((json!(42), json!(42))));
+    }
+
+    #[test]
+    fn an_increasing_column_receives_no_range() {
+        // The case the omission exists for: the next batch carries a larger id.
+        let stats = observe_i64(&[1, 2, 3, 4]);
+        assert!(stats.is_growing());
+        assert_eq!(stats.bounds(0.0), None);
+    }
+
+    #[test]
+    fn a_decreasing_or_unordered_column_receives_a_range() {
+        assert_eq!(observe_i64(&[4, 3, 2, 1]).bounds(0.0), Some((json!(1), json!(4))));
+        assert_eq!(observe_i64(&[3, 1, 4, 1]).bounds(0.0), Some((json!(1), json!(4))));
+    }
+
+    #[test]
+    fn a_plateau_before_a_rise_is_still_growing() {
+        let stats = observe_i64(&[1, 1, 2, 2]);
+        assert!(stats.is_growing());
+        assert_eq!(stats.bounds(0.0), None);
+    }
+
+    #[test]
+    fn tolerance_widens_bounds_without_overflowing_the_integer_range() {
+        let stats = observe_i64(&[i64::MIN, 0, i64::MAX, 0]);
+        let (low, high) = stats.bounds(1.0).expect("unordered values keep a range");
+        assert_eq!(low, json!(i64::MIN));
+        assert_eq!(high, json!(i64::MAX));
+    }
+
+    #[test]
+    fn unsigned_tolerance_saturates_at_zero() {
+        let stats = observe_u64(&[10, 5, 20]);
+        let (low, high) = stats.bounds(10.0).expect("unordered values keep a range");
+        assert_eq!(low, json!(0_u64));
+        assert_eq!(high, json!(170_u64));
+    }
+
+    #[test]
+    fn non_finite_floats_are_ignored_by_the_range() {
+        let stats = observe_f64(&[2.0, f64::NAN, 1.0, f64::INFINITY]);
+        let (low, high) = stats.bounds(0.0).expect("finite values remain");
+        assert_eq!(low, json!(1.0));
+        assert_eq!(high, json!(2.0));
+    }
+
+    #[test]
+    fn a_column_of_only_non_finite_floats_yields_no_usable_bounds() {
+        let stats = observe_f64(&[f64::NAN, f64::INFINITY]);
+        // Nothing was observed, so the initial sentinels stay in place.
+        assert!(!stats.is_growing());
+        let (low, high) = stats.bounds(0.0).expect("sentinels are still returned");
+        assert_eq!(low, json!(f64::INFINITY));
+        assert_eq!(high, json!(f64::NEG_INFINITY));
     }
 }

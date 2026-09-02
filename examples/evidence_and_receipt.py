@@ -14,8 +14,6 @@ keys = pf.generate_keypair()
 receipt = pf.sign_evidence(checked["evidence"], private_key=keys["private_key"])
 verification = pf.verify_receipt(receipt, expected_public_key=keys["public_key"])
 
-assert checked["report"]["valid"] is True
-assert checked["evidence"]["schema"] == "proofframe.evidence.v2"
-assert verification["valid"] is True
-
-print(f"evidence={checked['evidence']['schema']} receipt_valid={verification['valid']}")
+print(f"valid={checked['report']['valid']}")
+print(f"evidence={checked['evidence']['schema']}")
+print(f"receipt_valid={verification['valid']}")

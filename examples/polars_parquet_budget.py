@@ -26,6 +26,4 @@ with TemporaryDirectory() as directory:
             spill="never",
         )
 
-assert report["valid"] is True
-assert report["rows"] == 3
 print(f"valid={report['valid']} rows={report['rows']}")

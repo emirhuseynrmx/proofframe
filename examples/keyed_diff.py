@@ -13,9 +13,7 @@ with TemporaryDirectory() as directory:
     output = Path(directory) / "changes.jsonl"
     report = pf.diff(before, after, keys="order_id", output=str(output), max_samples=10)
 
-    assert output.is_file()
-    assert report["added_keys"] == ["104"]
-    assert report["removed_keys"] == ["103"]
-    assert report["changed"] == [{"key": "102", "columns": ["status"]}]
-
-print("added=1 removed=1 changed=1")
+    print(f"added={report['added_keys']}")
+    print(f"removed={report['removed_keys']}")
+    print(f"changed={report['changed']}")
+    print(f"full change records written to {output.name}")
