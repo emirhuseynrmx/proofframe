@@ -254,6 +254,41 @@ fn contract_source_digest_preserves_integer_literals_outside_f64_precision() {
 }
 
 #[test]
+fn v051_v2_contract_source_digest_is_frozen() {
+    let source = r#"{"version":"proofframe.contract.v2","columns":{"id":{"type":"int64","not_null":true}},"dataset_rules":{"row_count":{"min":1}}}"#;
+
+    let digest = proofframe::evidence::contract_source_digest(source)
+        .expect("a valid 0.5.1 V2 contract must retain its canonical source digest");
+
+    assert_eq!(
+        digest,
+        "pf-contract-v2:f3b985a28b3b562626f787c23a11983a44d791222f109762a42f1f6cd895cfe8"
+    );
+}
+
+#[test]
+fn operational_metadata_changes_source_but_not_compiled_plan_identity() {
+    let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+    let implicit_active =
+        r#"{"version":"proofframe.contract.v2","columns":{"id":{"not_null":true}}}"#;
+    let explicit_active = r#"{"version":"proofframe.contract.v2","status":"active","columns":{"id":{"not_null":true}}}"#;
+
+    let first = ContractDocument::from_json(implicit_active).unwrap();
+    let second = ContractDocument::from_json(explicit_active).unwrap();
+    let first_plan = CompiledContract::compile_document(&first, &schema).unwrap();
+    let second_plan = CompiledContract::compile_document(&second, &schema).unwrap();
+
+    assert_eq!(
+        first_plan.compiled_plan_digest().unwrap(),
+        second_plan.compiled_plan_digest().unwrap()
+    );
+    assert_ne!(
+        proofframe::evidence::contract_source_digest(implicit_active).unwrap(),
+        proofframe::evidence::contract_source_digest(explicit_active).unwrap()
+    );
+}
+
+#[test]
 fn value_rules_on_an_absent_optional_column_fail_closed() {
     let schema = Schema::empty();
     let ast = contract_with_columns(r#"{"score":{"min":0}}"#);
