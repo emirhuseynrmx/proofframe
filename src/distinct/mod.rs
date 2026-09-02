@@ -84,6 +84,23 @@ pub(crate) struct IntersectionSummary {
     pub(crate) samples: Vec<[u8; 32]>,
 }
 
+/// The first row that carried a left key with no counterpart on the right.
+///
+/// Only the row is retained. Findings for exact set rules point at the offending row rather
+/// than rendering the value, so nothing has to hold a decoded copy of the key.
+pub(crate) struct MissingSample {
+    pub(crate) row: u64,
+}
+
+pub(crate) struct AntiJoinSummary {
+    pub(crate) left_distinct: u64,
+    pub(crate) right_distinct: u64,
+    pub(crate) missing: u64,
+    pub(crate) samples: Vec<MissingSample>,
+    pub(crate) spill_bytes: u64,
+    pub(crate) runs: u64,
+}
+
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum OwnedValue {
     I64(i64),
@@ -297,6 +314,59 @@ pub(crate) fn intersect_exact_states(
         max_samples,
         &left.cancellation,
     )
+}
+
+/// A finished state kept readable so more than one anti-join can probe it.
+///
+/// Sealing writes every buffered value into sorted runs; the runs are then immutable, so
+/// a reference dataset is scanned once even when several partitions are checked against it.
+pub(crate) struct SealedState {
+    runs: Vec<RunMeta>,
+    account: ResourceAccount,
+    // Each run owns its own temporary file, but they were created inside this directory
+    // and it has to outlive them.
+    _directory: tempfile::TempDir,
+}
+
+impl SealedState {
+    pub(crate) fn seal(
+        mut state: ExactState,
+        directory: tempfile::TempDir,
+    ) -> Result<Self, ProofFrameError> {
+        state.seal()?;
+        Ok(Self {
+            runs: std::mem::take(&mut state.runs),
+            account: state.account.clone(),
+            _directory: directory,
+        })
+    }
+}
+
+/// Report the distinct keys in `left` that `right` does not contain.
+pub(crate) fn anti_join_exact_states(
+    mut left: ExactState,
+    right: &SealedState,
+    max_samples: usize,
+) -> Result<AntiJoinSummary, ProofFrameError> {
+    left.seal()?;
+    // Read the spill shape before the merge borrows the runs; the caller reports it as
+    // execution metrics the same way a unique or composite state does.
+    let spill_bytes = left
+        .runs
+        .iter()
+        .fold(0_u64, |total, run| total.saturating_add(run.total_bytes()));
+    let runs = left.runs.len() as u64;
+    let mut summary = run::anti_join(
+        &left.runs,
+        &right.runs,
+        &left.account,
+        &right.account,
+        max_samples,
+        &left.cancellation,
+    )?;
+    summary.spill_bytes = spill_bytes;
+    summary.runs = runs;
+    Ok(summary)
 }
 
 enum Storage {

@@ -413,7 +413,7 @@ fn insert_exact_scalar(
     }
 }
 
-fn append_scalar(
+pub(super) fn append_scalar(
     array: &dyn Array,
     row: usize,
     output: &mut Vec<u8>,

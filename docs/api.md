@@ -22,10 +22,11 @@ global state accept `max_memory`, `max_temp`, and `spill="auto"|"never"`; use
 
 ## Validation
 
-- `check(data, contract, *, max_memory=..., max_temp=..., max_output_records=100000,
-  max_samples=100, spill="auto", threads=None) -> dict` compiles and validates one
-  input. The result includes `valid`, `rows`, `violation_count`, bounded `findings`,
-  resource metrics, `compiled_plan_digest`, and `contract_source_digest`.
+- `check(data, contract, *, references=None, max_memory=..., max_temp=...,
+  max_output_records=100000, max_samples=100, spill="auto", threads=None) -> dict`
+  compiles and validates one input. The result includes `valid`, `rows`,
+  `violation_count`, bounded `findings`, resource metrics, `compiled_plan_digest`,
+  `contract_source_digest`, and `references`.
 - `check_with_evidence(data, contract, **options) -> dict` validates and fingerprints
   the input in one native execution. It returns `{"report": ..., "evidence": ...}`.
 - `check_partitions(partitions, contract, **options) -> dict` validates ordered
@@ -37,6 +38,14 @@ global state accept `max_memory`, `max_temp`, and `spill="auto"|"never"`; use
 
 All validation entry points raise `ContractError` for invalid contracts and for
 `status: "draft"` (`code == "PF_DRAFT_CONTRACT"`) before record batches are consumed.
+
+`references` is a mapping of the logical names a contract's `dataset_rules.references`
+use to the datasets they resolve against, and every validation entry point accepts it.
+A declared reference with no bound dataset, and a bound dataset no rule uses, both raise
+`ContractError` with `code == "PF_REFERENCE_UNBOUND"` before the subject is scanned. Each
+entry of the report's `references` names the rule, the dataset, its `pf-fp-v2`
+fingerprint and row count, the distinct keys checked, and the distinct keys absent. See
+[contracts.md](contracts.md) for the rule shape and its null and key-typing semantics.
 
 ## Comparison and privacy scans
 

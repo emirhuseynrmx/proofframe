@@ -571,6 +571,82 @@ pub(super) fn intersect(
     })
 }
 
+/// Report the distinct left keys that the right side does not contain.
+///
+/// This is the same sorted merge as `intersect`, reading the branch it discards: a left
+/// key that compares `Less` than every remaining right key can never be matched later,
+/// because both sides arrive in ascending order.
+pub(super) fn anti_join(
+    left: &[RunMeta],
+    right: &[RunMeta],
+    left_account: &ResourceAccount,
+    right_account: &ResourceAccount,
+    max_samples: usize,
+    cancellation: &CancellationToken,
+) -> Result<super::AntiJoinSummary, ProofFrameError> {
+    let mut left = UniqueMerge::new(left, left_account, cancellation)?;
+    let mut right = UniqueMerge::new(right, right_account, cancellation)?;
+    let mut left_distinct = 0_u64;
+    let mut right_distinct = 0_u64;
+    let mut missing = 0_u64;
+    // Samples are one row number each, so the whole bound is reserved once up front.
+    let _sample_memory = left_account.try_reserve_memory(
+        max_samples
+            .checked_mul(std::mem::size_of::<super::MissingSample>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| corrupt("Reference sample size overflowed"))?,
+    )?;
+    let mut samples = Vec::new();
+    let mut left_value = next_counted_with_row(&mut left, &mut left_distinct)?;
+    let mut right_value = next_counted(&mut right, &mut right_distinct)?;
+    loop {
+        let Some((value, row)) = left_value.as_ref() else {
+            break;
+        };
+        cancellation.check()?;
+        match right_value.as_ref().map(|right| value.cmp(right)) {
+            // The right side is exhausted, so nothing can match the remaining left keys.
+            None | Some(std::cmp::Ordering::Less) => {
+                missing += 1;
+                if samples.len() < max_samples {
+                    samples.push(super::MissingSample { row: *row });
+                }
+                left_value = next_counted_with_row(&mut left, &mut left_distinct)?;
+            }
+            Some(std::cmp::Ordering::Greater) => {
+                right_value = next_counted(&mut right, &mut right_distinct)?;
+            }
+            Some(std::cmp::Ordering::Equal) => {
+                left_value = next_counted_with_row(&mut left, &mut left_distinct)?;
+                right_value = next_counted(&mut right, &mut right_distinct)?;
+            }
+        }
+    }
+    while right_value.is_some() {
+        cancellation.check()?;
+        right_value = next_counted(&mut right, &mut right_distinct)?;
+    }
+    Ok(super::AntiJoinSummary {
+        left_distinct,
+        right_distinct,
+        missing,
+        samples,
+        spill_bytes: 0,
+        runs: 0,
+    })
+}
+
+fn next_counted_with_row(
+    merge: &mut UniqueMerge,
+    count: &mut u64,
+) -> Result<Option<(OwnedValue, u64)>, ProofFrameError> {
+    let value = merge.next_unique_with_row()?;
+    if value.is_some() {
+        *count += 1;
+    }
+    Ok(value)
+}
+
 fn next_counted(
     merge: &mut UniqueMerge,
     count: &mut u64,
@@ -618,11 +694,20 @@ impl UniqueMerge {
     }
 
     fn next_unique(&mut self) -> Result<Option<OwnedValue>, ProofFrameError> {
+        Ok(self.next_unique_with_row()?.map(|(value, _)| value))
+    }
+
+    /// Yield each distinct value once, paired with the lowest row that carried it.
+    ///
+    /// `MergeEntry` orders by value then row, so the first entry popped for a value is
+    /// always its earliest occurrence and the duplicates drained below cannot precede it.
+    fn next_unique_with_row(&mut self) -> Result<Option<(OwnedValue, u64)>, ProofFrameError> {
         self.cancellation.check()?;
         let Some(Reverse(first)) = self.heap.pop() else {
             return Ok(None);
         };
         let value = first.value;
+        let row = first.row;
         self.refill(first.run)?;
         loop {
             let Some(Reverse(candidate)) = self.heap.peek() else {
@@ -634,7 +719,7 @@ impl UniqueMerge {
             let Reverse(duplicate) = self.heap.pop().expect("heap was just inspected");
             self.refill(duplicate.run)?;
         }
-        Ok(Some(value))
+        Ok(Some((value, row)))
     }
 
     fn refill(&mut self, run: usize) -> Result<(), ProofFrameError> {

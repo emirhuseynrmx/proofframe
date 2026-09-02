@@ -22,12 +22,35 @@ use crate::evidence::{
 use crate::{
     CompiledContract, ContractDocument, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
     ExecutionOptions, FingerprintOptions, FingerprintVersion, LeakageOptions, PartitionReader,
-    PiiFingerprintOptions, ProofFrameError, ResourceLimits, SpillPolicy, SuggestOptions,
-    check_partition_readers, check_partition_readers_with_evidence, detect_leakage_with_options,
-    diff_readers_with_options, execute_reader, execute_reader_with_fingerprint,
-    fingerprint_reader_with_options, profile_reader_with_resources_and_hint,
-    scan_pii_reader_with_options, suggest_reader_with_options,
+    PiiFingerprintOptions, ProofFrameError, ReferenceBindings, ResourceLimits, SpillPolicy,
+    SuggestOptions, check_partition_readers_with_evidence_and_references,
+    check_partition_readers_with_references, detect_leakage_with_options,
+    diff_readers_with_options, execute_reader_with_fingerprint_and_references,
+    execute_reader_with_references, fingerprint_reader_with_options,
+    profile_reader_with_resources_and_hint, scan_pii_reader_with_options,
+    suggest_reader_with_options,
 };
+
+/// Reference datasets as the Python layer passes them: name/stream pairs.
+///
+/// A mapping would need per-key extraction on the Python side of the boundary; the caller
+/// flattens its dict once instead, and duplicate names are rejected here rather than
+/// silently collapsing.
+type ReferenceSources = Vec<(String, PyArrowType<ArrowArrayStreamReader>)>;
+
+fn reference_bindings(sources: ReferenceSources) -> Result<ReferenceBindings, ProofFrameError> {
+    let mut bindings = ReferenceBindings::new();
+    for (name, source) in sources {
+        if bindings.insert(name.clone(), Box::new(source.0)).is_some() {
+            return Err(ProofFrameError::contract(
+                ErrorCode::ReferenceUnbound,
+                format!("Reference dataset `{name}` was bound more than once"),
+                None,
+            ));
+        }
+    }
+    Ok(bindings)
+}
 
 create_exception!(proofframe, ProofFrameException, PyValueError);
 create_exception!(proofframe, ContractError, ProofFrameException);
@@ -185,7 +208,8 @@ fn benchmark_fingerprint_arrow(
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
     max_samples=DEFAULT_SAMPLES,
-    threads=None
+    threads=None,
+    references=Vec::new()
 ))]
 #[allow(clippy::too_many_arguments)]
 fn check_arrow(
@@ -198,8 +222,10 @@ fn check_arrow(
     max_output_records: u64,
     max_samples: usize,
     threads: Option<usize>,
+    references: ReferenceSources,
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
+        let references = reference_bindings(references)?;
         let schema = source.0.schema();
         let contract_source_digest = contract_source_digest(&contract_json)?;
         let document = ContractDocument::from_json(&contract_json)?;
@@ -215,7 +241,8 @@ fn check_arrow(
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
         };
-        execute_reader(source.0, &plan, &options).map(|report| (report, contract_source_digest))
+        execute_reader_with_references(source.0, &plan, &options, references)
+            .map(|report| (report, contract_source_digest))
     });
     result
         .map_err(|error| map_error(py, error))
@@ -258,7 +285,8 @@ fn benchmark_check_arrow(
             threads: None,
         };
         let started = Instant::now();
-        let report = execute_reader(source.0, &plan, &options)?;
+        let report =
+            execute_reader_with_references(source.0, &plan, &options, ReferenceBindings::new())?;
         let native_elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         Ok(serde_json::json!({
             "native_elapsed_ns": native_elapsed_ns,
@@ -278,7 +306,8 @@ fn benchmark_check_arrow(
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
     max_samples=DEFAULT_SAMPLES,
-    threads=None
+    threads=None,
+    references=Vec::new()
 ))]
 #[allow(clippy::too_many_arguments)]
 fn check_partitions_arrow(
@@ -290,8 +319,10 @@ fn check_partitions_arrow(
     max_output_records: u64,
     max_samples: usize,
     threads: Option<usize>,
+    references: ReferenceSources,
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
+        let references = reference_bindings(references)?;
         let readers = sources
             .into_iter()
             .map(|source| Box::new(source.0) as PartitionReader)
@@ -316,7 +347,8 @@ fn check_partitions_arrow(
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
         };
-        check_partition_readers(readers, &plan, &options).map(|report| (report, source_digest))
+        check_partition_readers_with_references(readers, &plan, &options, references)
+            .map(|report| (report, source_digest))
     });
     result
         .map_err(|error| map_error(py, error))
@@ -333,7 +365,8 @@ fn check_partitions_arrow(
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
     max_samples=DEFAULT_SAMPLES,
-    threads=None
+    threads=None,
+    references=Vec::new()
 ))]
 #[allow(clippy::too_many_arguments)]
 fn check_partitions_with_evidence_arrow(
@@ -345,8 +378,10 @@ fn check_partitions_with_evidence_arrow(
     max_output_records: u64,
     max_samples: usize,
     threads: Option<usize>,
+    references: ReferenceSources,
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
+        let references = reference_bindings(references)?;
         let readers = sources
             .into_iter()
             .map(|source| Box::new(source.0) as PartitionReader)
@@ -371,8 +406,13 @@ fn check_partitions_with_evidence_arrow(
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
         };
-        let (report, manifest) =
-            check_partition_readers_with_evidence(readers, &plan, &source_digest, &options)?;
+        let (report, manifest) = check_partition_readers_with_evidence_and_references(
+            readers,
+            &plan,
+            &source_digest,
+            &options,
+            references,
+        )?;
         let mut report = serde_json::to_value(report)?;
         report
             .as_object_mut()
@@ -475,7 +515,8 @@ fn assemble_evidence_unchecked_arrow(
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
     max_samples=DEFAULT_SAMPLES,
-    threads=None
+    threads=None,
+    references=Vec::new()
 ))]
 #[allow(clippy::too_many_arguments)]
 fn check_with_evidence_arrow(
@@ -488,8 +529,10 @@ fn check_with_evidence_arrow(
     max_output_records: u64,
     max_samples: usize,
     threads: Option<usize>,
+    references: ReferenceSources,
 ) -> PyResult<Py<PyAny>> {
     let result = py.detach(move || {
+        let references = reference_bindings(references)?;
         let schema = source.0.schema();
         let source_digest = contract_source_digest(&contract_json)?;
         let document = ContractDocument::from_json(&contract_json)?;
@@ -505,7 +548,8 @@ fn check_with_evidence_arrow(
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
         };
-        let (report, fingerprint) = execute_reader_with_fingerprint(source.0, &plan, &options)?;
+        let (report, fingerprint) =
+            execute_reader_with_fingerprint_and_references(source.0, &plan, &options, references)?;
         let mut report_value = serde_json::to_value(&report)?;
         let report_object = report_value.as_object_mut().ok_or_else(|| {
             ProofFrameError::InvalidReceipt("Validation report is not a JSON object".into())
@@ -560,7 +604,8 @@ fn check_with_evidence_arrow(
     max_memory_bytes=DEFAULT_MEMORY_BYTES,
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
-    max_samples=DEFAULT_SAMPLES
+    max_samples=DEFAULT_SAMPLES,
+    references=Vec::new()
 ))]
 #[allow(clippy::too_many_arguments)]
 fn validate_arrow(
@@ -572,6 +617,7 @@ fn validate_arrow(
     max_temp_bytes: u64,
     max_output_records: u64,
     max_samples: usize,
+    references: ReferenceSources,
 ) -> PyResult<Py<PyAny>> {
     check_arrow(
         py,
@@ -583,6 +629,7 @@ fn validate_arrow(
         max_output_records,
         max_samples,
         None,
+        references,
     )
 }
 
@@ -594,7 +641,8 @@ fn validate_arrow(
     max_memory_bytes=DEFAULT_MEMORY_BYTES,
     max_temp_bytes=DEFAULT_TEMP_BYTES,
     max_output_records=DEFAULT_OUTPUT_RECORDS,
-    max_samples=DEFAULT_SAMPLES
+    max_samples=DEFAULT_SAMPLES,
+    references=Vec::new()
 ))]
 #[allow(clippy::too_many_arguments)]
 fn validate_fast_arrow(
@@ -606,6 +654,7 @@ fn validate_fast_arrow(
     max_temp_bytes: u64,
     max_output_records: u64,
     max_samples: usize,
+    references: ReferenceSources,
 ) -> PyResult<Py<PyAny>> {
     check_arrow(
         py,
@@ -617,6 +666,7 @@ fn validate_fast_arrow(
         max_output_records,
         max_samples,
         None,
+        references,
     )
 }
 
@@ -975,7 +1025,10 @@ fn map_error(py: Python<'_>, error: ProofFrameError) -> PyErr {
         | ErrorCode::ContractUnknownField
         | ErrorCode::ContractInvalidBound
         | ErrorCode::ContractDraft
-        | ErrorCode::ContractTypeMismatch => ContractError::new_err(message),
+        | ErrorCode::ContractTypeMismatch
+        // An unbound reference is a mismatch between the contract and the call, so it
+        // belongs with the other contract errors rather than the generic base class.
+        | ErrorCode::ReferenceUnbound => ContractError::new_err(message),
         ErrorCode::SchemaMismatch | ErrorCode::MissingColumn | ErrorCode::UnsupportedType => {
             SchemaError::new_err(message)
         }

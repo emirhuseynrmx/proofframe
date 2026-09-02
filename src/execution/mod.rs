@@ -3,12 +3,16 @@
 mod dataset_state;
 mod kernels;
 mod partition;
+mod references;
 mod resource;
 mod row_kernels;
 
 pub use partition::{
     PartitionReader, check_partition_readers, check_partition_readers_with_evidence,
+    check_partition_readers_with_evidence_and_references, check_partition_readers_with_references,
 };
+
+pub use references::{ReferenceBindings, ReferenceOutcome};
 
 pub use resource::{
     CancellationToken, MemoryReservation, ResourceAccount, ResourceLimits, TempReservation,
@@ -43,7 +47,24 @@ pub fn execute_reader<R>(
 where
     R: RecordBatchReader,
 {
-    execute_reader_inner(reader, plan, options, false).map(|(report, _)| report)
+    execute_reader_inner(reader, plan, options, false, ReferenceBindings::new())
+        .map(|(report, _)| report)
+}
+
+/// Execute a compiled contract whose reference rules resolve against `references`.
+///
+/// A contract with no reference rules and empty bindings behaves exactly like
+/// [`execute_reader`]; any other mismatch between rules and bindings is an error.
+pub fn execute_reader_with_references<R>(
+    reader: R,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    references: ReferenceBindings,
+) -> Result<FastValidationReport, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    execute_reader_inner(reader, plan, options, false, references).map(|(report, _)| report)
 }
 
 /// Execute validation and compute the V2 dataset fingerprint from the same batch traversal.
@@ -55,7 +76,20 @@ pub fn execute_reader_with_fingerprint<R>(
 where
     R: RecordBatchReader,
 {
-    let (report, fingerprint) = execute_reader_inner(reader, plan, options, true)?;
+    execute_reader_with_fingerprint_and_references(reader, plan, options, ReferenceBindings::new())
+}
+
+/// Validate, fingerprint, and resolve reference rules from the same batch traversal.
+pub fn execute_reader_with_fingerprint_and_references<R>(
+    reader: R,
+    plan: &CompiledContract,
+    options: &ExecutionOptions,
+    references: ReferenceBindings,
+) -> Result<(FastValidationReport, Fingerprint), ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    let (report, fingerprint) = execute_reader_inner(reader, plan, options, true, references)?;
     fingerprint
         .map(|fingerprint| (report, fingerprint))
         .ok_or_else(|| {
@@ -68,12 +102,20 @@ fn execute_reader_inner<R>(
     plan: &CompiledContract,
     options: &ExecutionOptions,
     fingerprint: bool,
+    references: ReferenceBindings,
 ) -> Result<(FastValidationReport, Option<Fingerprint>), ProofFrameError>
 where
     R: RecordBatchReader,
 {
     let resource_root = ResourceAccount::root(options.resources);
-    execute_reader_inner_with_account(reader, plan, options, fingerprint, resource_root)
+    execute_reader_inner_with_account(
+        reader,
+        plan,
+        options,
+        fingerprint,
+        resource_root,
+        references,
+    )
 }
 
 pub(super) fn execute_reader_inner_with_account<R>(
@@ -82,6 +124,7 @@ pub(super) fn execute_reader_inner_with_account<R>(
     options: &ExecutionOptions,
     fingerprint: bool,
     resource_root: ResourceAccount,
+    references: ReferenceBindings,
 ) -> Result<(FastValidationReport, Option<Fingerprint>), ProofFrameError>
 where
     R: RecordBatchReader,
@@ -99,16 +142,44 @@ where
     )?;
     let (_unique_directory, mut unique_states) =
         initialize_unique_states(plan, options, &resource_root)?;
+    // Reference datasets are scanned before the subject so that a missing binding, an
+    // absent reference column, or a key type mismatch fails before any work is spent.
+    let prepared = references::prepare(
+        plan.dataset_plan().references(),
+        references,
+        plan.schema(),
+        &resource_root,
+        options.resources,
+        &options.cancellation,
+    )?;
+    let (mut reference_state, prepared) = references::ReferenceState::new(
+        prepared,
+        &resource_root,
+        options.resources,
+        options.row_count_hint,
+        &options.cancellation,
+    )?;
     let rows = scan_reader(
         reader,
         plan,
         options,
-        &mut fingerprint,
-        &mut validation,
-        &mut unique_states,
-        &mut dataset_state,
+        ScanState {
+            fingerprint: &mut fingerprint,
+            validation: &mut validation,
+            unique_states: &mut unique_states,
+            dataset_state: &mut dataset_state,
+            reference_state: &mut reference_state,
+        },
     )?;
     let mut metrics = finish_unique_states(plan, unique_states, &mut validation)?;
+    let (reference_outcomes, reference_metrics) =
+        reference_state.finish(prepared, finding_limit, &mut validation)?;
+    metrics.spill_bytes = metrics
+        .spill_bytes
+        .saturating_add(reference_metrics.spill_bytes);
+    metrics.exact_runs = metrics
+        .exact_runs
+        .saturating_add(reference_metrics.exact_runs);
     let dataset_metrics = dataset_state.finish(rows, &mut validation)?;
     metrics.spill_bytes = metrics
         .spill_bytes
@@ -117,7 +188,15 @@ where
         .exact_runs
         .saturating_add(dataset_metrics.exact_runs);
     validation.check_resources()?;
-    let report = build_report(plan, options, &resource_root, validation, rows, metrics)?;
+    let report = build_report(
+        plan,
+        options,
+        &resource_root,
+        validation,
+        rows,
+        metrics,
+        reference_outcomes,
+    )?;
     Ok((report, fingerprint.map(V2FingerprintState::finish)))
 }
 
@@ -181,18 +260,31 @@ fn initialize_unique_states(
     Ok((directory, states))
 }
 
+/// Everything one traversal accumulates, so the scan takes the plan, the stream, and this.
+struct ScanState<'a> {
+    fingerprint: &'a mut Option<V2FingerprintState>,
+    validation: &'a mut ValidationState,
+    unique_states: &'a mut [Option<ExactState>],
+    dataset_state: &'a mut dataset_state::DatasetState,
+    reference_state: &'a mut references::ReferenceState,
+}
+
 fn scan_reader<R>(
     reader: R,
     plan: &CompiledContract,
     options: &ExecutionOptions,
-    fingerprint: &mut Option<V2FingerprintState>,
-    validation: &mut ValidationState,
-    unique_states: &mut [Option<ExactState>],
-    dataset_state: &mut dataset_state::DatasetState,
+    state: ScanState<'_>,
 ) -> Result<u64, ProofFrameError>
 where
     R: RecordBatchReader,
 {
+    let ScanState {
+        fingerprint,
+        validation,
+        unique_states,
+        dataset_state,
+        reference_state,
+    } = state;
     let mut rows = 0_u64;
     for maybe_batch in reader {
         options.cancellation.check()?;
@@ -221,6 +313,8 @@ where
             validation.check_resources()?;
         }
         dataset_state.update(&batch, rows, validation)?;
+        validation.check_resources()?;
+        reference_state.update(&batch, rows, validation)?;
         validation.check_resources()?;
         rows += batch.num_rows() as u64;
     }
@@ -265,9 +359,11 @@ fn build_report(
     validation: ValidationState,
     rows: u64,
     metrics: ExactMetrics,
+    references: Vec<ReferenceOutcome>,
 ) -> Result<FastValidationReport, ProofFrameError> {
     let outcome = validation.finish();
     Ok(FastValidationReport {
+        references,
         valid: outcome.violation_count == 0,
         violation_count: outcome.violation_count,
         truncated: outcome.truncated,

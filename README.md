@@ -192,6 +192,35 @@ partition's V2 fingerprint, row count, schema, contract, compiled plan, result c
 result, and resource settings. Reordering, omission, duplication, or mixed identities fails
 verification.
 
+### Check a foreign key across datasets
+
+```python
+orders = pa.table({"customer_id": [1, 99, 2]})
+customers = pa.table({"id": [1, 2]})
+
+contract = {
+    "version": "proofframe.contract.v2",
+    "dataset_rules": {
+        "references": [{
+            "name": "orders_customer_fk",
+            "columns": ["customer_id"],
+            "reference": "customers",
+            "reference_columns": ["id"],
+        }],
+    },
+}
+
+report = pf.check(orders, contract, references={"customers": customers})
+assert report["valid"] is False
+assert report["findings"][0]["row"] == 1
+assert report["references"][0]["reference_fingerprint"].startswith("pf-fp-v2:")
+```
+
+The contract names the reference; the caller supplies it. A declared reference with no bound
+dataset, and a bound dataset no rule uses, are both errors: a foreign key that is never evaluated
+would otherwise report as one that held. The report records the fingerprint of the dataset the keys
+resolved against, because "the key held" is not verifiable without saying against what.
+
 ## One engine, several proof operations
 
 ### Fingerprint a dataset

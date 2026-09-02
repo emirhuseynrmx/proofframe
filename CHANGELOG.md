@@ -2,6 +2,20 @@
 
 ## 0.6.0
 
+- Added `dataset_rules.references`: every key in the validated dataset must also appear in a
+  named reference dataset the caller binds through `references=` (or `--reference NAME=PATH`).
+  Keys pair by position so the two sides may name the same identity differently, Arrow key types
+  must match, `nulls` is `"skip"` or `"reject"`, and findings report the first row carrying each
+  absent key. Resolution uses the existing bounded, spilling exact-set machinery and stays within
+  the supplied resource limits; under `check_partitions` every key resolves against the whole
+  reference exactly once.
+- A reference rule is checked or the run fails: a declared reference with no bound dataset, and a
+  bound dataset no rule uses, both raise `PF_REFERENCE_UNBOUND` before the subject is scanned,
+  because a foreign key that is never evaluated reports as one that held.
+- Validation reports now carry `references`, recording for each rule the dataset it resolved
+  against, that dataset's `pf-fp-v2` fingerprint and row count, and the distinct keys checked and
+  missing. Reference rules are appended to `compiled_plan_digest` only when a plan carries them,
+  so contracts written before this release keep the plan identity their receipts recorded.
 - Added review-required V2 contract suggestions for Arrow, pandas, and Polars data, with typed
   schema rules, exact optional uniqueness, bounded optional categories, and safe range omissions.
 - Added `proofframe suggest` plus complete getting-started, contract, API, and concepts guides.
