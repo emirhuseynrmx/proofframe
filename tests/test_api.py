@@ -63,6 +63,25 @@ def test_profile_can_skip_exact_distinct_counts():
         proofframe.profile(users(), distinct="approximate")
 
 
+def test_suggest_contract_defaults_to_safe_inference_and_exact_integer_bounds():
+    source = pa.table(
+        {
+            "id": pa.array([9_007_199_254_740_995, 9_007_199_254_740_993], type=pa.int64()),
+            "state": ["new", "paid"],
+        }
+    )
+
+    contract = proofframe.suggest_contract(source)
+
+    assert contract["version"] == "proofframe.contract.v2"
+    assert contract["status"] == "draft"
+    assert contract["columns"]["id"]["min"] == 9_007_199_254_740_993
+    assert contract["columns"]["id"]["max"] == 9_007_199_254_740_995
+    assert contract["suggested_from"]["uniqueness_inferred"] is False
+    assert "distinct_ratio" not in contract["dataset_rules"]
+    assert "allowed" not in contract["columns"]["state"]
+
+
 def test_exact_profile_accepts_hard_resource_limits():
     with pytest.warns(RuntimeWarning, match="exact distinct"):
         report = proofframe.profile(

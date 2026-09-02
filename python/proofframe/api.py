@@ -24,6 +24,7 @@ from ._proofframe import (
     sign_evidence_receipt,
     sign_proof_receipt,
     verify_proof_receipt_any,
+    suggest_arrow,
 )
 
 
@@ -109,6 +110,40 @@ def profile(
     temp_budget = _temp_budget(max_temp, spill)
     return profile_arrow(
         _as_reader(data), distinct, _row_count_hint(data), max_memory, temp_budget
+    )
+
+
+def suggest_contract(
+    data: Any,
+    *,
+    infer_uniqueness: bool = False,
+    infer_categories: bool = False,
+    max_categories: int = 20,
+    infer_required: bool = False,
+    infer_ranges: bool = True,
+    range_tolerance: float = 0.0,
+    infer_row_count: bool = True,
+    max_memory: int = 512 * 1024 * 1024,
+    max_temp: int = 4 * 1024 * 1024 * 1024,
+    spill: str = "auto",
+) -> dict[str, Any]:
+    """Return a review-required V2 contract draft inferred from one Arrow scan."""
+    if max_categories <= 0:
+        raise ValueError("max_categories must be positive")
+    if not isinstance(range_tolerance, (int, float)) or range_tolerance < 0:
+        raise ValueError("range_tolerance must be a finite non-negative number")
+    return suggest_arrow(
+        _as_reader(data),
+        infer_uniqueness,
+        infer_categories,
+        max_categories,
+        infer_required,
+        infer_ranges,
+        float(range_tolerance),
+        infer_row_count,
+        _row_count_hint(data),
+        max_memory,
+        _temp_budget(max_temp, spill),
     )
 
 

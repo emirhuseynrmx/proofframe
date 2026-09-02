@@ -18,6 +18,7 @@ mod pii;
 #[cfg(feature = "python")]
 mod python;
 pub mod receipt;
+mod suggest;
 
 pub use contract::{
     AssertionAst, BoundAst, ColumnPlan, CompareAst, CompareOpAst, ComparePlan, CompiledContract,
@@ -37,6 +38,7 @@ pub use execution::{
     check_partition_readers_with_evidence, execute_reader, execute_reader_with_fingerprint,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
+pub use suggest::{SuggestOptions, suggest_reader_with_options};
 
 /// Exercise the checksummed diff-partition decoder with a hard one-MiB input cap.
 ///
@@ -537,7 +539,10 @@ fn update_schema_hash(hasher: &mut blake3::Hasher, name: &str, data_type: &str, 
     hasher.update(&[u8::from(nullable)]);
 }
 
-fn canonical_value_bytes(array: &dyn Array, row: usize) -> Result<Vec<u8>, ProofFrameError> {
+pub(crate) fn canonical_value_bytes(
+    array: &dyn Array,
+    row: usize,
+) -> Result<Vec<u8>, ProofFrameError> {
     if array.is_null(row) {
         return Ok(vec![0]);
     }
@@ -672,7 +677,7 @@ fn value_for_rules(array: &dyn Array, row: usize) -> Result<String, ProofFrameEr
     array_value_to_string(array, row).map_err(Into::into)
 }
 
-fn update_hash(
+pub(crate) fn update_hash(
     hasher: &mut blake3::Hasher,
     column: usize,
     array: &dyn Array,
@@ -776,7 +781,7 @@ fn prepare_validation(
     })
 }
 
-fn profile_hasher(schema: &SchemaRef) -> blake3::Hasher {
+pub(crate) fn profile_hasher(schema: &SchemaRef) -> blake3::Hasher {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pf-fp-v1\0");
     for field in schema.fields() {
