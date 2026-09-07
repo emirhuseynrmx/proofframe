@@ -43,7 +43,7 @@ body:
       label: Environment
       description: Include ProofFrame, Python, PyArrow, Rust (if built from source), OS, and installation method.
       placeholder: |
-        ProofFrame: 0.6.0
+        ProofFrame: 0.7.0
         Python: 3.11
         PyArrow: 19.0.0
         OS: Ubuntu 24.04

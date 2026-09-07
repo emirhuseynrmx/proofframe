@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.csv as arrow_csv
 from pyarrow import parquet
 
+from .acceptance import accept_file, verify_acceptance
 from .api import (
     check,
     check_with_evidence,
@@ -27,6 +28,7 @@ from .api import (
     verify_receipt,
 )
 from .errors import ContractError, ProofFrameError, ResourceLimitError
+from .review import review
 
 DEFAULT_BATCH_SIZE = 65_536
 DEFAULT_MEMORY = 512 * 1024 * 1024
@@ -181,13 +183,17 @@ def _parser() -> argparse.ArgumentParser:
     check_parser = commands.add_parser("check", help="compile and enforce a JSON contract")
     _add_check_arguments(check_parser)
 
+    review_parser = commands.add_parser("review", help="write an offline review; violations exit 1")
+    _add_check_arguments(review_parser)
+    review_parser.set_defaults(max_samples=0)
+    review_parser.add_argument("--out", required=True, help="new directory; never overwritten")
+    review_parser.add_argument("--max-output-bytes", type=_parse_bytes, default=16 << 20)
+
     fingerprint_parser = commands.add_parser(
         "fingerprint", help="compute a canonical dataset fingerprint"
     )
     fingerprint_parser.add_argument("path")
-    fingerprint_parser.add_argument(
-        "--fingerprint-version", choices=("v1", "v2"), default="v2"
-    )
+    fingerprint_parser.add_argument("--fingerprint-version", choices=("v1", "v2"), default="v2")
     _add_stream_options(fingerprint_parser)
 
     diff_parser = commands.add_parser("diff", help="stream an exact keyed dataset diff")
@@ -250,6 +256,23 @@ def _parser() -> argparse.ArgumentParser:
 
     validate_parser = commands.add_parser("validate", help="deprecated alias for check")
     _add_check_arguments(validate_parser)
+    accept_parser = commands.add_parser(
+        "accept", help="scan and produce a bound acceptance decision"
+    )
+    accept_parser.add_argument("path")
+    accept_parser.add_argument("--contract", required=True)
+    accept_parser.add_argument("--policy", help="acceptance policy JSON file")
+    accept_parser.add_argument("--csv-options", help="explicit CSV reader settings JSON file")
+    accept_parser.add_argument("--output")
+    accept_parser.add_argument(
+        "--private-key-file", help="URL-safe base64 Ed25519 private key file"
+    )
+    _add_resource_options(accept_parser)
+    verify_accept_parser = commands.add_parser(
+        "verify-acceptance", help="verify a bound acceptance bundle offline"
+    )
+    verify_accept_parser.add_argument("bundle")
+    verify_accept_parser.add_argument("--expected-public-key")
     return parser
 
 
@@ -316,6 +339,46 @@ def _check(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.command == "accept":
+        result = accept_file(
+            args.path,
+            _load_mapping(args.contract, "contract"),
+            policy=_load_mapping(args.policy, "policy") if args.policy else None,
+            csv_options=_load_mapping(args.csv_options, "CSV options")
+            if args.csv_options
+            else None,
+            output=args.output,
+            private_key=Path(args.private_key_file).read_text().strip()
+            if args.private_key_file
+            else None,
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+            max_output_records=args.max_output_records,
+            spill=args.spill,
+        )
+        return result, {"accepted": 0, "rejected": 1, "unknown": 3}[
+            result["payload"]["decision"]["status"]
+        ]
+    if args.command == "verify-acceptance":
+        result = verify_acceptance(
+            _load_mapping(args.bundle, "bundle"), expected_public_key=args.expected_public_key
+        )
+        return result, 0 if result["valid"] else 1
+    if args.command == "review":
+        result = review(
+            _open_reader(args.path, args.batch_size),
+            _load_mapping(args.contract, "contract"),
+            args.out,
+            label=Path(args.path).name,
+            references=_references(args),
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+            max_samples=args.max_samples,
+            max_output_records=args.max_output_records,
+            spill=args.spill,
+            max_output_bytes=args.max_output_bytes,
+        )
+        return result, 0 if result["valid"] else 1
     if args.command == "check":
         result = _check(args)
         return result, 0 if result["valid"] else 1

@@ -245,8 +245,19 @@ fn merge_reports(
     let mut row_offset = 0_u64;
     let mut violation_count = 0_u64;
     let mut metrics = ExecutionMetrics::default();
+    let mut evaluated: Vec<u64> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
     for report in reports {
         violation_count = violation_count.saturating_add(report.violation_count);
+        if indices.len() < report.evaluated_indices.len() {
+            indices = report.evaluated_indices.clone();
+        }
+        if evaluated.len() < report.evaluated_columns.len() {
+            evaluated.resize(report.evaluated_columns.len(), 0);
+        }
+        for (total, part) in evaluated.iter_mut().zip(&report.evaluated_columns) {
+            *total = total.saturating_add(*part);
+        }
         for mut finding in report.findings {
             if findings.len() == finding_limit {
                 break;
@@ -273,6 +284,10 @@ fn merge_reports(
         violation_count,
         truncated: (findings.len() as u64) < violation_count,
         findings,
+        // Partitions are scanned separately; a column is exercised when any
+        // partition offered it a value, so the counts add.
+        evaluated_columns: evaluated,
+        evaluated_indices: indices,
         rows: row_offset,
         mode: "rules_only",
         metrics,

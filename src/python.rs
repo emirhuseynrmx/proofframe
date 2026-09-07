@@ -1022,6 +1022,7 @@ fn map_error(py: Python<'_>, error: ProofFrameError) -> PyErr {
     let message = error.to_string();
     let py_error = match code {
         ErrorCode::ContractInvalidJson
+        | ErrorCode::ContractInvalidType
         | ErrorCode::ContractUnknownField
         | ErrorCode::ContractInvalidBound
         | ErrorCode::ContractDraft

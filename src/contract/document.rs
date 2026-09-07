@@ -25,7 +25,7 @@ impl ContractDocument {
             .ok_or_else(|| {
                 ProofFrameError::contract(
                     ErrorCode::ContractInvalidJson,
-                    "Contract version must be a string",
+                    "Contract version must be a string: use \"proofframe.contract.v1\" or \"proofframe.contract.v2\" (not a number)",
                     Some("$.version".to_string()),
                 )
             })?;

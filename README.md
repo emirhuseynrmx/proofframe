@@ -32,24 +32,37 @@ ProofFrame keeps these answers deterministic and resource-bounded. Exact uniquen
 leakage operations have explicit memory, temporary-storage, sample, and output limits. Corrupt
 temporary data, incompatible schemas, ambiguous contracts, and exceeded limits fail closed.
 
-> **Current release — 0.6.0**
+> **0.7.0 — Data Review**
 >
-> 0.6.0 adds review-required contract suggestions, complete contract and API guides, runnable
-> workflows, and practical integration examples. Existing V1/V2 contract and fingerprint protocols
-> remain compatible.
+> Turn a validation run into an offline HTML report, CI Markdown summary, validation JSON,
+> and signable Evidence V2. One scan, exact counts, bounded samples. Contract errors now
+> identify the offending column and explain the expected type or version.
+
+## Review a dataset
+
+```bash
+proofframe review orders.parquet --contract contract.json --out review-run
+# Open review-run/index.html. To include finding details, use a NEW folder:
+proofframe review orders.parquet --contract contract.json --out review-details --max-samples 20
+```
+
+**CI:** `review` exits **1** on contract violations; existing `evidence` still exits **0**
+when evidence generation succeeds. Samples default to zero. Contracts and column names
+are not redacted. Nothing is uploaded. Read the [review guide](docs/review.md) for limits,
+privacy, signing, output publication and the [runnable demo](examples/review_demo.py).
 
 ## Install
 
 Python 3.10–3.13:
 
 ```bash
-pip install proofframe==0.6.0
+pip install proofframe==0.7.0
 ```
 
 Rust 1.85 or newer:
 
 ```bash
-cargo add proofframe@0.6.0
+cargo add proofframe@0.7.0
 ```
 
 ## The 30-second demo
@@ -379,3 +392,7 @@ coverage, DeepSource, and SonarCloud.
 
 ProofFrame is licensed under [Apache-2.0](LICENSE). Report vulnerabilities through the process in
 [SECURITY.md](SECURITY.md). Sponsorship is available through [GitHub Sponsors](https://github.com/sponsors/emirhuseynrmx).
+
+## File acceptance in 0.7.0
+
+Use `accept_file` for an explicit accepted/rejected/unknown decision, minimum column evaluation thresholds, reproducible CSV reader settings and a bound evidence envelope. Optional Ed25519 signing covers the entire policy/read-settings/decision/native-evidence payload. See [the acceptance API and CLI guide](docs/acceptance.md). This does not replace native checks or claim that every rule executed.

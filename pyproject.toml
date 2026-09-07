@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "proofframe"
-version = "0.6.0"
+version = "0.7.0"
 description = "Rust-native Arrow contracts, exact checks, fingerprints, and verifiable evidence."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,9 +21,11 @@ classifiers = [
 dependencies = ["pyarrow>=15"]
 
 [project.optional-dependencies]
+signing = ["cryptography>=43"]
 pandas = ["pandas>=2"]
 polars = ["polars>=1"]
 dev = [
+  "cryptography>=43",
   "maturin>=1.11",
   "pytest>=8",
   "pytest-cov>=7",

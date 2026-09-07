@@ -1,6 +1,7 @@
 """ProofFrame: Rust-native contracts, canonical fingerprints, and proof receipts."""
 
 from ._proofframe import __version__
+from .acceptance import accept_file, verify_acceptance
 from .api import (
     assemble_evidence_unchecked,
     check,
@@ -30,6 +31,7 @@ from .errors import (
     ResourceLimitError,
     SchemaError,
 )
+from .review import review
 
 __all__ = [
     "ContractError",
@@ -42,6 +44,7 @@ __all__ = [
     "ResourceLimitError",
     "SchemaError",
     "__version__",
+    "accept_file",
     "assemble_evidence_unchecked",
     "check",
     "check_partitions",
@@ -52,10 +55,12 @@ __all__ = [
     "fingerprint",
     "generate_keypair",
     "profile",
+    "review",
     "scan_pii",
     "sign_evidence",
     "sign_receipt",
     "suggest_contract",
     "validate",
+    "verify_acceptance",
     "verify_receipt",
 ]

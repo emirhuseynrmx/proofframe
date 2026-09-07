@@ -267,6 +267,19 @@ pub struct FastValidationReport {
     pub rows: u64,
     /// Evaluation mode identifier (`rules_only`).
     pub mode: &'static str,
+    /// Non-null values each scanned column was offered, in compiled column order.
+    ///
+    /// A zero means the rules on that column were never asked anything. It is not a
+    /// pass, and reading it as one is the mistake this field exists to prevent.
+    /// Names are not attached here: the scan loop is covered by an allocation
+    /// contract, and the caller already holds the contract that supplies them.
+    pub evaluated_columns: Vec<u64>,
+    /// Schema field index for each entry of `evaluated_columns`.
+    ///
+    /// Positions alone would force the caller to assume the compiler kept the
+    /// contract's declaration order, and a report built on that assumption is exactly
+    /// the silently wrong result this field is here to prevent.
+    pub evaluated_indices: Vec<u32>,
     /// Accounted native state and spill activity for release diagnostics.
     pub metrics: ExecutionMetrics,
     /// Effective hard limits applied to this validation execution.
@@ -283,11 +296,14 @@ struct ValidationOutcome {
     findings: Vec<Finding>,
     violation_count: u64,
     truncated: bool,
+    evaluated: Vec<u64>,
 }
 
 struct ValidationState {
     findings: Vec<Finding>,
     violation_count: u64,
+    /// Non-null values each column plan was actually offered, indexed by plan order.
+    evaluated: Vec<u64>,
     max_findings: usize,
     finding_memory: Option<ResourceAccount>,
     finding_reservations: Vec<MemoryReservation>,
@@ -299,6 +315,7 @@ impl ValidationState {
         Self {
             findings: Vec::new(),
             violation_count: 0,
+            evaluated: Vec::new(),
             max_findings,
             finding_memory: None,
             finding_reservations: Vec::new(),
@@ -356,6 +373,21 @@ impl ValidationState {
         }
     }
 
+    /// Sizes the per-column counters once, before any batch is read.
+    fn prepare_evaluated(&mut self, plans: usize) {
+        self.evaluated = vec![0; plans];
+    }
+
+    /// Records how many values a column plan was offered in one batch.
+    ///
+    /// Never grows: the scan loop is covered by an allocation contract, so the
+    /// counters are sized from the plan before the first batch arrives.
+    fn record_evaluated(&mut self, plan_index: usize, values: u64) {
+        if let Some(total) = self.evaluated.get_mut(plan_index) {
+            *total = total.saturating_add(values);
+        }
+    }
+
     fn check_resources(&mut self) -> Result<(), ProofFrameError> {
         match self.resource_error.take() {
             Some(error) => Err(error),
@@ -368,6 +400,7 @@ impl ValidationState {
             truncated: self.violation_count as usize > self.findings.len(),
             violation_count: self.violation_count,
             findings: self.findings,
+            evaluated: self.evaluated,
         }
     }
 }

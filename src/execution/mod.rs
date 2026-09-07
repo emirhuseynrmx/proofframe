@@ -134,6 +134,7 @@ where
     let mut fingerprint = initialize_fingerprint(reader_schema.as_ref(), fingerprint)?;
     let finding_limit = plan.max_findings().min(options.resources.max_samples);
     let mut validation = ValidationState::new_accounted(finding_limit, resource_root.clone());
+    validation.prepare_evaluated(plan.columns().len());
     let mut dataset_state = dataset_state::DatasetState::new(
         plan.dataset_plan(),
         &resource_root,
@@ -299,6 +300,10 @@ where
         }
         for (plan_index, column) in plan.columns().iter().enumerate() {
             let array = batch.column(column.column_index());
+            // A rule that never saw a value did not pass; it was never asked. Arrow keeps
+            // the null count as batch metadata, so counting what each column actually
+            // offered costs one read per batch and nothing in the per-row kernels.
+            validation.record_evaluated(plan_index, (array.len() - array.null_count()) as u64);
             kernels::scan_column(
                 column,
                 array.as_ref(),
@@ -368,6 +373,14 @@ fn build_report(
         violation_count: outcome.violation_count,
         truncated: outcome.truncated,
         findings: outcome.findings,
+        // Sized from the plan before the scan, so an empty dataset still reports
+        // every column as having been offered nothing.
+        evaluated_columns: outcome.evaluated,
+        evaluated_indices: plan
+            .columns()
+            .iter()
+            .map(|column| column.column_index() as u32)
+            .collect(),
         rows,
         mode: "rules_only",
         metrics: ExecutionMetrics {

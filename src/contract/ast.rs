@@ -104,6 +104,13 @@ impl ContractAst {
             )
         })?;
 
+        if value.get("status").is_some() {
+            return Err(ProofFrameError::contract(
+                ErrorCode::ContractUnknownField,
+                "The field `status` belongs to V2: set version to \"proofframe.contract.v2\"; omitted Python versions default to V1",
+                Some("$.version".to_string()),
+            ));
+        }
         validate_known_fields(&value)?;
         let contract: Self = serde_json::from_value(value).map_err(|error| {
             ProofFrameError::contract(
