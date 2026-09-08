@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.7.0
+
+- Add `accept_file()` and `proofframe accept`: an explicit, versioned acceptance
+  decision over the existing scan. The answer is `accepted`, `rejected` or
+  `unknown`, and `unknown` is a real answer rather than a soft pass — a missing
+  file, a parse failure or an exhausted resource limit can never become
+  `accepted`. No second validation engine was added; this is the existing
+  evidence, read as a decision an application can act on.
+- The acceptance bundle binds four identities together: the contract, the
+  acceptance policy, the reading settings and the evidence. A signature, when one
+  is requested, covers the whole payload rather than a part of it, and
+  `verify_acceptance()` (`proofframe verify-acceptance`) checks it offline
+  without rescanning the data. Verification proves the bundle is intact and
+  signed by the expected key; it does not prove the publisher was honest about
+  the file they scanned.
+- `verify_acceptance()` checks the bundle's shape before it trusts any digest. A
+  hash proves that what is present was not edited and says nothing about what is
+  absent, so a payload whose decision or evidence had been deleted and whose hash
+  had been recomputed previously reported `valid: true`. Every required field must
+  now be present and recognized, the status must be one of the three, and a
+  decision that claims the data was examined must carry the scan it was drawn
+  from, in the shape the scanner writes it: every report and Evidence V2 field
+  present with its own type, counts that are non-negative and agree with what they
+  count, and the evidence schema this release binds. A present field of the wrong
+  type is rejected at least as hard as a missing one, because a reader who sees
+  `valid` goes on to use it. Only `unknown` may have no report, and it must have
+  none rather than something else. This closes a shape gap in unsigned bundles; a
+  signed bundle was never forgeable this way, because the signature covers the
+  whole payload and could not be recomputed.
+- An acceptance policy can require that specific columns actually had values
+  evaluated, so a file cannot be accepted because nothing was asked of it. The
+  limit is stated plainly: these counters are per column, not proof that every
+  rule ran.
+- CSV reading settings are explicit and recorded. Delimiter, encoding, decimal
+  separator, column types and null tokens are chosen by the caller and written
+  into the bundle under their own identity, so two systems reading the same file
+  either agree or disagree visibly. `1.234` is not silently guessed.
+- The review now reports which columns had no value for their rules to check. A
+  contract can pass because nothing was wrong or because nothing was asked, and only
+  the first is a result. The counts come from the same scan: Arrow keeps the null
+  count as batch metadata, so nothing was added to the per-row kernels and the
+  allocation contract is unchanged. The engine reports schema indices rather than
+  names for that reason; the review resolves them from the schema it already had.
+  The HTML report carries the same block, so neither artifact is quietly greener
+  than the other.
+
+- The review summary no longer escapes ProofFrame's own sentences. The Markdown is
+  written for a CI job summary or a pull request description, and a reader who copied
+  the suggested `--max-samples 20` out of it received a command that did not run.
+  Values taken from the data or the contract are still escaped, and `.` and `-` are no
+  longer escaped anywhere: they carry meaning only at the start of a line, which a
+  value cannot reach because whitespace is collapsed before rendering.
+
+- Add Python `review()` and `proofframe review`: one native validation/fingerprint
+  scan produces an offline HTML review, Markdown summary, report JSON and Evidence V2.
+- Show an actionable first sampled finding and exact totals; default to zero samples
+  with explicit `--max-samples 20` guidance. No per-rule verdicts are inferred from samples.
+- Bound combined output bytes, escape HTML/Markdown, snapshot the displayed contract,
+  and publish completed bundles into new directories only.
+- Explain invalid V2 column types and missing/numeric contract versions with field context.
+- `review` exits 1 for violations. Existing `evidence` exit codes and protocols are unchanged.
+
 ## 0.6.0
 
 - Added `dataset_rules.references`: every key in the validated dataset must also appear in a
@@ -157,3 +219,10 @@ performance claims.
 ## 0.4.0-alpha.1
 
 - Initial 0.4 alpha with Arrow-native profiling, contracts, Python API, CLI, and benchmark harness.
+
+### 0.7.0 acceptance completion
+
+- Added `accept_file` and `verify_acceptance`, versioned acceptance policies, minimum native column evaluation requirements, and unknown outcomes for incomplete scans.
+- Added explicit streaming CSV delimiter, encoding, decimal, type and null settings recorded in acceptance bundles.
+- Added `accept` and `verify-acceptance` commands, exclusive atomic bundle publication, and optional whole-payload Ed25519 signatures through `proofframe[signing]`.
+- Existing `review`, Evidence V2 and receipt APIs remain unchanged. Acceptance verification is an integrity/authentication operation, not a rescan.

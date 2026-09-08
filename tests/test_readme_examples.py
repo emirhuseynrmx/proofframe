@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
         "pii_and_leakage.py",
         "evidence_and_receipt.py",
         "suggest_review_check.py",
+        "accept_and_verify.py",
     ],
 )
 def test_example_workflows_remain_executable(example: str) -> None:

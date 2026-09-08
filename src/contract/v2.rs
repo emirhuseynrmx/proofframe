@@ -273,6 +273,7 @@ pub struct ContractAstV2 {
 
 pub(crate) fn parse(value: Value) -> Result<ContractAstV2, ProofFrameError> {
     validate_known_fields(&value)?;
+    diagnose_column_types(&value)?;
     let contract: ContractAstV2 = serde_json::from_value(value).map_err(|error| {
         ProofFrameError::contract(
             ErrorCode::ContractInvalidJson,
@@ -288,6 +289,43 @@ pub(crate) fn parse(value: Value) -> Result<ContractAstV2, ProofFrameError> {
     }
     validate_semantics(&contract)?;
     Ok(contract)
+}
+
+// Use the actual serde types to explain failures, avoiding a second accepted-type list.
+fn diagnose_column_types(value: &Value) -> Result<(), ProofFrameError> {
+    let Some(columns) = value.get("columns").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (column, rule) in columns {
+        let Some(expected) = rule.get("type").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        if serde_json::from_value::<TypeAst>(expected.clone()).is_ok() {
+            continue;
+        }
+        let detail = if expected.is_string() {
+            serde_json::from_value::<PrimitiveTypeAst>(expected.clone())
+                .unwrap_err()
+                .to_string()
+        } else {
+            serde_json::from_value::<ParameterizedTypeAst>(expected.clone())
+                .unwrap_err()
+                .to_string()
+        };
+        let hint = match expected.as_str() {
+            Some("string") => " Use `utf8` for Arrow strings.",
+            Some("integer") => " Choose the Arrow width explicitly, for example `int64`.",
+            Some("decimal128") => " Use an object with name, precision and scale.",
+            Some("timestamp") => " Use an object with name, unit and optional timezone.",
+            _ => "",
+        };
+        return Err(ProofFrameError::contract(
+            ErrorCode::ContractInvalidType,
+            format!("Column {column:?}, field `type`: {detail}.{hint}"),
+            Some(format!("$.columns[{column:?}].type")),
+        ));
+    }
+    Ok(())
 }
 
 fn default_max_findings() -> usize {
