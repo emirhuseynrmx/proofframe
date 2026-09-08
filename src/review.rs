@@ -113,8 +113,21 @@ fn markdown_escape_str(value: &str) -> String {
     for character in escaped.chars() {
         if matches!(
             character,
-            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '!' | '|'
-                | '>' | '~'
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '!'
+                | '|'
+                | '>'
+                | '~'
         ) {
             out.push('\\');
         }
@@ -207,7 +220,9 @@ fn action(report: &Value) -> Result<(Vec<Segment>, Vec<Segment>), ProofFrameErro
     };
     let column = data_text(&get_or(first, "column", "Dataset"));
     let row = data_text(&get_or(first, "row", "—"));
-    let rule = first.get("rule").ok_or_else(|| missing("findings[].rule"))?;
+    let rule = first
+        .get("rule")
+        .ok_or_else(|| missing("findings[].rule"))?;
     Ok((
         vec![column, own(" · row "), row],
         vec![
@@ -354,7 +369,9 @@ fn capitalize(value: &str) -> String {
     let mut characters = value.chars();
     match characters.next() {
         None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + &characters.as_str().to_lowercase(),
+        Some(first) => {
+            first.to_uppercase().collect::<String>() + &characters.as_str().to_lowercase()
+        }
     }
 }
 
@@ -382,7 +399,9 @@ fn findings_section(report: &Value, out: &mut String) -> Result<(), ProofFrameEr
     for finding in found {
         let column = escape_str(&get_or(finding, "column", "Dataset"));
         let row = escape_str(&get_or(finding, "row", "—"));
-        let rule = finding.get("rule").ok_or_else(|| missing("findings[].rule"))?;
+        let rule = finding
+            .get("rule")
+            .ok_or_else(|| missing("findings[].rule"))?;
         let message = escape_str(&get_or(finding, "message", ""));
         out.push_str("<article class=\"finding\"><div class=\"location\">");
         out.push_str(&format!("<code>{column}</code>"));
@@ -428,9 +447,7 @@ fn contract_section(contract: &Value, out: &mut String) {
             continue;
         }
         let heading = escape_text(&capitalize(&name.replace('_', " ")));
-        out.push_str(&format!(
-            "<details><summary>{heading}</summary><pre>"
-        ));
+        out.push_str(&format!("<details><summary>{heading}</summary><pre>"));
         // Rules may contain sensitive literal values: disclose rather than claim redaction.
         let mut rendered = String::new();
         python_json(value.unwrap_or(&Value::Null), 0, &mut rendered);
@@ -483,7 +500,9 @@ pub fn review_html(
     out.push_str(&format!("<p>{}</p>", render_html(&instruction)));
     out.push_str(&format!("<p class=\"muted\">{}</p>", escape_text(label)));
     if !is_valid && found.is_empty() {
-        out.push_str("<pre>--max-samples 20</pre><p class=\"muted\">Finding details are off by default. ");
+        out.push_str(
+            "<pre>--max-samples 20</pre><p class=\"muted\">Finding details are off by default. ",
+        );
         out.push_str("Enabling samples can include sensitive content in every artifact.</p>");
     }
     out.push_str("<nav aria-label=\"Review files\"><a href=\"report.json\">Validation JSON</a>");
@@ -609,7 +628,9 @@ pub fn review_markdown(
     for finding in found {
         let column = markdown_escape_str(&get_or(finding, "column", "Dataset"));
         let row = markdown_escape_str(&get_or(finding, "row", "None"));
-        let rule = finding.get("rule").ok_or_else(|| missing("findings[].rule"))?;
+        let rule = finding
+            .get("rule")
+            .ok_or_else(|| missing("findings[].rule"))?;
         let message = markdown_escape_str(&get_or(finding, "message", ""));
         out.push_str(&format!(
             "- {column}, row {row}: {} — {message}\n",
@@ -624,10 +645,16 @@ pub fn review_markdown(
             idle.len()
         ));
         for name in &idle {
-            out.push_str(&format!("- {}: 0 values evaluated\n", markdown_escape_str(name)));
+            out.push_str(&format!(
+                "- {}: 0 values evaluated\n",
+                markdown_escape_str(name)
+            ));
         }
     }
-    out.push_str(&format!("\nDataset fingerprint: {}\n\n", fingerprint(evidence)?));
+    out.push_str(&format!(
+        "\nDataset fingerprint: {}\n\n",
+        fingerprint(evidence)?
+    ));
     out.push_str("This review is local. Evidence is unsigned until signed separately.\n");
     Ok(out)
 }

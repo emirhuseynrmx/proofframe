@@ -1090,7 +1090,14 @@ fn review_html_json(
     label: &str,
     column_names: Vec<String>,
 ) -> PyResult<String> {
-    render_review(py, report_json, evidence_json, Some(contract_json), label, &column_names)
+    render_review(
+        py,
+        report_json,
+        evidence_json,
+        Some(contract_json),
+        label,
+        &column_names,
+    )
 }
 
 /// Render the Markdown CI summary from the same report and evidence.

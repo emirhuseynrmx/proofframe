@@ -65,13 +65,19 @@ fn the_review_renders_exactly_what_the_python_implementation_rendered() {
         )
         .expect("html");
         let expected_html = read(&format!("{name}.html"));
-        assert_eq!(html, expected_html, "{name}.html: {}", diff(&expected_html, &html));
+        assert_eq!(
+            html,
+            expected_html,
+            "{name}.html: {}",
+            diff(&expected_html, &html)
+        );
 
         let markdown = review_markdown(&fixture["report"], &fixture["evidence"], label, &names)
             .expect("markdown");
         let expected_markdown = read(&format!("{name}.md"));
         assert_eq!(
-            markdown, expected_markdown,
+            markdown,
+            expected_markdown,
             "{name}.md: {}",
             diff(&expected_markdown, &markdown)
         );

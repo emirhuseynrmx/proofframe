@@ -7,8 +7,8 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use arrow::csv::reader::Format;
 use arrow::csv::ReaderBuilder;
+use arrow::csv::reader::Format;
 use arrow::datatypes::{DataType, Field, Schema};
 use proofframe::evidence::{contract_source_digest, evidence_for_check};
 use proofframe::{
@@ -56,7 +56,8 @@ fn as_text_where_empty(schema: Schema) -> Schema {
         .iter()
         .map(|field| match field.data_type() {
             DataType::Null => Arc::new(
-                Field::new(field.name(), DataType::Utf8, true).with_metadata(field.metadata().clone()),
+                Field::new(field.name(), DataType::Utf8, true)
+                    .with_metadata(field.metadata().clone()),
             ),
             _ => Arc::clone(field),
         })
@@ -112,9 +113,14 @@ fn unsupported_rule(contract: &Value) -> Option<&'static str> {
             _ => false,
         })
     };
-    ["composite_unique", "distinct_count", "distinct_ratio", "references"]
-        .into_iter()
-        .find(|key| occupied(key))
+    [
+        "composite_unique",
+        "distinct_count",
+        "distinct_ratio",
+        "references",
+    ]
+    .into_iter()
+    .find(|key| occupied(key))
 }
 
 fn reject_unsupported(contract_json: &str) -> Result<(), JsError> {
@@ -134,7 +140,8 @@ fn reject_unsupported(contract_json: &str) -> Result<(), JsError> {
 /// engine marks it as suggested rather than authoritative.
 #[wasm_bindgen]
 pub fn suggest_contract(csv: &[u8], delimiter: u8, has_header: bool) -> Result<String, JsError> {
-    let (schema, reader) = read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
+    let (schema, reader) =
+        read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
     let options = SuggestOptions {
         infer_categories: true,
         infer_required: true,
@@ -160,9 +167,10 @@ pub fn check_csv(
     max_samples: usize,
 ) -> Result<String, JsError> {
     reject_unsupported(contract_json)?;
-    let (schema, reader) = read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
-    let document =
-        ContractDocument::from_json(contract_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let (schema, reader) =
+        read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
+    let document = ContractDocument::from_json(contract_json)
+        .map_err(|error| JsError::new(&error.to_string()))?;
     let plan = CompiledContract::compile_document(&document, schema.as_ref())
         .map_err(|error| JsError::new(&error.to_string()))?;
     let options = ExecutionOptions {
@@ -213,7 +221,11 @@ pub fn check_csv(
 /// The engine renders it, so the page a visitor downloads is the page
 /// `proofframe review` writes. No HTML is assembled in JavaScript.
 #[wasm_bindgen]
-pub fn review_report(result_json: &str, contract_json: &str, label: &str) -> Result<String, JsError> {
+pub fn review_report(
+    result_json: &str,
+    contract_json: &str,
+    label: &str,
+) -> Result<String, JsError> {
     let result: Value =
         serde_json::from_str(result_json).map_err(|error| JsError::new(&error.to_string()))?;
     let contract: Value =
