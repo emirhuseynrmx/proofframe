@@ -124,6 +124,104 @@ impl CompositeUniquePlan {
     }
 }
 
+/// Uniqueness among the rows a predicate selects.
+#[derive(Debug, Clone)]
+pub struct ConditionalUniquePlan {
+    pub(crate) name: Box<str>,
+    pub(crate) columns: Vec<usize>,
+    pub(crate) nulls: CompositeNullPolicyAst,
+    pub(crate) predicate: super::ComparePlan,
+}
+
+impl ConditionalUniquePlan {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn columns(&self) -> &[usize] {
+        &self.columns
+    }
+
+    #[must_use]
+    pub const fn nulls(&self) -> CompositeNullPolicyAst {
+        self.nulls
+    }
+
+    #[must_use]
+    pub const fn predicate(&self) -> &super::ComparePlan {
+        &self.predicate
+    }
+}
+
+/// Which summary a statistic rule bounds.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum StatisticKind {
+    Mean,
+    /// Population standard deviation, over the values the column actually held.
+    StdDev,
+}
+
+impl StatisticKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::StdDev => "std_dev",
+        }
+    }
+}
+
+/// A resolved statistic rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatisticPlan {
+    pub(crate) column_index: usize,
+    pub(crate) column: Box<str>,
+    pub(crate) name: Box<str>,
+    pub(crate) kernel: KernelKind,
+    pub(crate) kind: StatisticKind,
+    pub(crate) min: Option<f64>,
+    pub(crate) max: Option<f64>,
+}
+
+impl StatisticPlan {
+    #[must_use]
+    pub const fn column_index(&self) -> usize {
+        self.column_index
+    }
+
+    #[must_use]
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn kernel(&self) -> &KernelKind {
+        &self.kernel
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> StatisticKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn min(&self) -> Option<f64> {
+        self.min
+    }
+
+    #[must_use]
+    pub const fn max(&self) -> Option<f64> {
+        self.max
+    }
+}
+
 /// Whether a column's total is counted exactly or with floating-point compensation,
 /// and the bounds it must stay inside.
 #[derive(Debug, Clone, PartialEq)]
@@ -324,6 +422,8 @@ pub struct DatasetPlan {
     pub(crate) gap_detection: Vec<GapDetectionPlan>,
     pub(crate) mutually_exclusive: Vec<MutuallyExclusivePlan>,
     pub(crate) sums: Vec<SumPlan>,
+    pub(crate) statistics: Vec<StatisticPlan>,
+    pub(crate) conditional_unique: Vec<ConditionalUniquePlan>,
 }
 
 impl DatasetPlan {
@@ -338,6 +438,18 @@ impl DatasetPlan {
             && self.gap_detection.is_empty()
             && self.mutually_exclusive.is_empty()
             && self.sums.is_empty()
+            && self.statistics.is_empty()
+            && self.conditional_unique.is_empty()
+    }
+
+    #[must_use]
+    pub fn conditional_unique(&self) -> &[ConditionalUniquePlan] {
+        &self.conditional_unique
+    }
+
+    #[must_use]
+    pub fn statistics(&self) -> &[StatisticPlan] {
+        &self.statistics
     }
 
     #[must_use]
@@ -577,6 +689,109 @@ impl DatasetPlan {
                 })
             })
             .collect::<Result<Vec<_>, ProofFrameError>>()?;
+        let statistics = [
+            (StatisticKind::Mean, &rules.mean, "mean"),
+            (StatisticKind::StdDev, &rules.std_dev, "std_dev"),
+        ]
+        .into_iter()
+        .flat_map(|(kind, declared, field)| {
+            declared
+                .iter()
+                .enumerate()
+                .map(move |(index, rule)| (kind, index, rule, field))
+        })
+        .map(|(kind, index, rule, field)| {
+            let path = |part: &str| Some(format!("$.dataset_rules.{field}[{index}].{part}"));
+            for (bound, part) in [(rule.min, "min"), (rule.max, "max")] {
+                if bound.is_some_and(|value| !value.is_finite()) {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::ContractInvalidBound,
+                        format!("`{part}` must be a finite number"),
+                        path(part),
+                    ));
+                }
+            }
+            let column_index = schema.index_of(&rule.column).map_err(|_| {
+                ProofFrameError::contract(
+                    ErrorCode::MissingColumn,
+                    format!("Statistic column `{}` is absent", rule.column),
+                    path("column"),
+                )
+            })?;
+            let data_type = schema.field(column_index).data_type();
+            let kernel = KernelKind::from_data_type_for_plan(data_type);
+            if !matches!(
+                kernel,
+                KernelKind::I8
+                    | KernelKind::I16
+                    | KernelKind::I32
+                    | KernelKind::I64
+                    | KernelKind::U8
+                    | KernelKind::U16
+                    | KernelKind::U32
+                    | KernelKind::U64
+                    | KernelKind::F32
+                    | KernelKind::F64
+            ) {
+                return Err(ProofFrameError::contract(
+                    ErrorCode::UnsupportedType,
+                    format!(
+                        "A statistic needs a numeric column; `{}` is `{data_type}`",
+                        rule.column
+                    ),
+                    path("column"),
+                ));
+            }
+            Ok(StatisticPlan {
+                column_index,
+                column: rule.column.clone().into_boxed_str(),
+                name: rule.name.clone().into_boxed_str(),
+                kernel,
+                kind,
+                min: rule.min,
+                max: rule.max,
+            })
+        })
+        .collect::<Result<Vec<_>, ProofFrameError>>()?;
+        let conditional_unique = rules
+            .conditional_unique
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                let path = format!("$.dataset_rules.conditional_unique[{index}]");
+                if rule.columns.is_empty() {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::ContractInvalidBound,
+                        "`conditional_unique` needs at least one column".to_string(),
+                        Some(format!("{path}.columns")),
+                    ));
+                }
+                let columns = rule
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(position, column)| {
+                        schema.index_of(column).map_err(|_| {
+                            ProofFrameError::contract(
+                                ErrorCode::MissingColumn,
+                                format!("Conditional key column `{column}` is absent"),
+                                Some(format!("{path}.columns[{position}]")),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ProofFrameError>>()?;
+                Ok(ConditionalUniquePlan {
+                    name: rule.name.clone().into_boxed_str(),
+                    columns,
+                    nulls: rule.nulls,
+                    predicate: super::row::compile_compare(
+                        &rule.when,
+                        schema,
+                        &format!("{path}.when"),
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, ProofFrameError>>()?;
         Ok(Self {
             row_count: rules.row_count.clone(),
             null_ratios,
@@ -588,6 +803,8 @@ impl DatasetPlan {
             gap_detection,
             mutually_exclusive,
             sums,
+            statistics,
+            conditional_unique,
         })
     }
 

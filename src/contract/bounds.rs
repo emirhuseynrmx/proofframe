@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use arrow::datatypes::{DataType, TimeUnit};
-use chrono::DateTime;
+use chrono::{DateTime, NaiveDate};
 
 use super::BoundAst;
 use crate::{ErrorCode, ProofFrameError};
@@ -96,14 +96,23 @@ pub(crate) fn parse_bound(
             .parse::<u64>()
             .map(TypedBound::U64)
             .map_err(|_| invalid("expected an integer in the UInt64 domain")),
+        // A date bound is written the way a person writes a date. Day counts still
+        // parse, so contracts that spelled `19723` keep working.
         DataType::Date32 => text
             .parse::<i32>()
-            .map(|value| TypedBound::I64(i64::from(value)))
-            .map_err(|_| invalid("expected an integer in the Date32 domain")),
+            .map(i64::from)
+            .ok()
+            .or_else(|| iso_days(text))
+            .map(TypedBound::I64)
+            .ok_or_else(|| invalid("expected `YYYY-MM-DD` or a day count in the Date32 domain")),
         DataType::Date64 => text
             .parse::<i64>()
+            .ok()
+            .or_else(|| iso_days(text).map(|days| days * MILLISECONDS_PER_DAY))
             .map(TypedBound::I64)
-            .map_err(|_| invalid("expected an integer in the Date64 domain")),
+            .ok_or_else(|| {
+                invalid("expected `YYYY-MM-DD` or a millisecond count in the Date64 domain")
+            }),
         DataType::Float32 => {
             let value = text
                 .parse::<f32>()
@@ -266,4 +275,19 @@ fn decimal_digits(value: i128) -> usize {
     } else {
         value.unsigned_abs().ilog10() as usize + 1
     }
+}
+
+const MILLISECONDS_PER_DAY: i64 = 86_400_000;
+
+/// Days since the Unix epoch for a `YYYY-MM-DD` bound.
+///
+/// Only the complete calendar form is accepted: `2024-1-1` and `2024-01` are the
+/// spellings where a reader and a parser start to disagree about what was meant.
+fn iso_days(text: &str) -> Option<i64> {
+    if text.len() != 10 {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+    Some(date.signed_duration_since(epoch).num_days())
 }

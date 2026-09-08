@@ -32,7 +32,14 @@ ProofFrame keeps these answers deterministic and resource-bounded. Exact uniquen
 leakage operations have explicit memory, temporary-storage, sample, and output limits. Corrupt
 temporary data, incompatible schemas, ambiguous contracts, and exceeded limits fail closed.
 
-> **0.7.1 — One renderer, every surface**
+> **0.7.1 — Nine more rules, and a review every surface can write**
+>
+> Ordering, step, exclusivity, totals, mean, standard deviation, conditional uniqueness,
+> text length, and dates written as dates. Each one joins the plan digest only when a
+> contract uses it, so existing receipts keep verifying.
+>
+> Uniqueness no longer needs a writable directory, so it runs on a read-only filesystem
+> and in a browser, failing closed on the memory budget instead of on a missing folder.
 >
 > The review is rendered by the engine. `review_html` and `review_markdown` are part of the
 > crate, so a Rust caller gets the same offline report the CLI writes, and Python calls the
@@ -230,6 +237,32 @@ decimal128 where the Arrow types are compatible. Null behavior is explicit. Cond
 cover nullability, numeric bounds, allowlists, patterns, and NaN policy without building a row mask.
 
 ## Dataset-level rules and partitions
+
+```json
+{
+  "dataset_rules": {
+    "monotonicity": [{ "name": "clock", "column": "ts", "direction": "strictly_increasing" }],
+    "gap_detection": [{ "name": "bars", "column": "ts", "expected_step": 60 }],
+    "mutually_exclusive": [{ "name": "tax_id", "columns": ["tckn", "vkn"] }],
+    "sum": [{ "name": "turnover", "column": "amount", "max": 50000000 }],
+    "mean": [{ "name": "latency", "column": "latency_ms", "max": 45 }],
+    "std_dev": [{ "name": "spread", "column": "latency_ms", "max": 15 }],
+    "conditional_unique": [
+      {
+        "name": "live_ids",
+        "columns": ["id"],
+        "when": { "left": { "column": "is_deleted" }, "op": "eq", "right": { "literal": false } }
+      }
+    ]
+  }
+}
+```
+
+A step is measured in the column's own units and findings name them. A total is
+counted in 128-bit integers, or with compensated addition for floats, so it does not
+change with the reader's batch size. A statistic over no values is reported as such
+rather than as zero.
+
 
 Dataset rules keep exact state across record-batch and partition boundaries. Distinct and composite
 keys use canonical values, not hash-only identity. When the memory budget is reached, sorted,

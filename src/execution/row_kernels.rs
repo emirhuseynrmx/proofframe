@@ -64,7 +64,7 @@ pub(super) fn scan_row_plan(
     Ok(())
 }
 
-fn scan_predicate(
+pub(super) fn scan_predicate(
     plan: &ComparePlan,
     batch: &RecordBatch,
     mut visit: impl FnMut(usize, Option<bool>),

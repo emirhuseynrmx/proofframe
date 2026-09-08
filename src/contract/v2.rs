@@ -109,6 +109,11 @@ pub struct RuleAstV2 {
     pub nan: Option<NaNPolicyAst>,
     pub pattern: Option<String>,
     pub allowed: Option<BTreeSet<String>>,
+    /// Fewest Unicode characters a value may have. Characters, not bytes: a rule
+    /// about an eight-character password should not depend on the alphabet.
+    pub min_length: Option<usize>,
+    /// Most Unicode characters a value may have.
+    pub max_length: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -181,6 +186,19 @@ pub struct RowRuleAst {
     pub when: Option<CompareAst>,
     #[serde(rename = "assert")]
     pub assertion: Option<AssertionAst>,
+}
+
+/// Bound a summary statistic of a numeric column.
+///
+/// Both bounds are floats because a mean and a standard deviation are, even over
+/// integers.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatisticAst {
+    pub name: String,
+    pub column: String,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
 }
 
 /// Bound the total of a numeric column.
@@ -308,6 +326,20 @@ pub struct CompositeUniqueAst {
     pub nulls: CompositeNullPolicyAst,
 }
 
+/// Uniqueness among the rows a condition selects.
+///
+/// "Unique among the records that are not deleted" is a different claim from
+/// "unique", and stating it as the second one fails on every tombstone.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionalUniqueAst {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub when: CompareAst,
+    #[serde(default)]
+    pub nulls: CompositeNullPolicyAst,
+}
+
 /// Null handling for the local key of a referential integrity rule.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -344,7 +376,13 @@ pub struct DatasetRulesAst {
     #[serde(default)]
     pub sum: Vec<SumAst>,
     #[serde(default)]
+    pub mean: Vec<StatisticAst>,
+    #[serde(default)]
+    pub std_dev: Vec<StatisticAst>,
+    #[serde(default)]
     pub composite_unique: Vec<CompositeUniqueAst>,
+    #[serde(default)]
+    pub conditional_unique: Vec<ConditionalUniqueAst>,
     #[serde(default)]
     pub references: Vec<ReferenceAst>,
     #[serde(default)]
@@ -570,7 +608,16 @@ fn validate_known_fields(value: &Value) -> Result<(), ProofFrameError> {
             reject_unknown(
                 object(rules, &format!("$.columns.{name}"))?,
                 &[
-                    "allowed", "max", "min", "nan", "not_null", "pattern", "required", "type",
+                    "allowed",
+                    "max",
+                    "max_length",
+                    "min",
+                    "min_length",
+                    "nan",
+                    "not_null",
+                    "pattern",
+                    "required",
+                    "type",
                     "unique",
                 ],
                 &format!("$.columns.{name}"),

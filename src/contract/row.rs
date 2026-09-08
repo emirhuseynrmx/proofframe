@@ -163,6 +163,8 @@ impl RowPlan {
                 assertion_field.data_type(),
                 &kernel,
                 &assertion_source,
+                // A conditional assertion carries no length of its own.
+                (None, None),
             )?;
             RowPlanKind::Conditional {
                 predicate: compile_compare(predicate, schema, &format!("{path}.when"))?,
@@ -188,7 +190,7 @@ impl RowPlan {
     }
 }
 
-fn compile_compare(
+pub(crate) fn compile_compare(
     source: &CompareAst,
     schema: &Schema,
     path: &str,

@@ -23,14 +23,15 @@ mod suggest;
 
 pub use contract::{
     AssertionAst, BoundAst, ColumnPlan, CompareAst, CompareOpAst, ComparePlan, CompiledContract,
-    CompiledRules, CompositeNullPolicyAst, CompositeUniqueAst, CompositeUniquePlan, ContractAst,
-    ContractAstV2, ContractDocument, ContractVersion, CountPlan, CountRangeAst, DatasetPlan,
-    DatasetRulesAst, ExclusiveModeAst, GapDetectionAst, GapDetectionPlan, KernelKind,
-    MonotonicDirectionAst, MonotonicNullPolicyAst, MonotonicityAst, MonotonicityPlan,
-    MutuallyExclusiveAst, MutuallyExclusivePlan, NaNPolicy, NaNPolicyAst, NullPolicyAst,
-    OperandAst, OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst, RatioPlan, RatioRangeAst,
-    ReferenceAst, ReferenceNullPolicyAst, ReferencePlan, RowPlan, RowPlanKind, RowRuleAst, RuleAst,
-    RuleAstV2, ScalarValuePlan, SumAst, SumBounds, SumPlan, TimeUnitAst, TypeAst, TypedBound,
+    CompiledRules, CompositeNullPolicyAst, CompositeUniqueAst, CompositeUniquePlan,
+    ConditionalUniqueAst, ConditionalUniquePlan, ContractAst, ContractAstV2, ContractDocument,
+    ContractVersion, CountPlan, CountRangeAst, DatasetPlan, DatasetRulesAst, ExclusiveModeAst,
+    GapDetectionAst, GapDetectionPlan, KernelKind, MonotonicDirectionAst, MonotonicNullPolicyAst,
+    MonotonicityAst, MonotonicityPlan, MutuallyExclusiveAst, MutuallyExclusivePlan, NaNPolicy,
+    NaNPolicyAst, NullPolicyAst, OperandAst, OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst,
+    RatioPlan, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst, ReferencePlan, RowPlan,
+    RowPlanKind, RowRuleAst, RuleAst, RuleAstV2, ScalarValuePlan, StatisticAst, StatisticKind,
+    StatisticPlan, SumAst, SumBounds, SumPlan, TimeUnitAst, TypeAst, TypedBound,
 };
 pub use diff::{DiffMetrics, DiffOptions, DiffOutput, SpillPolicy, diff_readers_with_options};
 pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};

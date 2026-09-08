@@ -8,13 +8,14 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow::csv::ReaderBuilder;
+use arrow::util::display::array_value_to_string;
 use arrow::csv::reader::Format;
 use arrow::datatypes::{DataType, Field, Schema};
 use proofframe::evidence::{contract_source_digest, evidence_for_check};
 use proofframe::{
     CancellationToken, CompiledContract, ContractDocument, ExecutionOptions, ReferenceBindings,
     ResourceLimits, SpillPolicy, SuggestOptions, execute_reader_with_fingerprint_and_references,
-    review_html,
+    review_html, review_markdown,
     suggest_reader_with_options,
 };
 use serde_json::{Value, json};
@@ -115,6 +116,21 @@ fn reject_unsupported(contract_json: &str) -> Result<(), JsError> {
         Some(rule) => Err(JsError::new(&format!(
             "`{rule}` resolves against a second dataset, which this page cannot bind. Run it with the CLI or the Python package; every other rule runs here."
         ))),
+    }
+}
+
+/// The rules in `contract_json` that this build cannot run, before it is run.
+///
+/// Answering ahead of the scan is the difference between a page that tells you what
+/// it can do and one that lets you press the button and then explains itself.
+#[wasm_bindgen]
+pub fn unsupported_rules(contract_json: &str) -> String {
+    let Ok(contract) = serde_json::from_str::<Value>(contract_json) else {
+        return "[]".to_owned();
+    };
+    match unsupported_rule(&contract) {
+        None => "[]".to_owned(),
+        Some(rule) => json!([rule]).to_string(),
     }
 }
 
@@ -255,4 +271,99 @@ pub fn set_contract_status(contract_json: &str, status: &str) -> Result<String, 
         .ok_or_else(|| JsError::new("contract is not a JSON object"))?
         .insert("status".to_owned(), Value::String(status.to_owned()));
     serde_json::to_string_pretty(&contract).map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// Read a window of rows back as text, for showing a finding in context.
+///
+/// The rows come from the same Arrow reader the check used, so the preview shows
+/// what the engine saw rather than a second, disagreeing parse of the same file.
+#[wasm_bindgen]
+pub fn preview_rows(
+    csv: &[u8],
+    delimiter: u8,
+    has_header: bool,
+    start: usize,
+    count: usize,
+) -> Result<String, JsError> {
+    let (schema, reader) = read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
+    let mut rows = Vec::new();
+    let mut offset = 0usize;
+    for batch in reader {
+        let batch = batch.map_err(|error| JsError::new(&error.to_string()))?;
+        let height = batch.num_rows();
+        if offset + height > start && rows.len() < count {
+            let first = start.saturating_sub(offset);
+            for row in first..height {
+                if rows.len() >= count {
+                    break;
+                }
+                let cells = (0..batch.num_columns())
+                    .map(|column| {
+                        let array = batch.column(column);
+                        if array.is_null(row) {
+                            Ok(Value::Null)
+                        } else {
+                            array_value_to_string(array.as_ref(), row)
+                                .map(Value::String)
+                                .map_err(|error| JsError::new(&error.to_string()))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, JsError>>()?;
+                rows.push(json!({ "row": offset + row, "cells": cells }));
+            }
+        }
+        offset += height;
+        if rows.len() >= count {
+            break;
+        }
+    }
+    serde_json::to_string(&json!({
+        "schema": schema_columns(&schema),
+        "rows": rows,
+    }))
+    .map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// Render the Markdown CI summary for a result this module produced.
+#[wasm_bindgen]
+pub fn review_summary(result_json: &str, label: &str) -> Result<String, JsError> {
+    let result: Value =
+        serde_json::from_str(result_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let names = result["schema"]
+        .as_array()
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|field| field["name"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    review_markdown(&result["report"], &result["evidence"], label, &names)
+        .map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// The whole review bundle, as `{ filename: contents }`.
+///
+/// Every file is produced here rather than assembled in the page, so the report and
+/// the evidence a visitor downloads are the engine's own bytes and not a JavaScript
+/// re-serialization of them.
+#[wasm_bindgen]
+pub fn bundle_files(
+    result_json: &str,
+    contract_json: &str,
+    label: &str,
+) -> Result<String, JsError> {
+    let result: Value =
+        serde_json::from_str(result_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let pretty = |value: &Value| {
+        serde_json::to_string_pretty(value).map_err(|error| JsError::new(&error.to_string()))
+    };
+    Ok(json!({
+        "index.html": review_report(result_json, contract_json, label)?,
+        "summary.md": review_summary(result_json, label)?,
+        "report.json": pretty(&result["report"])?,
+        "evidence.json": pretty(&result["evidence"])?,
+        "contract.json": contract_json,
+    })
+    .to_string())
 }

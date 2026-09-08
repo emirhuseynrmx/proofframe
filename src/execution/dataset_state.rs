@@ -11,12 +11,13 @@ use std::cmp::Ordering;
 use super::exclusive;
 use super::ordering::{self, Ordered};
 use super::record_lazy;
-use super::total::{self, Total};
+use super::total::{self, Moments, Total};
 use crate::{
-    CompositeNullPolicyAst, CompositeUniquePlan, CountRangeAst, DatasetPlan, ExactState,
-    ExclusiveModeAst, GapDetectionPlan, KernelKind, MonotonicNullPolicyAst, MonotonicityPlan,
-    MutuallyExclusivePlan, ProofFrameError, RatioPlan, RatioRangeAst, ResourceAccount, SumBounds,
-    SumPlan, ValidationState, ValueKind, ValueRef,
+    CompositeNullPolicyAst, CompositeUniquePlan, ConditionalUniquePlan, CountRangeAst, DatasetPlan,
+    ExactState, ExclusiveModeAst, GapDetectionPlan, KernelKind, MonotonicNullPolicyAst,
+    MonotonicityPlan, MutuallyExclusivePlan, ProofFrameError, RatioPlan, RatioRangeAst,
+    ResourceAccount, StatisticKind, StatisticPlan, SumBounds, SumPlan, ValidationState, ValueKind,
+    ValueRef,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,7 +52,22 @@ pub(super) struct DatasetState {
     gaps: Vec<GapState>,
     exclusive: Vec<MutuallyExclusivePlan>,
     sums: Vec<SumState>,
+    statistics: Vec<StatisticState>,
+    conditional: Vec<ConditionalState>,
     _directory: Option<tempfile::TempDir>,
+}
+
+/// A conditional uniqueness rule and the keys it has seen so far.
+struct ConditionalState {
+    plan: ConditionalUniquePlan,
+    exact: ExactState,
+    scratch: Vec<u8>,
+}
+
+/// One statistic rule and the moments it has accumulated.
+struct StatisticState {
+    plan: StatisticPlan,
+    moments: Moments,
 }
 
 /// One total rule and its running accumulator.
@@ -84,7 +100,8 @@ impl DatasetState {
     ) -> Result<Self, ProofFrameError> {
         let has_exact = !plan.composite_unique().is_empty()
             || !plan.distinct_counts().is_empty()
-            || !plan.distinct_ratios().is_empty();
+            || !plan.distinct_ratios().is_empty()
+            || !plan.conditional_unique().is_empty();
         let directory = (has_exact && spill == crate::SpillPolicy::Auto)
             .then(tempfile::TempDir::new)
             .transpose()?;
@@ -181,6 +198,34 @@ impl DatasetState {
                 })
                 .collect(),
             exclusive: plan.mutually_exclusive().to_vec(),
+            conditional: plan
+                .conditional_unique()
+                .iter()
+                .map(|rule| {
+                    Ok(ConditionalState {
+                        exact: ExactState::new_with_cancellation(
+                            ValueKind::Bytes,
+                            account.child(
+                                account.limits().max_memory_bytes,
+                                account.limits().max_temp_bytes,
+                            ),
+                            directory.as_ref().map(|dir| dir.path().to_path_buf()),
+                            row_count_hint,
+                            cancellation.clone(),
+                        )?,
+                        scratch: Vec::with_capacity(rule.columns().len().saturating_mul(24)),
+                        plan: rule.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, ProofFrameError>>()?,
+            statistics: plan
+                .statistics()
+                .iter()
+                .map(|rule| StatisticState {
+                    plan: rule.clone(),
+                    moments: Moments::new(),
+                })
+                .collect(),
             sums: plan
                 .sums()
                 .iter()
@@ -308,6 +353,50 @@ impl DatasetState {
             let array = batch.column(state.plan.column_index());
             total::accumulate(&mut state.total, state.plan.kernel(), array.as_ref())?;
         }
+        for state in &mut self.statistics {
+            let array = batch.column(state.plan.column_index());
+            total::observe(&mut state.moments, state.plan.kernel(), array.as_ref())?;
+        }
+        for state in &mut self.conditional {
+            // Only the rows the predicate selects take part; the rest are not part of
+            // the claim, so counting them would answer a question nobody asked.
+            let mut selected = Vec::new();
+            super::row_kernels::scan_predicate(state.plan.predicate(), batch, |row, outcome| {
+                if outcome == Some(true) {
+                    selected.push(row);
+                }
+            })?;
+            for row in selected {
+                state.scratch.clear();
+                let mut rejected_null = false;
+                for column_index in state.plan.columns() {
+                    let array = batch.column(*column_index);
+                    state
+                        .scratch
+                        .extend_from_slice(&(*column_index as u64).to_le_bytes());
+                    if array.is_null(row) {
+                        state.scratch.push(0);
+                        rejected_null |= state.plan.nulls() == CompositeNullPolicyAst::Reject;
+                    } else {
+                        state.scratch.push(1);
+                        append_scalar(array.as_ref(), row, &mut state.scratch)?;
+                    }
+                }
+                if rejected_null {
+                    record_lazy(
+                        validation,
+                        "conditional_unique",
+                        "$dataset",
+                        Some(row_offset + row as u64),
+                        || format!("Rule `{}` rejects null keys", state.plan.name()),
+                    );
+                } else {
+                    state
+                        .exact
+                        .insert(ValueRef::Bytes(&state.scratch), row_offset + row as u64)?;
+                }
+            }
+        }
         for plan in &self.exclusive {
             let broken = exclusive::violations(plan, batch);
             for row in broken.set_indices() {
@@ -376,6 +465,40 @@ impl DatasetState {
         rows: u64,
         validation: &mut ValidationState,
     ) -> Result<DatasetMetrics, ProofFrameError> {
+        for state in &self.statistics {
+            let plan = &state.plan;
+            let observed = match plan.kind() {
+                StatisticKind::Mean => state.moments.mean(),
+                StatisticKind::StdDev => state.moments.std_dev(),
+            };
+            // A statistic of nothing is not zero, and zero would pass bounds it
+            // never earned.
+            let Some(observed) = observed else {
+                record_lazy(validation, plan.kind().label(), plan.column(), None, || {
+                    format!(
+                        "Rule `{}` had no value to take a {} from",
+                        plan.name(),
+                        plan.kind().label()
+                    )
+                });
+                continue;
+            };
+            let reason = match (plan.min(), plan.max()) {
+                (Some(min), _) if observed < min => Some(format!("below the minimum {min}")),
+                (_, Some(max)) if observed > max => Some(format!("above the maximum {max}")),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                record_lazy(validation, plan.kind().label(), plan.column(), None, || {
+                    format!(
+                        "Rule `{}` has {} {observed} over {} value(s), which is {reason}",
+                        plan.name(),
+                        plan.kind().label(),
+                        state.moments.count()
+                    )
+                });
+            }
+        }
         for state in &self.sums {
             let total = total::describe(&state.total);
             if let Some(reason) = total::outside(&state.total, state.plan.bounds()) {
@@ -487,6 +610,31 @@ impl DatasetState {
                     || {
                         format!(
                             "Composite rule `{}` found a duplicate key",
+                            state.plan.name()
+                        )
+                    },
+                );
+            }
+            validation.violation_count = validation
+                .violation_count
+                .saturating_add(summary.duplicate_count.saturating_sub(sampled));
+        }
+        for state in self.conditional {
+            let summary = state.exact.finish()?;
+            metrics.spill_bytes = metrics
+                .spill_bytes
+                .saturating_add(summary.metrics.spill_bytes);
+            metrics.exact_runs = metrics.exact_runs.saturating_add(summary.metrics.runs);
+            let sampled = summary.duplicate_samples.len() as u64;
+            for duplicate in summary.duplicate_samples {
+                record_lazy(
+                    validation,
+                    "conditional_unique",
+                    "$dataset",
+                    Some(duplicate.duplicate_row),
+                    || {
+                        format!(
+                            "Rule `{}` found a duplicate among the rows it selects",
                             state.plan.name()
                         )
                     },

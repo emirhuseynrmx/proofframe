@@ -394,6 +394,7 @@ fn scan_strings<O: arrow::array::OffsetSizeTrait>(
                 || "Value is not in the allowlist".to_string(),
             );
         }
+        check_length(rules, validation, name, row_offset, row, value);
     }
     Ok(())
 }
@@ -467,6 +468,7 @@ fn scan_string_view(
                 || "Value is not in the allowlist".to_string(),
             );
         }
+        check_length(rules, validation, name, row_offset, row, value);
     }
     Ok(())
 }
@@ -645,4 +647,41 @@ fn downcast<T: 'static>(array: &dyn Array) -> &T {
         .as_any()
         .downcast_ref::<T>()
         .expect("kernel is fixed from the compiled Arrow schema")
+}
+
+/// Length in Unicode characters, not bytes.
+///
+/// A rule about an eight-character password should mean the same thing whatever
+/// alphabet it is written in; counting bytes would make it depend on the alphabet.
+/// The count is only taken when a rule asks for it.
+fn check_length(
+    rules: &crate::CompiledRules,
+    validation: &mut ValidationState,
+    name: &str,
+    row_offset: u64,
+    row: usize,
+    value: &str,
+) {
+    if rules.min_length().is_none() && rules.max_length().is_none() {
+        return;
+    }
+    let length = value.chars().count();
+    if rules.min_length().is_some_and(|min| length < min) {
+        record_lazy(
+            validation,
+            "min_length",
+            name,
+            Some(row_offset + row as u64),
+            || format!("Value is {length} character(s), shorter than the contract allows"),
+        );
+    }
+    if rules.max_length().is_some_and(|max| length > max) {
+        record_lazy(
+            validation,
+            "max_length",
+            name,
+            Some(row_offset + row as u64),
+            || format!("Value is {length} character(s), longer than the contract allows"),
+        );
+    }
 }

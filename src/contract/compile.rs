@@ -9,12 +9,13 @@ use regex::Regex;
 use super::ast::{append_path, column_path};
 use super::bounds::parse_bound;
 use super::{
-    CompareOpAst, ComparePlan, CompositeNullPolicyAst, ContractAst, ContractAstV2,
-    ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, ExclusiveModeAst,
+    CompareOpAst, ComparePlan, CompositeNullPolicyAst, ConditionalUniquePlan, ContractAst,
+    ContractAstV2, ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, ExclusiveModeAst,
     GapDetectionPlan, MonotonicDirectionAst, MonotonicNullPolicyAst, MonotonicityPlan,
     MutuallyExclusivePlan, NaNPolicyAst, NullPolicyAst, OperandPlan, ParameterizedTypeAst,
     PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan, RowPlan, RowPlanKind, RuleAst,
-    RuleAstV2, ScalarValuePlan, SumBounds, SumPlan, TimeUnitAst, TypeAst, TypedBound,
+    RuleAstV2, ScalarValuePlan, StatisticKind, StatisticPlan, SumBounds, SumPlan, TimeUnitAst,
+    TypeAst, TypedBound,
 };
 use crate::{ErrorCode, ProofFrameError};
 
@@ -143,6 +144,8 @@ pub struct CompiledRules {
     pub(crate) validate_nan: bool,
     pub(crate) pattern: Option<Regex>,
     pub(crate) allowed: Option<Arc<HashSet<Box<str>, RandomState>>>,
+    pub(crate) min_length: Option<usize>,
+    pub(crate) max_length: Option<usize>,
 }
 
 impl CompiledRules {
@@ -189,6 +192,16 @@ impl CompiledRules {
     #[must_use]
     pub fn allowed(&self) -> Option<&HashSet<Box<str>, RandomState>> {
         self.allowed.as_deref()
+    }
+
+    #[must_use]
+    pub const fn min_length(&self) -> Option<usize> {
+        self.min_length
+    }
+
+    #[must_use]
+    pub const fn max_length(&self) -> Option<usize> {
+        self.max_length
     }
 }
 
@@ -265,7 +278,13 @@ impl CompiledContract {
                 continue;
             }
             let kernel = KernelKind::from_data_type(field.data_type());
-            let rules = compile_rules(field.name(), field.data_type(), &kernel, source_rules)?;
+            let rules = compile_rules(
+                field.name(),
+                field.data_type(),
+                &kernel,
+                source_rules,
+                (None, None),
+            )?;
             columns.push(ColumnPlan {
                 column_index,
                 field: field.clone(),
@@ -326,11 +345,20 @@ impl CompiledContract {
                 continue;
             };
             let source_rules = v2_rules_as_v1(source);
-            if !has_runtime_rules(&source_rules) {
+            // A column whose only rule is a length still has a rule; the V1 view of
+            // it does not carry one, so it is asked for separately.
+            let declares_length = source.min_length.is_some() || source.max_length.is_some();
+            if !has_runtime_rules(&source_rules) && !declares_length {
                 continue;
             }
             let kernel = KernelKind::from_data_type(field.data_type());
-            let rules = compile_rules(field.name(), field.data_type(), &kernel, &source_rules)?;
+            let rules = compile_rules(
+                field.name(),
+                field.data_type(),
+                &kernel,
+                &source_rules,
+                (source.min_length, source.max_length),
+            )?;
             columns.push(ColumnPlan {
                 column_index,
                 field: field.clone(),
@@ -566,7 +594,15 @@ fn hash_dataset_plan(hasher: &mut blake3::Hasher, plan: &DatasetPlan) {
     hash_gap_plans(hasher, plan.gap_detection());
     hash_exclusive_plans(hasher, plan.mutually_exclusive());
     hash_sum_plans(hasher, plan.sums());
+    hash_statistic_plans(hasher, plan.statistics());
+    hash_conditional_unique_plans(hasher, plan.conditional_unique());
 }
+
+const CONDITIONAL_DOMAIN: &[u8] = b"proofframe:compiled-plan:conditional-unique:v1\0";
+
+const LENGTH_DOMAIN: &[u8] = b"proofframe:compiled-plan:length:v1\0";
+
+const STATISTIC_DOMAIN: &[u8] = b"proofframe:compiled-plan:statistic:v1\0";
 
 const SUM_DOMAIN: &[u8] = b"proofframe:compiled-plan:sum:v1\0";
 
@@ -717,6 +753,60 @@ fn hash_optional_i128(hasher: &mut blake3::Hasher, value: Option<i128>) {
     };
 }
 
+/// Append statistic rules only when the plan carries them.
+fn hash_statistic_plans(hasher: &mut blake3::Hasher, rules: &[StatisticPlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(STATISTIC_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.column_index() as u64).to_le_bytes());
+        hash_part(hasher, rule.column().as_bytes());
+        hash_kernel(hasher, rule.kernel());
+        hasher.update(&[match rule.kind() {
+            StatisticKind::Mean => 0,
+            StatisticKind::StdDev => 1,
+        }]);
+        hash_optional_f64(hasher, rule.min());
+        hash_optional_f64(hasher, rule.max());
+    }
+}
+
+/// Append a declared length only when there is one, so a contract written before
+/// lengths existed keeps the plan identity its receipts record.
+fn hash_optional_length(hasher: &mut blake3::Hasher, value: Option<usize>) {
+    match value {
+        None => hasher.update(&[0]),
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&(value as u64).to_le_bytes())
+        }
+    };
+}
+
+/// Append conditional uniqueness only when the plan carries it.
+fn hash_conditional_unique_plans(hasher: &mut blake3::Hasher, rules: &[ConditionalUniquePlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(CONDITIONAL_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.columns().len() as u64).to_le_bytes());
+        for column in rule.columns() {
+            hasher.update(&(*column as u64).to_le_bytes());
+        }
+        hasher.update(&[match rule.nulls() {
+            CompositeNullPolicyAst::Equal => 0,
+            CompositeNullPolicyAst::Reject => 1,
+        }]);
+        hash_compare_plan(hasher, rule.predicate());
+    }
+}
+
 fn hash_optional_count_range(hasher: &mut blake3::Hasher, range: Option<&CountRangeAst>) {
     if let Some(range) = range {
         hasher.update(&[1]);
@@ -806,11 +896,20 @@ fn hash_compiled_rules(hasher: &mut blake3::Hasher, rules: &CompiledRules) {
     } else {
         hasher.update(&[0]);
     }
+    // Absent lengths append nothing, so a contract written before this rule existed
+    // keeps the plan identity its receipts record.
+    if rules.min_length.is_some() || rules.max_length.is_some() {
+        hasher.update(LENGTH_DOMAIN);
+        hash_optional_length(hasher, rules.min_length);
+        hash_optional_length(hasher, rules.max_length);
+    }
 }
 
 fn has_v2_value_rules(rules: &RuleAstV2) -> bool {
     rules.not_null
         || rules.unique
+        || rules.min_length.is_some()
+        || rules.max_length.is_some()
         || rules.expected_type.is_some()
         || rules.min.is_some()
         || rules.max.is_some()
@@ -1021,12 +1120,18 @@ fn has_runtime_rules(rules: &RuleAst) -> bool {
     has_value_rules(rules)
 }
 
+/// Compile one column's rules.
+///
+/// `length` is passed in rather than read off `source` because V1 contracts are
+/// frozen: the value rules are shared, and only V2 may declare a length.
 pub(super) fn compile_rules(
     column: &str,
     data_type: &DataType,
     kernel: &KernelKind,
     source: &RuleAst,
+    length: (Option<usize>, Option<usize>),
 ) -> Result<CompiledRules, ProofFrameError> {
+    let (min_length, max_length) = length;
     let base_path = column_path(column);
     if (source.min.is_some() || source.max.is_some()) && !kernel.supports_bounds() {
         let field = if source.min.is_some() { "min" } else { "max" };
@@ -1098,6 +1203,17 @@ pub(super) fn compile_rules(
         Arc::new(compiled)
     });
 
+    if min_length
+        .zip(max_length)
+        .is_some_and(|(low, high)| low > high)
+    {
+        return Err(ProofFrameError::contract(
+            ErrorCode::ContractInvalidBound,
+            format!("`min_length` exceeds `max_length` for column `{column}`"),
+            Some(append_path(&base_path, "min_length")),
+        ));
+    }
+
     Ok(CompiledRules {
         required: source.required,
         not_null: source.not_null,
@@ -1108,6 +1224,8 @@ pub(super) fn compile_rules(
         validate_nan: source.nan.is_some() || source.min.is_some() || source.max.is_some(),
         pattern,
         allowed,
+        min_length,
+        max_length,
     })
 }
 

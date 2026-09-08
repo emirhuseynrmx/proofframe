@@ -2,6 +2,54 @@
 
 ## 0.7.1
 
+- Uniqueness no longer needs a writable directory to compare three rows. `ExactState`
+  already had an in-memory path; the constructor demanded a spill target before a
+  single value was read, which failed on read-only filesystems, locked-down
+  containers and WebAssembly. The target is optional now: without one the segment
+  claims as much of the memory budget as the allocator will give it and the scan
+  stops with a resource limit rather than answering from partial state.
+  `ExecutionOptions` and `SuggestOptions` carry the policy; `ExactState::new` takes a
+  `PathBuf` or an `Option<PathBuf>`, so existing callers compile unchanged.
+
+- Nine new rules. Each one hashes into `compiled_plan_digest` only when a plan
+  carries it, so every contract written before today keeps the plan identity its
+  receipts record, and each has a test for that.
+
+  - `dataset_rules.monotonicity` — a column may not move against a declared
+    direction. Ordering compares values, not the canonical byte form used for
+    equality, which sorts negative integers and floats by their bit patterns. A null
+    has no position in an order, so `skip` compares across the gap: `[5, null, 4]`
+    still fails an increasing rule.
+  - `dataset_rules.gap_detection` — consecutive values may not drift further apart
+    than a declared step, with a tolerance and an allowance for how many gaps a
+    dataset may contain. The step is stated in the column's own units and every
+    finding names them, because `60` meaning nanoseconds when the author meant a
+    minute is the mistake this rule exists to catch.
+  - `dataset_rules.mutually_exclusive` — at most one, or exactly one, of a set of
+    columns may be filled. Evaluated as bitmap algebra over Arrow's validity bits,
+    which generalizes to any number of columns with no per-row counter.
+  - `dataset_rules.sum` — a numeric total must stay inside declared bounds. Integers
+    accumulate in `i128`, because `arrow::compute::sum` answers `i64::MAX + 1` with
+    `-9223372036854775808`, silently. Floats accumulate in row order with Neumaier
+    compensation, because the same function gives different totals for the same
+    values depending on the batch size, and batch size is a reader setting rather
+    than a property of the data.
+  - `dataset_rules.mean` and `dataset_rules.std_dev` — bounds on a column's summary
+    statistics, computed by Welford in one pass. A statistic of nothing is reported
+    as having had no value rather than as zero, which would pass bounds it never
+    earned.
+  - `dataset_rules.conditional_unique` — uniqueness among the rows a condition
+    selects. "Unique among the records that are not deleted" is a different claim
+    from "unique", and stating it as the second one fails on every tombstone.
+  - `columns.*.min_length` and `columns.*.max_length` — bounds on a text value's
+    length in Unicode characters. Characters rather than bytes: a rule about an
+    eight-character password should not depend on the alphabet it is written in.
+
+- Date bounds can be written as dates. `columns.d.min: "2024-01-01"` compiles against
+  a `Date32` or `Date64` column; nobody knows that 2024-01-01 is day 19723. Day and
+  millisecond counts still parse, so older contracts keep working, and an ambiguous
+  spelling such as `2024-1-1` is refused rather than guessed at.
+
 - The HTML review and the Markdown summary are rendered by the engine rather than by
   the Python package. They were Python-only, which meant a Rust or CLI user had no
   review at all, and any second surface that wanted one would have had to write a

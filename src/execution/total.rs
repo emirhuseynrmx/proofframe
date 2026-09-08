@@ -186,6 +186,93 @@ pub(super) fn outside(total: &Total, bounds: &SumBounds) -> Option<String> {
     }
 }
 
+/// Mean and variance in one pass, by Welford's method.
+///
+/// Summing the values and their squares and subtracting at the end is one line
+/// shorter and loses most of its significant digits when the mean is large relative
+/// to the spread. Welford updates the mean and the squared distance from it per
+/// value, which stays accurate and, being a plain sequential recurrence, gives the
+/// same answer whatever the batch size.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Moments {
+    count: u64,
+    mean: f64,
+    sum_squares: f64,
+}
+
+impl Moments {
+    pub(super) const fn new() -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            sum_squares: 0.0,
+        }
+    }
+
+    pub(super) fn add(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        self.sum_squares += delta * (value - self.mean);
+    }
+
+    pub(super) const fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// `None` when the column offered no value: a mean of nothing is not zero.
+    pub(super) const fn mean(&self) -> Option<f64> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.mean)
+        }
+    }
+
+    /// Population standard deviation over the values actually seen.
+    pub(super) fn std_dev(&self) -> Option<f64> {
+        if self.count == 0 {
+            return None;
+        }
+        Some((self.sum_squares / self.count as f64).sqrt())
+    }
+}
+
+/// Feed every non-null value of `array` to `moments`, in row order.
+pub(super) fn observe(
+    moments: &mut Moments,
+    kernel: &KernelKind,
+    array: &dyn Array,
+) -> Result<(), ProofFrameError> {
+    macro_rules! numbers {
+        ($variant:pat, $array:ty) => {
+            if matches!(kernel, $variant) {
+                let values = downcast::<$array>(array);
+                for row in 0..values.len() {
+                    if !values.is_null(row) {
+                        moments.add(values.value(row) as f64);
+                    }
+                }
+                return Ok(());
+            }
+        };
+    }
+    numbers!(KernelKind::I8, Int8Array);
+    numbers!(KernelKind::I16, Int16Array);
+    numbers!(KernelKind::I32, Int32Array);
+    numbers!(KernelKind::I64, Int64Array);
+    numbers!(KernelKind::U8, UInt8Array);
+    numbers!(KernelKind::U16, UInt16Array);
+    numbers!(KernelKind::U32, UInt32Array);
+    numbers!(KernelKind::U64, UInt64Array);
+    numbers!(KernelKind::F32, Float32Array);
+    numbers!(KernelKind::F64, Float64Array);
+    Err(ProofFrameError::UnsupportedType(format!(
+        "statistic for {}",
+        array.data_type()
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
