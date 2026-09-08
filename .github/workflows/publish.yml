@@ -106,7 +106,7 @@ jobs:
         run: >-
           python scripts/source_artifacts.py
           --output source-dist
-          --verify dist/proofframe-0.7.0.tar.gz
+          --verify dist/proofframe-*.tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sdist
