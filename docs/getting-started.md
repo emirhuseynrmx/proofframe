@@ -8,7 +8,7 @@ into a Python object.
 ## Install
 
 ```bash
-pip install proofframe==0.6.0
+pip install proofframe==0.7.1
 ```
 
 Install optional dataframe libraries when needed:

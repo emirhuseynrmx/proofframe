@@ -40,6 +40,13 @@ temporary data, incompatible schemas, ambiguous contracts, and exceeded limits f
 >
 > Uniqueness no longer needs a writable directory, so it runs on a read-only filesystem
 > and in a browser, failing closed on the memory budget instead of on a missing folder.
+> With nowhere to spill, state grows until the budget stops it, and the columns compete
+> for that budget rather than being rationed a slice each.
+>
+> A profile now drops the one count it cannot finish instead of the whole scan, and says
+> which: `ColumnProfile.distinct_limited` marks a column whose distinct values outran the
+> budget, so an absent count is absent for a stated reason. Rules that return a verdict
+> are unchanged — `unique` still fails closed.
 >
 > The review is rendered by the engine. `review_html` and `review_markdown` are part of the
 > crate, so a Rust caller gets the same offline report the CLI writes, and Python calls the

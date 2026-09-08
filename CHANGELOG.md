@@ -5,11 +5,32 @@
 - Uniqueness no longer needs a writable directory to compare three rows. `ExactState`
   already had an in-memory path; the constructor demanded a spill target before a
   single value was read, which failed on read-only filesystems, locked-down
-  containers and WebAssembly. The target is optional now: without one the segment
-  claims as much of the memory budget as the allocator will give it and the scan
-  stops with a resource limit rather than answering from partial state.
-  `ExecutionOptions` and `SuggestOptions` carry the policy; `ExactState::new` takes a
-  `PathBuf` or an `Option<PathBuf>`, so existing callers compile unchanged.
+  containers and WebAssembly. The target is optional now. `ExecutionOptions` and
+  `SuggestOptions` carry the policy; `ExactState::new` takes a `PathBuf` or an
+  `Option<PathBuf>`, so existing callers compile unchanged.
+
+- With nowhere to spill, a full segment grows instead of ending the scan. The
+  segment size decides when to write a run; with no run to write it decided
+  nothing and still stopped the scan, refusing the next value while most of the
+  budget sat unused and reporting three numbers that described three different
+  things. The memory budget is now the only bound, it is charged before each
+  allocation, and the refusal it produces is about the budget.
+
+- Columns compete for the memory budget instead of being rationed a slice of it.
+  Dividing the budget by the column count kept the first column from taking what
+  the others needed, and bought that by refusing any column that needed more than
+  its share: six columns meant a sixth each, and a scan died holding 67 MB of 512.
+  A child account charges its parent on every reservation, so the root already
+  enforces the real total and the column that needs it gets it.
+
+- A profile drops the count it cannot finish rather than the whole scan, and says
+  which. One column holding more distinct values than the budget could keep used
+  to end everything, so a ten-million-row file came back with no types, no null
+  counts and no row count either. `ColumnProfile` gains `distinct_limited`: when
+  it is set, `distinct_count` is `None` for a stated reason rather than for an
+  unstated one. Nothing that returns a verdict behaves this way — `unique` still
+  fails closed, because there is no honest way to pass a rule you stopped
+  checking.
 
 - Nine new rules. Each one hashes into `compiled_plan_digest` only when a plan
   carries it, so every contract written before today keeps the plan identity its
