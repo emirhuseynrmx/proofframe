@@ -32,6 +32,13 @@ ProofFrame keeps these answers deterministic and resource-bounded. Exact uniquen
 leakage operations have explicit memory, temporary-storage, sample, and output limits. Corrupt
 temporary data, incompatible schemas, ambiguous contracts, and exceeded limits fail closed.
 
+> **0.7.1 — One renderer, every surface**
+>
+> The review is rendered by the engine. `review_html` and `review_markdown` are part of the
+> crate, so a Rust caller gets the same offline report the CLI writes, and Python calls the
+> same code instead of its own copy. Fixtures pin the output byte for byte against the
+> renderer this replaced.
+>
 > **0.7.0 — Review and acceptance**
 >
 > Turn a validation run into an offline HTML report, CI Markdown summary, validation JSON,
@@ -42,6 +49,18 @@ temporary data, incompatible schemas, ambiguous contracts, and exceeded limits f
 > acceptance policy, the CSV reader settings and the evidence, and verifies offline.
 >
 > Contract errors now identify the offending column and explain the expected type or version.
+
+## Try it without installing anything
+
+[**Drop a CSV into the browser linter →**](https://emirhuseyin.tech/proofframe/#linter)
+
+The engine is compiled to WebAssembly and runs in the tab: it reads the file with Arrow, infers a
+draft contract, refuses to execute that draft until you have reviewed it, and renders the same HTML
+review `proofframe review` writes. Nothing is uploaded, and the page reports the engine time it
+measured on your machine.
+
+Two rules need a filesystem to spill to and are refused there rather than silently skipped:
+uniqueness and the dataset-level exact rules. Everything else is the native code below.
 
 ## Review a dataset
 
@@ -95,13 +114,13 @@ one that could not be read, and a tampered bundle that fails verification.
 Python 3.10–3.13:
 
 ```bash
-pip install proofframe==0.7.0
+pip install proofframe==0.7.1
 ```
 
 Rust 1.85 or newer:
 
 ```bash
-cargo add proofframe@0.7.0
+cargo add proofframe@0.7.1
 ```
 
 ## The 30-second demo
@@ -394,11 +413,21 @@ JSON is emitted only after a successful operation. File outputs use same-directo
 
 The default crate has no Python dependency. Rust users get the same compiled contracts, typed Arrow
 kernels, fingerprints, evidence, receipt verification, resource accounting, and spill engine used
-by the Python wheels. See the [crate guide](README-crates.md) and [API documentation](https://docs.rs/proofframe).
+by the Python wheels.
+
+Since 0.7.1 that includes the review itself. `review_html` and `review_markdown` render the report
+and the CI summary from a report, its evidence and the contract, so the document a Rust caller
+produces is the document `proofframe review` writes.
+
+```rust
+let html = proofframe::review_html(&report, &evidence, &contract, "orders.parquet", &columns)?;
+```
+
+See the [crate guide](README-crates.md) and [API documentation](https://docs.rs/proofframe).
 
 ## Compatibility and performance evidence
 
-Version 0.6.0 preserves V1 fingerprints and the established compatibility entry points. New work
+Version 0.7.1 preserves V1 fingerprints and the established compatibility entry points. New work
 should use `check`, explicit fingerprint versions, Evidence V2, and Receipt V2.
 
 Performance claims are tied to raw samples, dataset hashes, compiler and package versions, and

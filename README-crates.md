@@ -105,11 +105,31 @@ larger or unknown streams. `SpillPolicy::Never` fails rather than writing exact-
 Every length and allocation boundary is validated before allocation. Reports expose peak memory,
 temporary bytes, spill bytes, and run or partition counts.
 
+## Try it without installing anything
+
+[**Drop a CSV into the browser linter →**](https://emirhuseyin.tech/proofframe/#linter)
+
+The engine is compiled to WebAssembly and runs in the tab: it reads the file with Arrow, infers a
+draft contract, refuses to execute that draft until you have reviewed it, and renders the same HTML
+review `proofframe review` writes. Nothing is uploaded, and the page reports the engine time it
+measured on your machine.
+
+Two rules need a filesystem to spill to and are refused there rather than silently skipped:
+uniqueness and the dataset-level exact rules. Everything else is the native code below.
+
 ## Evidence and trust
 
 Evidence V2 carries separate canonical contract, compiled plan, and Arrow schema digests. Receipt
 V2 uses Ed25519 signatures and should be verified with `TrustPolicy::ExpectedKey` or `TrustStore`
 when signer identity matters.
+
+## 0.7.1
+
+`review_html` and `review_markdown` render the offline HTML review and the CI Markdown summary from
+a report, its evidence and the contract. They were Python-only, so a Rust caller had no review at
+all; they are now part of this crate and the Python package calls them. Fixtures pin the output byte
+for byte against the renderer they replaced. `evidence_for_check` assembles Evidence V2 for a
+completed check, so publishing evidence does not mean copying that assembly.
 
 ## 0.7.0
 
@@ -122,10 +142,9 @@ passed because nothing was wrong from one that passed because nothing was asked.
 reports schema indices rather than names, which keeps the per-row kernels and the allocation
 contract unchanged; resolving them to names is the reader's job.
 
-`review_html` and `review_markdown` render the offline review from a report, its evidence and the
-contract, so a Rust caller produces the same documents the CLI writes. The Python package adds the
-explicit accepted/rejected/unknown file-acceptance decision on top. All of it is a surface over this
-crate's existing scan; the fingerprint and evidence protocols are unchanged.
+The Python package built on this core adds the explicit accepted/rejected/unknown file-acceptance
+decision. It is a surface over this crate's existing scan; the fingerprint and evidence protocols
+are unchanged.
 
 ## Compatibility
 

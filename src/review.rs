@@ -457,49 +457,37 @@ fn contract_section(contract: &Value, out: &mut String) {
     out.push_str("</section>");
 }
 
-/// The offline HTML review for one validation and fingerprint scan.
-pub fn review_html(
-    report: &Value,
-    evidence: &Value,
-    contract: &Value,
-    label: &str,
-    column_names: &[String],
-) -> Result<String, ProofFrameError> {
+/// Everything above the metrics: the document head, the verdict badge, and the
+/// one instruction the reader is meant to act on.
+fn action_section(report: &Value, label: &str, out: &mut String) -> Result<(), ProofFrameError> {
     let (title, instruction) = action(report)?;
     let is_valid = valid(report)?;
-    let found = findings(report)?;
-    let rows = report.get("rows").ok_or_else(|| missing("rows"))?;
-    let violations = report
-        .get("violation_count")
-        .ok_or_else(|| missing("violation_count"))?;
 
-    let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     out.push_str(
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src &#39;none&#39;; \
-         style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;\">",
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;\">",
     );
     out.push_str(&format!(
         "<title>ProofFrame review · {}</title><style>{CSS}</style></head><body>",
         escape_text(label)
     ));
     out.push_str("<a class=\"skip\" href=\"#main\">Skip to review</a><main id=\"main\">");
-    let badge = if is_valid {
-        "Contract passed"
-    } else {
-        "Contract violations"
-    };
     out.push_str("<header><div class=\"brand\">ProofFrame / Data review</div><span class=\"badge ");
     out.push_str(&format!(
-        "{}\">{badge}</span></header>",
-        if is_valid { "pass" } else { "" }
+        "{}\">{}</span></header>",
+        if is_valid { "pass" } else { "" },
+        if is_valid {
+            "Contract passed"
+        } else {
+            "Contract violations"
+        }
     ));
     out.push_str("<article class=\"action\"><div class=\"eyebrow\">Start here</div><h1>");
     out.push_str(&format!("{}</h1>", render_html(&title)));
     out.push_str(&format!("<p>{}</p>", render_html(&instruction)));
     out.push_str(&format!("<p class=\"muted\">{}</p>", escape_text(label)));
-    if !is_valid && found.is_empty() {
+    if !is_valid && findings(report)?.is_empty() {
         out.push_str(
             "<pre>--max-samples 20</pre><p class=\"muted\">Finding details are off by default. ",
         );
@@ -509,44 +497,49 @@ pub fn review_html(
     out.push_str(
         "<a href=\"evidence.json\">Evidence JSON</a><a href=\"summary.md\">CI summary</a></nav></article>",
     );
+    Ok(())
+}
+
+/// The three headline numbers, stated as counts rather than as a verdict.
+fn metrics_section(report: &Value, out: &mut String) -> Result<(), ProofFrameError> {
+    let rows = report.get("rows").ok_or_else(|| missing("rows"))?;
+    let violations = report
+        .get("violation_count")
+        .ok_or_else(|| missing("violation_count"))?;
+    let sampled = findings(report)?.len().to_string();
+
     out.push_str("<div class=\"metrics\">");
-    let metrics = [
+    for (value, name) in [
         (
             escape_text(&format!("{} violations", scalar(violations))),
             "Exact total",
         ),
         (escape(rows), "Rows scanned"),
-        (escape_text(&found.len().to_string()), "Sampled findings"),
-    ];
-    for (value, name) in metrics {
+        (escape_text(&sampled), "Sampled findings"),
+    ] {
         out.push_str(&format!(
             "<div class=\"metric\"><span class=\"value\">{value}</span><span class=\"label\">{name}</span></div>"
         ));
     }
     out.push_str("</div>");
-    findings_section(report, &mut out)?;
-    idle_section(report, column_names, &mut out);
-    contract_section(contract, &mut out);
+    Ok(())
+}
 
-    out.push_str("<section><h2>Data identity and execution</h2><dl>");
-    let mut pairs: Vec<(String, String)> = vec![
+/// What was scanned and under which limits, so the result can be reproduced.
+fn identity_section(
+    report: &Value,
+    evidence: &Value,
+    out: &mut String,
+) -> Result<(), ProofFrameError> {
+    let digest = |key: &str| report.get(key).map_or_else(String::new, scalar);
+    let mut pairs = vec![
         ("Dataset fingerprint".to_owned(), fingerprint(evidence)?),
         (
             "Contract digest".to_owned(),
-            report
-                .get("contract_source_digest")
-                .map_or_else(String::new, scalar),
+            digest("contract_source_digest"),
         ),
-        (
-            "Schema digest".to_owned(),
-            report.get("schema_digest").map_or_else(String::new, scalar),
-        ),
-        (
-            "Plan digest".to_owned(),
-            report
-                .get("compiled_plan_digest")
-                .map_or_else(String::new, scalar),
-        ),
+        ("Schema digest".to_owned(), digest("schema_digest")),
+        ("Plan digest".to_owned(), digest("compiled_plan_digest")),
         (
             "Engine version".to_owned(),
             scalar(engine_version(evidence)?),
@@ -556,10 +549,14 @@ pub fn review_html(
         let Some(entries) = report.get(group).and_then(Value::as_object) else {
             continue;
         };
-        for (key, value) in entries {
-            pairs.push((key.replace('_', " "), scalar(value)));
-        }
+        pairs.extend(
+            entries
+                .iter()
+                .map(|(key, value)| (key.replace('_', " "), scalar(value))),
+        );
     }
+
+    out.push_str("<section><h2>Data identity and execution</h2><dl>");
     for (key, value) in pairs {
         out.push_str(&format!(
             "<dt>{}</dt><dd><code>{}</code></dd>",
@@ -570,6 +567,24 @@ pub fn review_html(
     out.push_str(
         "</dl><p class=\"muted\">Memory counters describe the engine, not total process memory.</p></section>",
     );
+    Ok(())
+}
+
+/// The offline HTML review for one validation and fingerprint scan.
+pub fn review_html(
+    report: &Value,
+    evidence: &Value,
+    contract: &Value,
+    label: &str,
+    column_names: &[String],
+) -> Result<String, ProofFrameError> {
+    let mut out = String::new();
+    action_section(report, label, &mut out)?;
+    metrics_section(report, &mut out)?;
+    findings_section(report, &mut out)?;
+    idle_section(report, column_names, &mut out);
+    contract_section(contract, &mut out);
+    identity_section(report, evidence, &mut out)?;
     out.push_str(
         "<footer>Generated from one validation and fingerprint scan. No external assets or telemetry.<br>",
     );
@@ -580,6 +595,41 @@ pub fn review_html(
         "Review contract literals, column names and enabled samples before sharing.</footer></main></body></html>",
     );
     Ok(out)
+}
+
+/// One bullet per sampled finding, with every value from the data escaped.
+fn markdown_findings(found: &[Value], out: &mut String) -> Result<(), ProofFrameError> {
+    for finding in found {
+        let column = markdown_escape_str(&get_or(finding, "column", "Dataset"));
+        let row = markdown_escape_str(&get_or(finding, "row", "None"));
+        let rule = finding
+            .get("rule")
+            .ok_or_else(|| missing("findings[].rule"))?;
+        let message = markdown_escape_str(&get_or(finding, "message", ""));
+        out.push_str(&format!(
+            "- {column}, row {row}: {} — {message}\n",
+            markdown_escape(rule)
+        ));
+    }
+    Ok(())
+}
+
+/// Columns whose rules had nothing to check, stated rather than left as silence.
+fn markdown_idle(idle: &[String], out: &mut String) {
+    if idle.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "\n**{} column(s) had no value for their rules to check.** \
+         A rule that was never asked did not pass.\n\n",
+        idle.len()
+    ));
+    for name in idle {
+        out.push_str(&format!(
+            "- {}: 0 values evaluated\n",
+            markdown_escape_str(name)
+        ));
+    }
 }
 
 /// The Markdown summary written for a CI job summary or a pull request.
@@ -625,32 +675,8 @@ pub fn review_markdown(
          Violations are not a count of distinct failing rows.\n\n",
         found.len()
     ));
-    for finding in found {
-        let column = markdown_escape_str(&get_or(finding, "column", "Dataset"));
-        let row = markdown_escape_str(&get_or(finding, "row", "None"));
-        let rule = finding
-            .get("rule")
-            .ok_or_else(|| missing("findings[].rule"))?;
-        let message = markdown_escape_str(&get_or(finding, "message", ""));
-        out.push_str(&format!(
-            "- {column}, row {row}: {} — {message}\n",
-            markdown_escape(rule)
-        ));
-    }
-    let idle = unexercised(report, column_names);
-    if !idle.is_empty() {
-        out.push_str(&format!(
-            "\n**{} column(s) had no value for their rules to check.** \
-             A rule that was never asked did not pass.\n\n",
-            idle.len()
-        ));
-        for name in &idle {
-            out.push_str(&format!(
-                "- {}: 0 values evaluated\n",
-                markdown_escape_str(name)
-            ));
-        }
-    }
+    markdown_findings(found, &mut out)?;
+    markdown_idle(&unexercised(report, column_names), &mut out);
     out.push_str(&format!(
         "\nDataset fingerprint: {}\n\n",
         fingerprint(evidence)?
