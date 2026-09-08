@@ -108,17 +108,6 @@ fn unsupported_rule(contract: &Value) -> Option<&'static str> {
         .map(|_| "references")
 }
 
-fn reject_unsupported(contract_json: &str) -> Result<(), JsError> {
-    let contract: Value = serde_json::from_str(contract_json)
-        .map_err(|error| JsError::new(&format!("contract is not valid JSON: {error}")))?;
-    match unsupported_rule(&contract) {
-        None => Ok(()),
-        Some(rule) => Err(JsError::new(&format!(
-            "`{rule}` resolves against a second dataset, which this page cannot bind. Run it with the CLI or the Python package; every other rule runs here."
-        ))),
-    }
-}
-
 /// The rules in `contract_json` that this build cannot run, before it is run.
 ///
 /// Answering ahead of the scan is the difference between a page that tells you what
@@ -132,6 +121,25 @@ pub fn unsupported_rules(contract_json: &str) -> String {
         None => "[]".to_owned(),
         Some(rule) => json!([rule]).to_string(),
     }
+}
+
+/// The contract with the rules this build cannot run removed.
+///
+/// Removing them is what makes the rest runnable, and it is also why such a run may
+/// never be called valid: the plan that executed is not the plan the author wrote.
+fn without_unsupported(contract_json: &str) -> Result<String, JsError> {
+    let mut contract: Value = serde_json::from_str(contract_json)
+        .map_err(|error| JsError::new(&format!("contract is not valid JSON: {error}")))?;
+    if unsupported_rule(&contract).is_none() {
+        return Ok(contract_json.to_owned());
+    }
+    if let Some(rules) = contract
+        .get_mut("dataset_rules")
+        .and_then(Value::as_object_mut)
+    {
+        rules.remove("references");
+    }
+    serde_json::to_string(&contract).map_err(|error| JsError::new(&error.to_string()))
 }
 
 /// Suggest a review-required V2 contract for an uploaded CSV.
@@ -170,7 +178,12 @@ pub fn check_csv(
     has_header: bool,
     max_samples: usize,
 ) -> Result<String, JsError> {
-    reject_unsupported(contract_json)?;
+    let skipped = unsupported_rule(
+        &serde_json::from_str(contract_json)
+            .map_err(|error| JsError::new(&format!("contract is not valid JSON: {error}")))?,
+    );
+    let runnable = without_unsupported(contract_json)?;
+    let contract_json = runnable.as_str();
     let (schema, reader) =
         read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
     let document = ContractDocument::from_json(contract_json)
@@ -213,13 +226,27 @@ pub fn check_csv(
     let evidence = evidence_for_check(&report, &report_value, &fingerprint, source_digest)
         .map_err(|error| JsError::new(&error.to_string()))?;
 
-    let payload = json!({
-        "engine": { "name": "proofframe", "version": proofframe_version() },
-        "schema": schema_columns(&schema),
-        "fingerprint": fingerprint.to_string(),
-        "report": report_value,
-        "evidence": evidence,
-    });
+    // A run that skipped a rule is not a run of the contract that was written, so it
+    // never reports as valid and never carries evidence. Evidence is what a verifier
+    // trusts; issuing it for a partial scan would be the one lie this page exists to
+    // avoid.
+    let payload = match skipped {
+        None => json!({
+            "engine": { "name": "proofframe", "version": proofframe_version() },
+            "schema": schema_columns(&schema),
+            "fingerprint": fingerprint.to_string(),
+            "report": report_value,
+            "evidence": evidence,
+        }),
+        Some(rule) => json!({
+            "engine": { "name": "proofframe", "version": proofframe_version() },
+            "schema": schema_columns(&schema),
+            "fingerprint": fingerprint.to_string(),
+            "report": report_value,
+            "status": "incomplete",
+            "skipped_rules": [rule],
+        }),
+    };
     serde_json::to_string(&payload).map_err(|error| JsError::new(&error.to_string()))
 }
 

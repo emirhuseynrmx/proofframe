@@ -13,9 +13,9 @@ use super::{
     ContractAstV2, ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, ExclusiveModeAst,
     GapDetectionPlan, MonotonicDirectionAst, MonotonicNullPolicyAst, MonotonicityPlan,
     MutuallyExclusivePlan, NaNPolicyAst, NullPolicyAst, OperandPlan, ParameterizedTypeAst,
-    PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan, RowPlan, RowPlanKind, RuleAst,
-    RuleAstV2, ScalarValuePlan, StatisticKind, StatisticPlan, SumBounds, SumPlan, TimeUnitAst,
-    TypeAst, TypedBound,
+    PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan, RowCountDeltaPlan, RowPlan,
+    RowPlanKind, RuleAst, RuleAstV2, ScalarValuePlan, StatisticKind, StatisticPlan, SumBounds,
+    SumPlan, TimeUnitAst, TypeAst, TypedBound,
 };
 use crate::{ErrorCode, ProofFrameError};
 
@@ -596,7 +596,10 @@ fn hash_dataset_plan(hasher: &mut blake3::Hasher, plan: &DatasetPlan) {
     hash_sum_plans(hasher, plan.sums());
     hash_statistic_plans(hasher, plan.statistics());
     hash_conditional_unique_plans(hasher, plan.conditional_unique());
+    hash_row_count_delta_plans(hasher, plan.row_count_delta());
 }
+
+const ROW_DELTA_DOMAIN: &[u8] = b"proofframe:compiled-plan:row-count-delta:v1\0";
 
 const CONDITIONAL_DOMAIN: &[u8] = b"proofframe:compiled-plan:conditional-unique:v1\0";
 
@@ -804,6 +807,21 @@ fn hash_conditional_unique_plans(hasher: &mut blake3::Hasher, rules: &[Condition
             CompositeNullPolicyAst::Reject => 1,
         }]);
         hash_compare_plan(hasher, rule.predicate());
+    }
+}
+
+/// Append row-count comparisons only when the plan carries them.
+fn hash_row_count_delta_plans(hasher: &mut blake3::Hasher, rules: &[RowCountDeltaPlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(ROW_DELTA_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hash_part(hasher, rule.reference().as_bytes());
+        hash_optional_f64(hasher, rule.min_ratio());
+        hash_optional_f64(hasher, rule.max_ratio());
     }
 }
 

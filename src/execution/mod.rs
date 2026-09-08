@@ -155,6 +155,14 @@ where
         initialize_unique_states(plan, options, &resource_root)?;
     // Reference datasets are scanned before the subject so that a missing binding, an
     // absent reference column, or a key type mismatch fails before any work is spent.
+    // Row-count comparisons take their datasets first: only the count is needed, and
+    // taking them here keeps the key-set scan below unaware of them.
+    let mut references = references;
+    let delta_rows = references::count_delta_references(
+        plan.dataset_plan().row_count_delta(),
+        &mut references,
+        &options.cancellation,
+    )?;
     let prepared = references::prepare(
         plan.dataset_plan().references(),
         references,
@@ -191,6 +199,12 @@ where
     metrics.exact_runs = metrics
         .exact_runs
         .saturating_add(reference_metrics.exact_runs);
+    check_row_count_delta(
+        plan.dataset_plan().row_count_delta(),
+        rows,
+        &delta_rows,
+        &mut validation,
+    );
     let dataset_metrics = dataset_state.finish(rows, &mut validation)?;
     metrics.spill_bytes = metrics
         .spill_bytes
@@ -236,6 +250,49 @@ fn initialize_fingerprint(
     enabled
         .then(|| V2FingerprintState::new(schema, &FingerprintOptions::new(FingerprintVersion::V2)))
         .transpose()
+}
+
+/// Compare this dataset's row count with the datasets a contract named.
+///
+/// The ratio is `(rows - reference) / reference`. A reference with no rows has no
+/// ratio at all, and saying so is the only honest answer: dividing by it would turn
+/// an empty yesterday into an infinite change or a silent pass.
+fn check_row_count_delta(
+    plans: &[crate::RowCountDeltaPlan],
+    rows: u64,
+    counted: &std::collections::BTreeMap<String, u64>,
+    validation: &mut ValidationState,
+) {
+    for plan in plans {
+        let Some(&reference) = counted.get(plan.reference()) else {
+            continue;
+        };
+        if reference == 0 {
+            record_lazy(validation, "row_count_delta", "$dataset", None, || {
+                format!(
+                    "Rule `{}` compares against `{}`, which has no rows",
+                    plan.name(),
+                    plan.reference()
+                )
+            });
+            continue;
+        }
+        let ratio = (rows as f64 - reference as f64) / reference as f64;
+        let reason = match (plan.min_ratio(), plan.max_ratio()) {
+            (Some(min), _) if ratio < min => Some(format!("below the minimum {min}")),
+            (_, Some(max)) if ratio > max => Some(format!("above the maximum {max}")),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            record_lazy(validation, "row_count_delta", "$dataset", None, || {
+                format!(
+                    "Rule `{}` moved {ratio} against `{}` ({rows} rows against {reference}), which is {reason}",
+                    plan.name(),
+                    plan.reference()
+                )
+            });
+        }
+    }
 }
 
 fn initialize_unique_states(

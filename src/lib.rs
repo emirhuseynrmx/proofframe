@@ -29,9 +29,10 @@ pub use contract::{
     GapDetectionAst, GapDetectionPlan, KernelKind, MonotonicDirectionAst, MonotonicNullPolicyAst,
     MonotonicityAst, MonotonicityPlan, MutuallyExclusiveAst, MutuallyExclusivePlan, NaNPolicy,
     NaNPolicyAst, NullPolicyAst, OperandAst, OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst,
-    RatioPlan, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst, ReferencePlan, RowPlan,
-    RowPlanKind, RowRuleAst, RuleAst, RuleAstV2, ScalarValuePlan, StatisticAst, StatisticKind,
-    StatisticPlan, SumAst, SumBounds, SumPlan, TimeUnitAst, TypeAst, TypedBound,
+    RatioPlan, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst, ReferencePlan,
+    RowCountDeltaAst, RowCountDeltaPlan, RowPlan, RowPlanKind, RowRuleAst, RuleAst, RuleAstV2,
+    ScalarValuePlan, StatisticAst, StatisticKind, StatisticPlan, SumAst, SumBounds, SumPlan,
+    TimeUnitAst, TypeAst, TypedBound,
 };
 pub use diff::{DiffMetrics, DiffOptions, DiffOutput, SpillPolicy, diff_readers_with_options};
 pub use distinct::{DuplicateSample, ExactMetrics, ExactState, ExactSummary, ValueKind, ValueRef};

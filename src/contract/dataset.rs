@@ -124,6 +124,38 @@ impl CompositeUniquePlan {
     }
 }
 
+/// How far this dataset's row count may move from a reference dataset's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowCountDeltaPlan {
+    pub(crate) name: Box<str>,
+    pub(crate) reference: Box<str>,
+    pub(crate) min_ratio: Option<f64>,
+    pub(crate) max_ratio: Option<f64>,
+}
+
+impl RowCountDeltaPlan {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The logical name the caller must bind a dataset to.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    #[must_use]
+    pub const fn min_ratio(&self) -> Option<f64> {
+        self.min_ratio
+    }
+
+    #[must_use]
+    pub const fn max_ratio(&self) -> Option<f64> {
+        self.max_ratio
+    }
+}
+
 /// Uniqueness among the rows a predicate selects.
 #[derive(Debug, Clone)]
 pub struct ConditionalUniquePlan {
@@ -424,6 +456,7 @@ pub struct DatasetPlan {
     pub(crate) sums: Vec<SumPlan>,
     pub(crate) statistics: Vec<StatisticPlan>,
     pub(crate) conditional_unique: Vec<ConditionalUniquePlan>,
+    pub(crate) row_count_delta: Vec<RowCountDeltaPlan>,
 }
 
 impl DatasetPlan {
@@ -440,6 +473,12 @@ impl DatasetPlan {
             && self.sums.is_empty()
             && self.statistics.is_empty()
             && self.conditional_unique.is_empty()
+            && self.row_count_delta.is_empty()
+    }
+
+    #[must_use]
+    pub fn row_count_delta(&self) -> &[RowCountDeltaPlan] {
+        &self.row_count_delta
     }
 
     #[must_use]
@@ -792,6 +831,37 @@ impl DatasetPlan {
                 })
             })
             .collect::<Result<Vec<_>, ProofFrameError>>()?;
+        let row_count_delta = rules
+            .row_count_delta
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                let path = format!("$.dataset_rules.row_count_delta[{index}]");
+                for (bound, part) in [(rule.min_ratio, "min_ratio"), (rule.max_ratio, "max_ratio")]
+                {
+                    if bound.is_some_and(|value| !value.is_finite()) {
+                        return Err(ProofFrameError::contract(
+                            ErrorCode::ContractInvalidBound,
+                            format!("`{part}` must be a finite number"),
+                            Some(format!("{path}.{part}")),
+                        ));
+                    }
+                }
+                if rule.against_reference.is_empty() {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::ContractInvalidBound,
+                        "`against_reference` must name a dataset".to_string(),
+                        Some(format!("{path}.against_reference")),
+                    ));
+                }
+                Ok(RowCountDeltaPlan {
+                    name: rule.name.clone().into_boxed_str(),
+                    reference: rule.against_reference.clone().into_boxed_str(),
+                    min_ratio: rule.min_ratio,
+                    max_ratio: rule.max_ratio,
+                })
+            })
+            .collect::<Result<Vec<_>, ProofFrameError>>()?;
         Ok(Self {
             row_count: rules.row_count.clone(),
             null_ratios,
@@ -805,6 +875,7 @@ impl DatasetPlan {
             sums,
             statistics,
             conditional_unique,
+            row_count_delta,
         })
     }
 

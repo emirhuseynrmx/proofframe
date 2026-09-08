@@ -326,6 +326,20 @@ pub struct CompositeUniqueAst {
     pub nulls: CompositeNullPolicyAst,
 }
 
+/// Bound how far this dataset's row count may move from a reference dataset's.
+///
+/// The ratio is `(rows - reference_rows) / reference_rows`, so `-0.05` allows a five
+/// percent shrink and `0.25` a quarter more. A reference with no rows has no ratio,
+/// and that is reported rather than divided by.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowCountDeltaAst {
+    pub name: String,
+    pub against_reference: String,
+    pub min_ratio: Option<f64>,
+    pub max_ratio: Option<f64>,
+}
+
 /// Uniqueness among the rows a condition selects.
 ///
 /// "Unique among the records that are not deleted" is a different claim from
@@ -383,6 +397,8 @@ pub struct DatasetRulesAst {
     pub composite_unique: Vec<CompositeUniqueAst>,
     #[serde(default)]
     pub conditional_unique: Vec<ConditionalUniqueAst>,
+    #[serde(default)]
+    pub row_count_delta: Vec<RowCountDeltaAst>,
     #[serde(default)]
     pub references: Vec<ReferenceAst>,
     #[serde(default)]

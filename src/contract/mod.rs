@@ -13,8 +13,8 @@ pub use bounds::TypedBound;
 pub use compile::{ColumnPlan, CompiledContract, CompiledRules, KernelKind, NaNPolicy};
 pub use dataset::{
     CompositeUniquePlan, ConditionalUniquePlan, CountPlan, DatasetPlan, GapDetectionPlan,
-    MonotonicityPlan, MutuallyExclusivePlan, RatioPlan, ReferencePlan, StatisticKind,
-    StatisticPlan, SumBounds, SumPlan,
+    MonotonicityPlan, MutuallyExclusivePlan, RatioPlan, ReferencePlan, RowCountDeltaPlan,
+    StatisticKind, StatisticPlan, SumBounds, SumPlan,
 };
 pub use document::ContractDocument;
 pub use row::{ComparePlan, OperandPlan, RowPlan, RowPlanKind, ScalarValuePlan};
@@ -23,6 +23,6 @@ pub use v2::{
     ConditionalUniqueAst, ContractAstV2, ContractStatus, CountRangeAst, DatasetRulesAst,
     ExclusiveModeAst, GapDetectionAst, MonotonicDirectionAst, MonotonicNullPolicyAst,
     MonotonicityAst, MutuallyExclusiveAst, NullPolicyAst, OperandAst, ParameterizedTypeAst,
-    PrimitiveTypeAst, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst, RowRuleAst, RuleAstV2,
-    StatisticAst, SumAst, TimeUnitAst, TypeAst,
+    PrimitiveTypeAst, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst, RowCountDeltaAst,
+    RowRuleAst, RuleAstV2, StatisticAst, SumAst, TimeUnitAst, TypeAst,
 };

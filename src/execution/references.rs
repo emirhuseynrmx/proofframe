@@ -414,3 +414,40 @@ fn encode_key(
     }
     Ok(true)
 }
+
+/// Count the rows of every dataset a `row_count_delta` rule names.
+///
+/// Only the count is needed, so the reader is drained without building key state.
+/// A rule whose dataset was never bound fails here, before the subject is scanned,
+/// for the same reason an unbound reference does: a comparison that never happened
+/// must not report as one that held.
+pub(super) fn count_delta_references(
+    plans: &[crate::RowCountDeltaPlan],
+    bindings: &mut ReferenceBindings,
+    cancellation: &CancellationToken,
+) -> Result<BTreeMap<String, u64>, ProofFrameError> {
+    let mut counted = BTreeMap::<String, u64>::new();
+    for plan in plans {
+        if counted.contains_key(plan.reference()) {
+            continue;
+        }
+        let Some(reader) = bindings.take(plan.reference()) else {
+            return Err(ProofFrameError::contract(
+                ErrorCode::ReferenceUnbound,
+                format!(
+                    "Row count rule `{}` needs a dataset bound to `{}`",
+                    plan.name(),
+                    plan.reference()
+                ),
+                Some(format!("$.dataset_rules.row_count_delta[{}]", plan.name())),
+            ));
+        };
+        let mut rows = 0u64;
+        for batch in reader {
+            cancellation.check()?;
+            rows = rows.saturating_add(batch?.num_rows() as u64);
+        }
+        counted.insert(plan.reference().to_string(), rows);
+    }
+    Ok(counted)
+}
