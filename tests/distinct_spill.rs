@@ -13,6 +13,39 @@ use tempfile::TempDir;
 
 use support::reader_from_batches;
 
+/// A batch of text columns, built from a generator over (column, row).
+///
+/// Every test about running without a filesystem needs the same subject: text
+/// columns, because text is what the byte-arena path handles, and a shape the
+/// caller chooses per column so one can be wide and the rest narrow.
+fn text_batch(columns: usize, rows: usize, value: impl Fn(usize, usize) -> String) -> RecordBatch {
+    use arrow::array::StringArray;
+
+    let fields = (0..columns)
+        .map(|column| Field::new(format!("c{column}"), DataType::Utf8, true))
+        .collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(fields));
+    let arrays = (0..columns)
+        .map(|column| {
+            let values = (0..rows).map(|row| value(column, row)).collect::<Vec<_>>();
+            Arc::new(StringArray::from(values)) as ArrayRef
+        })
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(schema, arrays).expect("the arrays match the schema they came from")
+}
+
+/// Infer a contract from `batch` with uniqueness on and nowhere to spill.
+fn suggest_without_spill(batch: RecordBatch) -> Result<(), proofframe::ProofFrameError> {
+    use proofframe::{SpillPolicy, SuggestOptions, suggest_reader_with_options};
+
+    let options = SuggestOptions {
+        infer_uniqueness: true,
+        spill: SpillPolicy::Never,
+        ..SuggestOptions::default()
+    };
+    suggest_reader_with_options(reader_from_batches(vec![batch]), options, None).map(|_| ())
+}
+
 fn limits(memory: u64, temp: u64, samples: usize) -> ResourceLimits {
     ResourceLimits {
         max_memory_bytes: memory,
@@ -247,29 +280,9 @@ fn exact_state_without_a_spill_target_stays_exact_or_stops() {
 /// enforces, and a segment that fills grows rather than ending the scan.
 #[test]
 fn many_columns_without_a_spill_target_all_get_through() {
-    use arrow::array::StringArray;
-    use proofframe::{SpillPolicy, SuggestOptions, suggest_reader_with_options};
-
     for columns in [1usize, 12, 40, 80] {
-        let fields = (0..columns)
-            .map(|index| Field::new(format!("c{index}"), DataType::Utf8, true))
-            .collect::<Vec<_>>();
-        let schema = Arc::new(Schema::new(fields));
-        let arrays = (0..columns)
-            .map(|index| {
-                let values = (0..64)
-                    .map(|row| format!("v{row}_{index}"))
-                    .collect::<Vec<_>>();
-                Arc::new(StringArray::from(values)) as ArrayRef
-            })
-            .collect::<Vec<_>>();
-        let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
-        let options = SuggestOptions {
-            infer_uniqueness: true,
-            spill: SpillPolicy::Never,
-            ..SuggestOptions::default()
-        };
-        suggest_reader_with_options(reader_from_batches(vec![batch]), options, None)
+        let batch = text_batch(columns, 64, |column, row| format!("v{row}_{column}"));
+        suggest_without_spill(batch)
             .unwrap_or_else(|error| panic!("{columns} columns without spill: {error}"));
     }
 }
@@ -319,37 +332,16 @@ fn a_growing_text_segment_keeps_both_halves_in_step() {
 /// wide one at a sixth of the budget while the other five sixths sat untouched.
 #[test]
 fn one_wide_column_may_use_the_budget_the_others_did_not() {
-    use arrow::array::StringArray;
-    use proofframe::{SpillPolicy, SuggestOptions, suggest_reader_with_options};
-
     // Five columns holding one value each, and one holding a different value per
     // row. Only the sixth needs any room at all.
-    let fields = (0..6)
-        .map(|index| Field::new(format!("c{index}"), DataType::Utf8, true))
-        .collect::<Vec<_>>();
-    let schema = Arc::new(Schema::new(fields));
-    let rows = 120_000;
-    let arrays = (0..6)
-        .map(|column| {
-            let values = (0..rows)
-                .map(|row| {
-                    if column == 5 {
-                        format!("key-{row:012}")
-                    } else {
-                        "same".to_string()
-                    }
-                })
-                .collect::<Vec<_>>();
-            Arc::new(StringArray::from(values)) as ArrayRef
-        })
-        .collect::<Vec<_>>();
-    let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
-    let options = SuggestOptions {
-        infer_uniqueness: true,
-        spill: SpillPolicy::Never,
-        ..SuggestOptions::default()
-    };
-    suggest_reader_with_options(reader_from_batches(vec![batch]), options, None)
+    let batch = text_batch(6, 120_000, |column, row| {
+        if column == 5 {
+            format!("key-{row:012}")
+        } else {
+            "same".to_string()
+        }
+    });
+    suggest_without_spill(batch)
         .expect("the wide column must be allowed the room the narrow ones did not take");
 }
 
@@ -361,28 +353,17 @@ fn one_wide_column_may_use_the_budget_the_others_did_not() {
 /// profile says it was dropped rather than leaving an empty cell to interpret.
 #[test]
 fn a_column_too_wide_to_count_loses_its_count_not_the_profile() {
-    use arrow::array::StringArray;
     use proofframe::{DistinctMode, ResourceLimits, profile_reader_in_memory};
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("wide", DataType::Utf8, true),
-        Field::new("narrow", DataType::Utf8, true),
-    ]));
+    // c0 carries a different two-hundred-byte value per row; c1 carries five.
     let rows = 200_000;
-    let wide = (0..rows)
-        .map(|row| format!("{row:0>200}"))
-        .collect::<Vec<_>>();
-    let narrow = (0..rows)
-        .map(|row| format!("n{}", row % 5))
-        .collect::<Vec<_>>();
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(StringArray::from(wide)) as ArrayRef,
-            Arc::new(StringArray::from(narrow)) as ArrayRef,
-        ],
-    )
-    .unwrap();
+    let batch = text_batch(2, rows, |column, row| {
+        if column == 0 {
+            format!("{row:0>200}")
+        } else {
+            format!("n{}", row % 5)
+        }
+    });
 
     // The exact state keeps every occurrence, not every distinct value, so the
     // narrow column still needs room for 200,000 short records — about 4 MB. The
