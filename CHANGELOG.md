@@ -45,6 +45,19 @@
     length in Unicode characters. Characters rather than bytes: a rule about an
     eight-character password should not depend on the alphabet it is written in.
 
+- `dataset_rules.row_count_delta` bounds how far this dataset's row count may move
+  from a reference dataset's, which is the check that catches a pipeline delivering
+  half of yesterday. Only the count is read, so the reference is drained without
+  building key state, and a reference with no rows is reported rather than divided
+  by. An unbound dataset fails before the subject is scanned, because a comparison
+  that never happened must not report as one that held.
+
+- The WebAssembly build no longer cancels a whole analysis over one rule it cannot
+  run. It runs the rest and says so: the result carries `status: "incomplete"` and
+  the names of the rules that were skipped, it is never reported as valid, and it
+  carries no evidence at all. Evidence is what a verifier trusts, and issuing it for
+  a partial scan would be worse than refusing the run.
+
 - Date bounds can be written as dates. `columns.d.min: "2024-01-01"` compiles against
   a `Date32` or `Date64` column; nobody knows that 2024-01-01 is day 19723. Day and
   millisecond counts still parse, so older contracts keep working, and an ambiguous
