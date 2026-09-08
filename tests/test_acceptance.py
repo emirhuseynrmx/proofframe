@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import importlib.util
 import json
 
 import proofframe as pf
@@ -10,6 +11,16 @@ def test_acceptance_api_exists():
     assert callable(getattr(pf, "accept_file", None))
 
 
+# Signing is an optional extra (`proofframe[signing]`). CI installs it, so these run
+# there; a checkout without it skips them rather than reporting a missing library as
+# an acceptance failure.
+signing = pytest.mark.skipif(
+    importlib.util.find_spec("cryptography") is None,
+    reason="requires proofframe[signing]",
+)
+
+
+@signing
 def test_explicit_csv_acceptance_and_signature(tmp_path):
     path = tmp_path / "input.csv"
     path.write_bytes("id;amount\n1;12,50\n2;NA\n".encode("cp1254"))
@@ -69,6 +80,7 @@ def test_bundle_output_never_overwrites(tmp_path):
         pf.accept_file(source, {}, output=output)
 
 
+@signing
 def test_signature_survives_no_payload_tamper_even_rehashed(tmp_path):
     from proofframe.acceptance import _digest
 
@@ -82,6 +94,7 @@ def test_signature_survives_no_payload_tamper_even_rehashed(tmp_path):
     assert not pf.verify_acceptance(bundle)["valid"]
 
 
+@signing
 def test_missing_file_is_unknown_and_unsigned_is_not_authenticated(tmp_path):
     bundle = pf.accept_file(tmp_path / "missing.csv", {"columns": {"x": {"min": 0}}})
     assert bundle["payload"]["decision"]["status"] == "unknown"
@@ -254,6 +267,7 @@ def test_a_report_or_evidence_of_the_wrong_shape_does_not_verify(tmp_path, name,
     assert not pf.verify_acceptance(_rehash(bundle))["valid"], name
 
 
+@signing
 def test_an_untouched_bundle_still_verifies_signed_and_unsigned(tmp_path):
     path = tmp_path / "amounts.csv"
     path.write_text("amount\n1.0\n2.0\n", encoding="utf8")
