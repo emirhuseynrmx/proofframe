@@ -1,0 +1,115 @@
+{
+  "label": "<script>alert(1)</script> & \"quoted\" 'single'",
+  "column_names": [
+    "<img src=x onerror=1>",
+    "ünïcode_sütun",
+    "plain"
+  ],
+  "report": {
+    "valid": false,
+    "violation_count": 3,
+    "rows": 12,
+    "truncated": true,
+    "findings": [
+      {
+        "column": "<img src=x onerror=1>",
+        "row": 2,
+        "rule": "min",
+        "message": "Value is below the compiled minimum & < >"
+      },
+      {
+        "column": "ünïcode_sütun",
+        "row": 7,
+        "rule": "pattern",
+        "message": "a`b*c_d[e]"
+      }
+    ],
+    "evaluated_columns": [
+      0,
+      4
+    ],
+    "evaluated_indices": [
+      0,
+      1
+    ],
+    "contract_source_digest": "pf-contract-v2:ddd",
+    "schema_digest": "",
+    "compiled_plan_digest": "pf-plan-v2:eee",
+    "resources": {
+      "max_output_records": 100000
+    },
+    "metrics": {
+      "capacity_growth_events": 1
+    }
+  },
+  "evidence": {
+    "dataset": {
+      "fingerprint_version": "v1",
+      "fingerprint_digest": [
+        0,
+        3,
+        6,
+        9,
+        12,
+        15,
+        18,
+        21,
+        24,
+        27,
+        30,
+        33,
+        36,
+        39,
+        42,
+        45,
+        48,
+        51,
+        54,
+        57,
+        60,
+        63,
+        66,
+        69,
+        72,
+        75,
+        78,
+        81,
+        84,
+        87,
+        90,
+        93
+      ]
+    },
+    "engine": {
+      "version": "0.7.1"
+    }
+  },
+  "contract": {
+    "columns": {
+      "quoted": {
+        "allowed": [
+          "a\"b",
+          "c'd",
+          "e\\f",
+          "gü"
+        ],
+        "type": "utf8"
+      },
+      "ünïcode_sütun": {
+        "pattern": "^tr\\-[0-9]+$",
+        "type": "utf8"
+      }
+    },
+    "row_rules": [],
+    "dataset_rules": {
+      "composite_unique": [
+        {
+          "columns": [
+            "a",
+            "b"
+          ]
+        }
+      ]
+    }
+  }
+}

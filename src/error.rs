@@ -99,6 +99,10 @@ pub enum ProofFrameError {
     #[error("{0}")]
     InvalidContract(String),
 
+    /// A report or evidence document handed to the review renderer was not usable.
+    #[error("{0}")]
+    Review(String),
+
     /// A required key or contract column is absent from the schema.
     #[error("Key column `{0}` is missing")]
     MissingColumn(String),
@@ -164,7 +168,9 @@ impl ProofFrameError {
             Self::Arrow(_) => ErrorCode::Arrow,
             Self::Io(_) => ErrorCode::Io,
             Self::Regex(_) => ErrorCode::ContractInvalidBound,
-            Self::Json(_) | Self::InvalidContract(_) => ErrorCode::ContractInvalidJson,
+            Self::Json(_) | Self::InvalidContract(_) | Self::Review(_) => {
+                ErrorCode::ContractInvalidJson
+            }
             Self::Utf8(_) | Self::CorruptData(_) => ErrorCode::CorruptPartition,
             Self::MissingColumn(_) => ErrorCode::MissingColumn,
             Self::UnsupportedType(_) => ErrorCode::UnsupportedType,

@@ -1,0 +1,89 @@
+{
+  "label": "orders.csv",
+  "column_names": [
+    "order_id",
+    "city",
+    "amount"
+  ],
+  "report": {
+    "valid": true,
+    "violation_count": 0,
+    "rows": 5,
+    "truncated": false,
+    "findings": [],
+    "evaluated_columns": [
+      5,
+      5
+    ],
+    "evaluated_indices": [
+      0,
+      2
+    ],
+    "contract_source_digest": "pf-contract-v2:aaa",
+    "schema_digest": "pf-schema-v1:bbb",
+    "compiled_plan_digest": "pf-plan-v2:ccc",
+    "resources": {
+      "max_memory_bytes": 536870912,
+      "max_samples": 0
+    },
+    "metrics": {
+      "exact_runs": 0,
+      "spilled_bytes": 0
+    }
+  },
+  "evidence": {
+    "dataset": {
+      "fingerprint_version": "v2",
+      "fingerprint_digest": [
+        0,
+        7,
+        14,
+        21,
+        28,
+        35,
+        42,
+        49,
+        56,
+        63,
+        70,
+        77,
+        84,
+        91,
+        98,
+        105,
+        112,
+        119,
+        126,
+        133,
+        140,
+        147,
+        154,
+        161,
+        168,
+        175,
+        182,
+        189,
+        196,
+        203,
+        210,
+        217
+      ]
+    },
+    "engine": {
+      "version": "0.7.1"
+    }
+  },
+  "contract": {
+    "columns": {
+      "amount": {
+        "min": 0,
+        "type": "float64"
+      }
+    },
+    "dataset_rules": {
+      "row_count": {
+        "min": 1
+      }
+    }
+  }
+}

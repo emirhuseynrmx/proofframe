@@ -8,8 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_rust_and_python_versions_match_release() -> None:
-    assert read_versions(ROOT) == ("0.7.0", "0.7.0")
-    verify_versions(ROOT, "v0.7.0")
+    assert read_versions(ROOT) == ("0.7.1", "0.7.1")
+    verify_versions(ROOT, "v0.7.1")
 
 
 def test_python_package_is_classified_as_stable() -> None:

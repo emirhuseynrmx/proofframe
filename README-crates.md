@@ -18,13 +18,13 @@ ProofFrame compiles strict, versioned contracts against Arrow schemas and execut
 over `RecordBatchReader` streams. It provides exact validation verdicts, canonical fingerprints,
 bounded findings, keyed diffs, evidence records, and signed proof receipts from one Rust core.
 
-> **Current release — 0.6.0**
+> **Current release — 0.7.1**
 >
 > The current stable release adds compiled cross-column, conditional, and exact dataset-level
 > rules plus deterministic partition execution. V1 plans and fingerprint protocols remain frozen.
 
 ```bash
-cargo add proofframe@0.6.0
+cargo add proofframe@0.7.1
 ```
 
 The default crate has no Python dependency and forbids unsafe code. Enable the `python` feature only
@@ -122,13 +122,14 @@ passed because nothing was wrong from one that passed because nothing was asked.
 reports schema indices rather than names, which keeps the per-row kernels and the allocation
 contract unchanged; resolving them to names is the reader's job.
 
-The Python package built on this core adds an offline HTML review and an explicit
-accepted/rejected/unknown file-acceptance decision. Both are surfaces over this crate's existing
-scan; the fingerprint and evidence protocols are unchanged.
+`review_html` and `review_markdown` render the offline review from a report, its evidence and the
+contract, so a Rust caller produces the same documents the CLI writes. The Python package adds the
+explicit accepted/rejected/unknown file-acceptance decision on top. All of it is a surface over this
+crate's existing scan; the fingerprint and evidence protocols are unchanged.
 
 ## Compatibility
 
-Version 0.6.0 preserves V1 fingerprints and established compatibility entry points. New Rust code
+Version 0.7.1 preserves V1 fingerprints and established compatibility entry points. New Rust code
 should use `ContractDocument`, `CompiledContract::compile_document`, explicit fingerprint versions,
 and Receipt V2 or partition-manifest receipts with a trust policy.
 

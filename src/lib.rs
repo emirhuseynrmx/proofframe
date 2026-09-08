@@ -18,6 +18,7 @@ mod pii;
 #[cfg(feature = "python")]
 mod python;
 pub mod receipt;
+mod review;
 mod suggest;
 
 pub use contract::{
@@ -41,6 +42,7 @@ pub use execution::{
     execute_reader_with_fingerprint_and_references, execute_reader_with_references,
 };
 pub use leakage::{LeakageOptions, detect_leakage_with_options};
+pub use review::{review_html, review_markdown};
 pub use suggest::{SuggestOptions, suggest_reader_with_options};
 
 /// Exercise the checksummed diff-partition decoder with a hard one-MiB input cap.

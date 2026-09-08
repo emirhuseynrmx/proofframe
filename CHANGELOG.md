@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1
+
+- The HTML review and the Markdown summary are rendered by the engine rather than by
+  the Python package. They were Python-only, which meant a Rust or CLI user had no
+  review at all, and any second surface that wanted one would have had to write a
+  second renderer that could quietly disagree with the first. `review_html()` and
+  `review_markdown()` are now part of the crate, Python calls them, and the copy in
+  `proofframe/review_render.py` is gone. Fixtures covering escaping, non-ASCII,
+  truncation and the disclosed contract pin the new output byte for byte against what
+  the Python implementation produced.
+- One deliberate difference comes with that move: the disclosed contract and the
+  resource and metric rows are ordered by key rather than by whatever order the keys
+  happened to be inserted in. The same contract now always produces the same document.
+- `ProofFrameError::Review` reports a report or evidence document the renderer cannot
+  use, instead of rendering a partial page around a missing field.
+
 ## 0.7.0
 
 - Add `accept_file()` and `proofframe accept`: an explicit, versioned acceptance

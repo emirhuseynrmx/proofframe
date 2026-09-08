@@ -7,12 +7,13 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from ._proofframe import review_html_json, review_markdown_json
 from .api import check_with_evidence
 from .errors import ResourceLimitError
-from .review_render import document, markdown
 
 __all__ = ["review"]
 
@@ -94,12 +95,19 @@ def review(
         encoder = json.JSONEncoder(indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False)
         _write_chunks(staging / "report.json", encoder.iterencode(report), remaining)
         _write_chunks(staging / "evidence.json", encoder.iterencode(evidence), remaining)
+        # One renderer, in the engine: a review written here and a review written by
+        # the WebAssembly build are the same document or the browser is lying.
+        as_json = partial(json.dumps, ensure_ascii=False, allow_nan=False)
+        report_json, evidence_json = as_json(report), as_json(evidence)
+        names = list(column_names)
         _write_chunks(
-            staging / "summary.md", markdown(report, evidence, label, column_names), remaining
+            staging / "summary.md",
+            [review_markdown_json(report_json, evidence_json, label, names)],
+            remaining,
         )
         _write_chunks(
             staging / "index.html",
-            document(report, evidence, contract, label, column_names),
+            [review_html_json(report_json, evidence_json, as_json(contract), label, names)],
             remaining,
         )
         if os.path.lexists(target):

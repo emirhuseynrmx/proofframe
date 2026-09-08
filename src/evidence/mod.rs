@@ -67,6 +67,52 @@ pub struct EvidenceV2 {
     pub result: ResultEvidence,
 }
 
+/// Assemble Evidence V2 for one completed check.
+///
+/// The Python bindings and the WebAssembly build both publish evidence, and a
+/// second copy of this assembly would be a second definition of what a proof is.
+///
+/// `report_value` is the serialized report the digests are taken over, so the
+/// caller adds `contract_source_digest` to it before calling.
+pub fn evidence_for_check(
+    report: &crate::FastValidationReport,
+    report_value: &Value,
+    fingerprint: &crate::Fingerprint,
+    contract_source_digest: String,
+) -> Result<EvidenceV2, ProofFrameError> {
+    let evidence = EvidenceV2 {
+        schema: EvidenceSchema::V2,
+        dataset: DatasetEvidence {
+            fingerprint_version: fingerprint.version(),
+            fingerprint_digest: *fingerprint.digest(),
+            rows: fingerprint.rows(),
+        },
+        contract_source_digest,
+        compiled_plan_digest: report.compiled_plan_digest.clone(),
+        schema_digest: report.schema_digest.clone(),
+        engine: EngineEvidence {
+            name: "proofframe".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        execution: ExecutionEvidence {
+            operation: "check".to_string(),
+            resources: report.resources,
+        },
+        result: ResultEvidence {
+            valid: report.valid,
+            violation_count: report.violation_count,
+            output_records: report.findings.len() as u64,
+            truncated: report.truncated,
+            result_digest: validation_result_digest(report_value)?,
+            report_digest: validation_report_digest(report_value)?,
+            findings_digest: validation_findings_digest(report_value)?,
+            metrics_digest: validation_metrics_digest(report_value)?,
+        },
+    };
+    evidence.validate()?;
+    Ok(evidence)
+}
+
 /// Digest the validated, RFC 8785-canonical contract source independently from its compiled plan.
 pub fn contract_source_digest(source: &str) -> Result<String, ProofFrameError> {
     let document = ContractDocument::from_json(source)?;

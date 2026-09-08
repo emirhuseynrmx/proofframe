@@ -1,0 +1,35 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;"><title>ProofFrame review · Dataset</title><style>
+:root{color-scheme:light;--paper:#fff;--ground:#f5f7fb;--ink:#15253d;
+--blue:#2458a6;--warning:#8a4518;--green:#126044;--line:#d6dfea}
+*{box-sizing:border-box}body{margin:0;background:var(--ground);color:var(--ink);
+font-family:Geist,'Segoe UI',system-ui,sans-serif;font-size:16px;line-height:24px}
+main{max-width:1120px;margin:0 auto;padding:40px 24px 64px}
+header{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:32px}
+.brand{font-weight:700;letter-spacing:.04em}.badge{font-size:14px;line-height:20px;
+padding:4px 12px;border-radius:9999px;background:#fff0e4;color:var(--warning)}
+.pass{background:#e6f3ed;color:var(--green)}h1{font-size:36px;line-height:40px;
+margin:8px 0 16px;font-weight:600;overflow-wrap:anywhere;text-wrap:balance}
+h2{font-size:20px;line-height:28px;margin:0 0 16px;font-weight:600}
+h3{font-size:16px;line-height:24px;margin:0}p{margin:8px 0 16px;text-wrap:pretty}
+.action{padding:32px;border:1px solid var(--line);border-radius:16px;background:var(--paper)}
+.eyebrow{color:var(--blue);font-size:14px;line-height:20px;font-weight:600}
+.muted{color:#53647b}.metrics{display:grid;grid-template-columns:repeat(3,1fr);
+gap:24px;margin:24px 0 32px}.metric{padding:16px 0}.value{display:block;
+font-size:24px;line-height:32px;font-weight:600}.label{font-size:14px;line-height:20px}
+section{margin-top:32px}a{color:var(--blue);text-underline-offset:4px}a:hover{color:var(--ink)}
+a:focus-visible,summary:focus-visible{outline:3px solid var(--blue);outline-offset:4px}
+nav{display:flex;gap:24px;flex-wrap:wrap}code,pre{font-family:'Geist Mono',Consolas,monospace;
+font-size:14px;line-height:20px;overflow-wrap:anywhere}pre{white-space:pre-wrap;
+background:#eaf0f8;border-radius:8px;padding:16px;margin:16px 0;max-height:320px;overflow:auto}
+.finding{padding:24px;border:1px solid var(--line);border-radius:8px;background:white;margin:16px 0;
+overflow-wrap:anywhere}.location{display:flex;gap:16px;flex-wrap:wrap}.location code{font-weight:600}
+dl{display:grid;grid-template-columns:200px minmax(0,1fr);gap:12px 24px;margin:0}
+dt{color:#53647b}dd{margin:0;overflow-wrap:anywhere}details{background:white;border:1px solid var(--line);
+border-radius:8px;padding:16px;margin:16px 0}summary{cursor:pointer;font-weight:600}
+footer{margin-top:40px;color:#53647b;font-size:14px;line-height:20px}
+.skip{position:absolute;left:-9999px}.skip:focus{position:static}
+@media(max-width:600px){main{padding:24px 16px 40px}.action{padding:24px 16px}
+h1{font-size:24px;line-height:32px}.metrics{gap:12px}.value{font-size:20px;line-height:28px}
+dl{grid-template-columns:1fr;gap:4px}dd{margin-bottom:12px}.finding{padding:16px}}
+@media print{body{background:white}main{padding:0}nav,.skip{display:none}pre{max-height:none}}
+</style></head><body><a class="skip" href="#main">Skip to review</a><main id="main"><header><div class="brand">ProofFrame / Data review</div><span class="badge ">Contract violations</span></header><article class="action"><div class="eyebrow">Start here</div><h1>Inspect the violations</h1><p>Rerun with --max-samples 20 to include finding details.</p><p class="muted">Dataset</p><pre>--max-samples 20</pre><p class="muted">Finding details are off by default. Enabling samples can include sensitive content in every artifact.</p><nav aria-label="Review files"><a href="report.json">Validation JSON</a><a href="evidence.json">Evidence JSON</a><a href="summary.md">CI summary</a></nav></article><div class="metrics"><div class="metric"><span class="value">3 violations</span><span class="label">Exact total</span></div><div class="metric"><span class="value">9</span><span class="label">Rows scanned</span></div><div class="metric"><span class="value">0</span><span class="label">Sampled findings</span></div></div><section><h2>Where to investigate</h2><p class="muted">0 sampled finding(s). A violation count is not a count of distinct failing rows. Unlisted rules are not marked as passed.</p></section><section><h2>What was checked</h2><p>These are the declared rules, not individual pass verdicts.</p></section><section><h2>Data identity and execution</h2><dl><dt>Dataset fingerprint</dt><dd><code>pf-fp-v2:000b16212c37424d58636e79848f9aa5b0bbc6d1dce7f2fd08131e29343f4a55</code></dd><dt>Contract digest</dt><dd><code></code></dd><dt>Schema digest</dt><dd><code></code></dd><dt>Plan digest</dt><dd><code></code></dd><dt>Engine version</dt><dd><code>0.7.1</code></dd></dl><p class="muted">Memory counters describe the engine, not total process memory.</p></section><footer>Generated from one validation and fingerprint scan. No external assets or telemetry.<br>This HTML is not signed. Sign evidence.json separately to attest the engine result.<br>Review contract literals, column names and enabled samples before sharing.</footer></main></body></html>

@@ -19,11 +19,16 @@ wasm-bindgen --target web --no-typescript \
 
 ## Surface
 
-| Export             | Returns                                                        |
-| ------------------ | -------------------------------------------------------------- |
-| `engine_version`   | the engine version this module was compiled from                |
-| `suggest_contract` | a review-required draft contract inferred from the CSV          |
-| `check_csv`        | the validation report, the fingerprint, and the resolved schema |
+| Export             | Returns                                                          |
+| ------------------ | ---------------------------------------------------------------- |
+| `engine_version`   | the engine version this module was compiled from                  |
+| `suggest_contract` | a review-required draft contract inferred from the CSV            |
+| `check_csv`        | the report, Evidence V2, the fingerprint, and the resolved schema |
+| `review_report`    | the offline HTML review for a `check_csv` result                  |
+
+`review_report` calls the crate's `review_html`, the same renderer `proofframe
+review` uses, so a review saved from a browser is the document the CLI writes.
+No HTML is assembled in JavaScript.
 
 ## What this target cannot do
 

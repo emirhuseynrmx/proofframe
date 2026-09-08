@@ -1,0 +1,6 @@
+# The review goldens are compared byte for byte against what the renderer emits,
+# which uses LF. A checkout that converted them would fail the parity test on
+# Windows and nowhere else.
+tests/support/review_parity/*.html -text
+tests/support/review_parity/*.md   -text
+tests/support/review_parity/*.json -text

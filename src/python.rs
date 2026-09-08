@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use crate::evidence::{
     DatasetEvidence, EngineEvidence, EvidenceSchema, EvidenceV2, ExecutionEvidence, ResultEvidence,
-    contract_source_digest, validation_findings_digest, validation_metrics_digest,
-    validation_report_digest, validation_result_digest,
+    contract_source_digest, evidence_for_check, validation_findings_digest,
+    validation_metrics_digest, validation_report_digest, validation_result_digest,
 };
 use crate::{
     CompiledContract, ContractDocument, DiffOptions, DiffOutput, DistinctMode, ErrorCode,
@@ -558,37 +558,7 @@ fn check_with_evidence_arrow(
             "contract_source_digest".to_string(),
             Value::String(source_digest.clone()),
         );
-        let output_records = report.findings.len() as u64;
-        let evidence = EvidenceV2 {
-            schema: EvidenceSchema::V2,
-            dataset: DatasetEvidence {
-                fingerprint_version: FingerprintVersion::V2,
-                fingerprint_digest: *fingerprint.digest(),
-                rows: fingerprint.rows(),
-            },
-            contract_source_digest: source_digest,
-            compiled_plan_digest: report.compiled_plan_digest.clone(),
-            schema_digest: report.schema_digest.clone(),
-            engine: EngineEvidence {
-                name: "proofframe".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-            execution: ExecutionEvidence {
-                operation: "check".to_string(),
-                resources: report.resources,
-            },
-            result: ResultEvidence {
-                valid: report.valid,
-                violation_count: report.violation_count,
-                output_records,
-                truncated: report.truncated,
-                result_digest: validation_result_digest(&report_value)?,
-                report_digest: validation_report_digest(&report_value)?,
-                findings_digest: validation_findings_digest(&report_value)?,
-                metrics_digest: validation_metrics_digest(&report_value)?,
-            },
-        };
-        evidence.validate()?;
+        let evidence = evidence_for_check(&report, &report_value, &fingerprint, source_digest)?;
         Ok(serde_json::json!({"report": report_value, "evidence": evidence}))
     });
     result
@@ -1107,12 +1077,65 @@ fn register_contract_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Render the offline HTML review from a report, evidence and contract.
+///
+/// The documents arrive as JSON so Python and the browser feed the one renderer
+/// the same bytes rather than each shaping the input its own way.
+#[pyfunction]
+fn review_html_json(
+    py: Python<'_>,
+    report_json: &str,
+    evidence_json: &str,
+    contract_json: &str,
+    label: &str,
+    column_names: Vec<String>,
+) -> PyResult<String> {
+    render_review(py, report_json, evidence_json, Some(contract_json), label, &column_names)
+}
+
+/// Render the Markdown CI summary from the same report and evidence.
+#[pyfunction]
+fn review_markdown_json(
+    py: Python<'_>,
+    report_json: &str,
+    evidence_json: &str,
+    label: &str,
+    column_names: Vec<String>,
+) -> PyResult<String> {
+    render_review(py, report_json, evidence_json, None, label, &column_names)
+}
+
+fn render_review(
+    py: Python<'_>,
+    report_json: &str,
+    evidence_json: &str,
+    contract_json: Option<&str>,
+    label: &str,
+    column_names: &[String],
+) -> PyResult<String> {
+    let parse = |source: &str| {
+        serde_json::from_str::<Value>(source).map_err(|error| map_error(py, error.into()))
+    };
+    let report = parse(report_json)?;
+    let evidence = parse(evidence_json)?;
+    match contract_json {
+        Some(contract) => {
+            let contract = parse(contract)?;
+            crate::review_html(&report, &evidence, &contract, label, column_names)
+        }
+        None => crate::review_markdown(&report, &evidence, label, column_names),
+    }
+    .map_err(|error| map_error(py, error))
+}
+
 fn register_analysis_functions(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validate_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(validate_fast_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(diff_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(scan_pii_arrow, module)?)?;
     module.add_function(wrap_pyfunction!(detect_leakage_arrow, module)?)?;
+    module.add_function(wrap_pyfunction!(review_html_json, module)?)?;
+    module.add_function(wrap_pyfunction!(review_markdown_json, module)?)?;
     Ok(())
 }
 

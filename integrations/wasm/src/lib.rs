@@ -10,9 +10,10 @@ use std::sync::Arc;
 use arrow::csv::reader::Format;
 use arrow::csv::ReaderBuilder;
 use arrow::datatypes::{DataType, Field, Schema};
+use proofframe::evidence::{contract_source_digest, evidence_for_check};
 use proofframe::{
     CancellationToken, CompiledContract, ContractDocument, ExecutionOptions, ReferenceBindings,
-    ResourceLimits, SuggestOptions, execute_reader_with_fingerprint_and_references,
+    ResourceLimits, SuggestOptions, execute_reader_with_fingerprint_and_references, review_html,
     suggest_reader_with_options,
 };
 use serde_json::{Value, json};
@@ -173,14 +174,65 @@ pub fn check_csv(
         cancellation: CancellationToken::new(),
         threads: None,
     };
-    let (report, fingerprint) =
-        execute_reader_with_fingerprint_and_references(reader, &plan, &options, ReferenceBindings::new())
-            .map_err(|error| JsError::new(&error.to_string()))?;
+    let source_digest =
+        contract_source_digest(contract_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let (report, fingerprint) = execute_reader_with_fingerprint_and_references(
+        reader,
+        &plan,
+        &options,
+        ReferenceBindings::new(),
+    )
+    .map_err(|error| JsError::new(&error.to_string()))?;
+
+    // Same shape the Python bindings publish, so the review renderer and any
+    // verifier read one evidence document rather than a browser-shaped variant.
+    let mut report_value =
+        serde_json::to_value(&report).map_err(|error| JsError::new(&error.to_string()))?;
+    report_value
+        .as_object_mut()
+        .ok_or_else(|| JsError::new("Validation report is not a JSON object"))?
+        .insert(
+            "contract_source_digest".to_owned(),
+            Value::String(source_digest.clone()),
+        );
+    let evidence = evidence_for_check(&report, &report_value, &fingerprint, source_digest)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+
     let payload = json!({
         "engine": { "name": "proofframe", "version": proofframe_version() },
         "schema": schema_columns(&schema),
         "fingerprint": fingerprint.to_string(),
-        "report": report,
+        "report": report_value,
+        "evidence": evidence,
     });
     serde_json::to_string(&payload).map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// Render the offline HTML review for a result this module produced.
+///
+/// The engine renders it, so the page a visitor downloads is the page
+/// `proofframe review` writes. No HTML is assembled in JavaScript.
+#[wasm_bindgen]
+pub fn review_report(result_json: &str, contract_json: &str, label: &str) -> Result<String, JsError> {
+    let result: Value =
+        serde_json::from_str(result_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let contract: Value =
+        serde_json::from_str(contract_json).map_err(|error| JsError::new(&error.to_string()))?;
+    let names = result["schema"]
+        .as_array()
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|field| field["name"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    review_html(
+        &result["report"],
+        &result["evidence"],
+        &contract,
+        label,
+        &names,
+    )
+    .map_err(|error| JsError::new(&error.to_string()))
 }

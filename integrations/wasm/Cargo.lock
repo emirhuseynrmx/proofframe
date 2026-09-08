@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "proofframe"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "ahash",
  "arrow",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "proofframe-wasm"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arrow",
  "console_error_panic_hook",
