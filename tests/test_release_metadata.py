@@ -64,11 +64,57 @@ def test_ci_installs_built_wheels_without_assuming_an_activated_virtualenv() -> 
         assert "maturin develop" not in source, workflow.name
 
 
-def test_ci_installs_dependencies_needed_during_full_test_collection() -> None:
-    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+def _run_commands(source: str) -> list[str]:
+    """Every `run:` script in a workflow as one line, folded YAML blocks joined.
 
-    assert "pytest pyarrow pandas polars psutil" in ci
-    assert "pytest-cov ruff twine pyarrow pandas polars psutil" in ci
+    A folded block puts the command on the lines after `run: >`, so a naive search of
+    single lines misses it entirely.
+    """
+    commands: list[str] = []
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("- run:") and not stripped.startswith("run:"):
+            continue
+        head = stripped.split(":", 1)[1].strip()
+        if head not in (">", "|", ">-", "|-"):
+            commands.append(head)
+            continue
+        indent = len(line) - len(line.lstrip())
+        body = []
+        for following in lines[index + 1 :]:
+            if not following.strip():
+                continue
+            if len(following) - len(following.lstrip()) <= indent:
+                break
+            body.append(following.strip())
+        commands.append(" ".join(body))
+    return commands
+
+
+def test_ci_installs_dependencies_needed_during_full_test_collection() -> None:
+    """Both Python jobs name every package the suite needs at collection time.
+
+    Checked per package rather than as one run of words. The install lines carry
+    version pins and an environment marker, so a contiguous string would break on a
+    pin while nothing was actually missing — and would keep passing if a package were
+    dropped from a line it had stopped matching anyway.
+    """
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    installs = [
+        command
+        for command in _run_commands(ci)
+        if "pip install" in command and "pytest" in command
+    ]
+
+    assert len(installs) == 2, installs
+    quality = next(command for command in installs if "ruff" in command)
+    matrix = next(command for command in installs if command is not quality)
+
+    for package in ("pytest", "pyarrow", "pandas", "polars", "psutil", "cryptography"):
+        assert package in matrix, f"{package} missing from the matrix job"
+    for package in ("maturin", "pytest-cov", "ruff", "twine", "pyarrow", "pandas", "cryptography"):
+        assert package in quality, f"{package} missing from the coverage job"
 
 
 def test_release_gate_remains_compatible_with_python_310() -> None:
