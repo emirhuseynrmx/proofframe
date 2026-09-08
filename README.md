@@ -32,11 +32,16 @@ ProofFrame keeps these answers deterministic and resource-bounded. Exact uniquen
 leakage operations have explicit memory, temporary-storage, sample, and output limits. Corrupt
 temporary data, incompatible schemas, ambiguous contracts, and exceeded limits fail closed.
 
-> **0.7.0 — Data Review**
+> **0.7.0 — Review and acceptance**
 >
 > Turn a validation run into an offline HTML report, CI Markdown summary, validation JSON,
-> and signable Evidence V2. One scan, exact counts, bounded samples. Contract errors now
-> identify the offending column and explain the expected type or version.
+> and signable Evidence V2. One scan, exact counts, bounded samples.
+>
+> Then decide with it: `accept_file` answers **accepted**, **rejected** or **unknown**, and a
+> file that could not be read is never quietly accepted. The bundle binds the contract, the
+> acceptance policy, the CSV reader settings and the evidence, and verifies offline.
+>
+> Contract errors now identify the offending column and explain the expected type or version.
 
 ## Review a dataset
 
@@ -50,6 +55,40 @@ proofframe review orders.parquet --contract contract.json --out review-details -
 when evidence generation succeeds. Samples default to zero. Contracts and column names
 are not redacted. Nothing is uploaded. Read the [review guide](docs/review.md) for limits,
 privacy, signing, output publication and the [runnable demo](examples/review_demo.py).
+
+## Accept or reject a delivery
+
+A review tells you what the data looks like. Acceptance turns that into a decision an
+application can act on.
+
+```bash
+proofframe accept orders.csv --contract contract.json --policy policy.json   --csv-options reader.json --output acceptance.json
+proofframe verify-acceptance acceptance.json
+```
+
+```python
+bundle = pf.accept_file("orders.csv", contract, policy=policy, csv_options=options)
+bundle["payload"]["decision"]["status"]   # "accepted", "rejected" or "unknown"
+```
+
+Three answers, and the third is a real one: a missing file, a parse failure or an exhausted
+resource limit produces **unknown**, never a quiet **accepted**.
+
+Zero violations is not the same as a result. A policy can require that named columns actually
+had values evaluated, so a file cannot be accepted because nothing was asked of it. The limit
+is stated plainly: those counters are per column, not proof that every rule ran.
+
+CSV delimiter, encoding, decimal separator, column types and null tokens are chosen by you and
+recorded in the bundle under their own identity, so two systems reading the same file either
+agree or disagree visibly. `1.234` is not silently guessed.
+
+`verify_acceptance` checks the bundle offline without rescanning, and checks its shape before
+it trusts any digest — a hash proves that what is present was not edited and says nothing about
+what is absent. Optional Ed25519 signing (`proofframe[signing]`) covers the whole payload.
+
+Read the [acceptance guide](docs/acceptance.md) for the decision contract and its limits, and
+[the runnable example](examples/accept_and_verify.py) for an accepted delivery, a rejected one,
+one that could not be read, and a tampered bundle that fails verification.
 
 ## Install
 
@@ -392,7 +431,3 @@ coverage, DeepSource, and SonarCloud.
 
 ProofFrame is licensed under [Apache-2.0](LICENSE). Report vulnerabilities through the process in
 [SECURITY.md](SECURITY.md). Sponsorship is available through [GitHub Sponsors](https://github.com/sponsors/emirhuseynrmx).
-
-## File acceptance in 0.7.0
-
-Use `accept_file` for an explicit accepted/rejected/unknown decision, minimum column evaluation thresholds, reproducible CSV reader settings and a bound evidence envelope. Optional Ed25519 signing covers the entire policy/read-settings/decision/native-evidence payload. See [the acceptance API and CLI guide](docs/acceptance.md). This does not replace native checks or claim that every rule executed.

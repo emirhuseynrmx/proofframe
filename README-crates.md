@@ -111,6 +111,21 @@ Evidence V2 carries separate canonical contract, compiled plan, and Arrow schema
 V2 uses Ed25519 signatures and should be verified with `TrustPolicy::ExpectedKey` or `TrustStore`
 when signer identity matters.
 
+## 0.7.0
+
+Contract diagnostics name the field they are about: an invalid V2 column type or a missing or
+numeric contract version now says which column and what was expected, instead of surfacing as an
+untagged enum error.
+
+Validation reports carry per-column evaluation counters, so a caller can tell a contract that
+passed because nothing was wrong from one that passed because nothing was asked. The engine
+reports schema indices rather than names, which keeps the per-row kernels and the allocation
+contract unchanged; resolving them to names is the reader's job.
+
+The Python package built on this core adds an offline HTML review and an explicit
+accepted/rejected/unknown file-acceptance decision. Both are surfaces over this crate's existing
+scan; the fingerprint and evidence protocols are unchanged.
+
 ## Compatibility
 
 Version 0.6.0 preserves V1 fingerprints and established compatibility entry points. New Rust code
