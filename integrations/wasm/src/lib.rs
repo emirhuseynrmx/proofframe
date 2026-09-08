@@ -13,7 +13,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use proofframe::evidence::{contract_source_digest, evidence_for_check};
 use proofframe::{
     CancellationToken, CompiledContract, ContractDocument, ExecutionOptions, ReferenceBindings,
-    ResourceLimits, SuggestOptions, execute_reader_with_fingerprint_and_references, review_html,
+    ResourceLimits, SpillPolicy, SuggestOptions, execute_reader_with_fingerprint_and_references,
+    review_html,
     suggest_reader_with_options,
 };
 use serde_json::{Value, json};
@@ -91,36 +92,19 @@ fn schema_columns(schema: &Schema) -> Vec<Value> {
         .collect()
 }
 
-/// Rules whose exact-set machinery spills to a temporary directory.
+/// Rules that still need a filesystem after the in-memory exact path.
 ///
-/// The browser has no filesystem, and the spill path panics inside `std` rather
-/// than returning an error, so these are refused before the engine is entered.
-/// Everything else runs the same native code the CLI runs.
+/// Uniqueness and the dataset-level exact rules now run in memory and fail closed
+/// on the budget, so they are allowed. Reference rules are different: they resolve
+/// against a second dataset the browser never bound, and a foreign key that is
+/// never evaluated reports as one that held.
 fn unsupported_rule(contract: &Value) -> Option<&'static str> {
-    let columns = contract.get("columns").and_then(Value::as_object);
-    if let Some(columns) = columns
-        && columns
-            .values()
-            .any(|rule| rule.get("unique").and_then(Value::as_bool) == Some(true))
-    {
-        return Some("unique");
-    }
     let dataset = contract.get("dataset_rules")?;
-    let occupied = |key: &str| {
-        dataset.get(key).is_some_and(|value| match value {
-            Value::Array(items) => !items.is_empty(),
-            Value::Object(entries) => !entries.is_empty(),
-            _ => false,
-        })
-    };
-    [
-        "composite_unique",
-        "distinct_count",
-        "distinct_ratio",
-        "references",
-    ]
-    .into_iter()
-    .find(|key| occupied(key))
+    dataset
+        .get("references")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .map(|_| "references")
 }
 
 fn reject_unsupported(contract_json: &str) -> Result<(), JsError> {
@@ -129,7 +113,7 @@ fn reject_unsupported(contract_json: &str) -> Result<(), JsError> {
     match unsupported_rule(&contract) {
         None => Ok(()),
         Some(rule) => Err(JsError::new(&format!(
-            "`{rule}` needs the spilling exact-set path, which requires a filesystem. Run it with the CLI or the Python package; every other rule runs here."
+            "`{rule}` resolves against a second dataset, which this page cannot bind. Run it with the CLI or the Python package; every other rule runs here."
         ))),
     }
 }
@@ -143,16 +127,20 @@ pub fn suggest_contract(csv: &[u8], delimiter: u8, has_header: bool) -> Result<S
     let (schema, reader) =
         read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
     let options = SuggestOptions {
+        infer_uniqueness: true,
         infer_categories: true,
         infer_required: true,
+        spill: SpillPolicy::Never,
         ..SuggestOptions::default()
     };
     let contract = suggest_reader_with_options(reader, options, None)
         .map_err(|error| JsError::new(&error.to_string()))?;
+    let text = serde_json::to_string_pretty(&contract)
+        .map_err(|error| JsError::new(&error.to_string()))?;
     let payload = json!({
         "engine": { "name": "proofframe", "version": proofframe_version() },
         "schema": schema_columns(&schema),
-        "contract": contract,
+        "contract": text,
     });
     serde_json::to_string(&payload).map_err(|error| JsError::new(&error.to_string()))
 }
@@ -181,6 +169,9 @@ pub fn check_csv(
         },
         cancellation: CancellationToken::new(),
         threads: None,
+        // There is no filesystem here. Uniqueness runs in memory and fails closed
+        // when the budget cannot hold the next value.
+        spill: SpillPolicy::Never,
     };
     let source_digest =
         contract_source_digest(contract_json).map_err(|error| JsError::new(&error.to_string()))?;
@@ -247,4 +238,21 @@ pub fn review_report(
         &names,
     )
     .map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// Set a contract's status without letting the document through a JSON round-trip.
+///
+/// `JSON.parse` in a browser rounds every integer past 2^53, so a bound of
+/// `9223372036854775807` came back as `9223372036854776000` and the engine refused
+/// it — correctly, and for a value the author never wrote. Rewriting the status
+/// here keeps every literal exactly as the author typed it.
+#[wasm_bindgen]
+pub fn set_contract_status(contract_json: &str, status: &str) -> Result<String, JsError> {
+    let mut contract: Value =
+        serde_json::from_str(contract_json).map_err(|error| JsError::new(&error.to_string()))?;
+    contract
+        .as_object_mut()
+        .ok_or_else(|| JsError::new("contract is not a JSON object"))?
+        .insert("status".to_owned(), Value::String(status.to_owned()));
+    serde_json::to_string_pretty(&contract).map_err(|error| JsError::new(&error.to_string()))
 }

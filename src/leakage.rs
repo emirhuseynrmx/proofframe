@@ -55,14 +55,14 @@ where
     let mut train_state = ExactState::new_with_cancellation(
         ValueKind::Bytes,
         train_account,
-        directory.path().to_path_buf(),
+        Some(directory.path().to_path_buf()),
         None,
         options.cancellation.clone(),
     )?;
     let mut test_state = ExactState::new_with_cancellation(
         ValueKind::Bytes,
         test_account,
-        directory.path().to_path_buf(),
+        Some(directory.path().to_path_buf()),
         None,
         options.cancellation.clone(),
     )?;

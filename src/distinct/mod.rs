@@ -116,18 +116,37 @@ pub struct ExactState {
     storage: Storage,
     runs: Vec<RunMeta>,
     account: ResourceAccount,
-    directory: PathBuf,
+    directory: Option<PathBuf>,
     cancellation: CancellationToken,
     compactions: u64,
     max_merge_fan_in: u64,
     _sample_memory: MemoryReservation,
 }
 
+/// The directory to spill into, or the reason there is nothing to spill into.
+///
+/// Exhausting an in-memory budget with no spill target is a resource limit, not a
+/// missing file: the caller asked for exactness without giving the engine anywhere
+/// to put the overflow, and the honest answer is to stop rather than to guess.
+fn spill_target<'a>(
+    directory: Option<&'a PathBuf>,
+    account: &ResourceAccount,
+) -> Result<&'a PathBuf, ProofFrameError> {
+    directory.ok_or(ProofFrameError::ResourceLimit {
+        resource: "exact_state_memory_without_spill",
+        requested: 0,
+        used: 0,
+        limit: account.limits().max_memory_bytes,
+    })
+}
+
 impl ExactState {
+    /// `directory` takes a `PathBuf` or an `Option<PathBuf>`; `None` means there is
+    /// nowhere to spill to, so the scan runs in memory and fails closed on the budget.
     pub fn new(
         kind: ValueKind,
         account: ResourceAccount,
-        directory: PathBuf,
+        directory: impl Into<Option<PathBuf>>,
         row_count_hint: Option<u64>,
     ) -> Result<Self, ProofFrameError> {
         Self::new_with_cancellation(
@@ -139,20 +158,32 @@ impl ExactState {
         )
     }
 
+    /// Build exact state, spilling into `directory` when the segment fills.
+    ///
+    /// `None` means there is nowhere to spill to: a read-only filesystem, a
+    /// locked-down container, or WebAssembly, which has no filesystem at all.
+    /// The scan then runs entirely in memory and fails closed the moment the
+    /// budget cannot hold the next value, rather than requiring a writable
+    /// directory to check uniqueness on three rows.
     pub fn new_with_cancellation(
         kind: ValueKind,
         account: ResourceAccount,
-        directory: PathBuf,
+        directory: impl Into<Option<PathBuf>>,
         row_count_hint: Option<u64>,
         cancellation: CancellationToken,
     ) -> Result<Self, ProofFrameError> {
-        if !directory.is_dir() {
+        let directory = directory.into();
+        if directory.as_ref().is_some_and(|path| !path.is_dir()) {
             return Err(ProofFrameError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Exact-state temporary directory does not exist",
             )));
         }
-        let hinted = row_count_hint.and_then(|rows| usize::try_from(rows).ok());
+        // Without a spill target the segment should claim as much of the budget as
+        // it is allowed to; the allocator halves the request until it fits.
+        let hinted = row_count_hint
+            .and_then(|rows| usize::try_from(rows).ok())
+            .or_else(|| directory.is_none().then_some(usize::MAX));
         let storage = match kind {
             ValueKind::I64 => Storage::I64(FixedStore::new(
                 hinted.unwrap_or(DEFAULT_FIXED_RECORDS_PER_SEGMENT),
@@ -266,19 +297,12 @@ impl ExactState {
     }
 
     fn spill_current(&mut self) -> Result<(), ProofFrameError> {
+        let directory = spill_target(self.directory.as_ref(), &self.account)?;
         match &mut self.storage {
-            Storage::I64(store) => {
-                spill_fixed(store, &self.account, &self.directory, &mut self.runs)?
-            }
-            Storage::U64(store) => {
-                spill_fixed(store, &self.account, &self.directory, &mut self.runs)?
-            }
-            Storage::F64(store) => {
-                spill_fixed(store, &self.account, &self.directory, &mut self.runs)?
-            }
-            Storage::Bytes(store) => {
-                spill_bytes(store, &self.account, &self.directory, &mut self.runs)?
-            }
+            Storage::I64(store) => spill_fixed(store, &self.account, directory, &mut self.runs)?,
+            Storage::U64(store) => spill_fixed(store, &self.account, directory, &mut self.runs)?,
+            Storage::F64(store) => spill_fixed(store, &self.account, directory, &mut self.runs)?,
+            Storage::Bytes(store) => spill_bytes(store, &self.account, directory, &mut self.runs)?,
         }
         Ok(())
     }
@@ -287,8 +311,12 @@ impl ExactState {
         while self.runs.len() > MAX_MERGE_FAN_IN {
             self.cancellation.check()?;
             let inputs = self.runs.drain(..MAX_MERGE_FAN_IN).collect::<Vec<_>>();
-            let compacted =
-                run::compact(&inputs, &self.account, &self.directory, &self.cancellation)?;
+            let compacted = run::compact(
+                &inputs,
+                &self.account,
+                spill_target(self.directory.as_ref(), &self.account)?,
+                &self.cancellation,
+            )?;
             self.max_merge_fan_in = self
                 .max_merge_fan_in
                 .max(u64::try_from(inputs.len()).unwrap_or(u64::MAX));

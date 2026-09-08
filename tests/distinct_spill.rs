@@ -203,3 +203,36 @@ fn compiled_unique_execution_honors_the_temp_budget() {
 
     assert_eq!(error.code(), ErrorCode::ResourceLimit);
 }
+
+/// Uniqueness without a filesystem: the answer stays exact, or there is no answer.
+///
+/// WebAssembly has no filesystem, and a read-only container has no writable one.
+/// Requiring a temporary directory to check three rows for duplicates was a
+/// portability bug, not a safety property. What must not change is what happens
+/// when the budget runs out: the scan stops and says so.
+#[test]
+fn exact_state_without_a_spill_target_stays_exact_or_stops() {
+    let account = ResourceAccount::root(limits(4 * 1024 * 1024, 0, 8));
+    let mut state = ExactState::new(ValueKind::I64, account, None, None).unwrap();
+    for row in 0..50_000u64 {
+        state.insert(ValueRef::I64(row as i64), row).unwrap();
+    }
+    state.insert(ValueRef::I64(7), 50_000).unwrap();
+    let summary = state.finish().unwrap();
+    assert_eq!(summary.metrics.spill_bytes, 0, "nothing may be written");
+    assert_eq!(summary.duplicate_count, 1);
+    assert_eq!(summary.distinct_count, 50_000);
+
+    // A budget too small to hold the data is a resource limit, not a wrong answer.
+    let cramped = ResourceAccount::root(limits(8 * 1024, 0, 8));
+    let mut state = ExactState::new(ValueKind::I64, cramped, None, None).unwrap();
+    let mut refused = None;
+    for row in 0..200_000u64 {
+        if let Err(error) = state.insert(ValueRef::I64(row as i64), row) {
+            refused = Some(error);
+            break;
+        }
+    }
+    let error = refused.expect("an unbounded scan on a tiny budget must stop");
+    assert_eq!(error.code(), ErrorCode::ResourceLimit, "{error}");
+}

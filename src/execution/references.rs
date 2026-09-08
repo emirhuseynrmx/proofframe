@@ -192,7 +192,7 @@ fn scan_reference(
     let mut state = ExactState::new_with_cancellation(
         ValueKind::Bytes,
         account.child(limits.max_memory_bytes, limits.max_temp_bytes),
-        directory.path().to_path_buf(),
+        Some(directory.path().to_path_buf()),
         None,
         cancellation.clone(),
     )?;
@@ -305,7 +305,7 @@ impl ReferenceState {
                 local: ExactState::new_with_cancellation(
                     ValueKind::Bytes,
                     account.child(limits.max_memory_bytes, limits.max_temp_bytes),
-                    directory.path().to_path_buf(),
+                    Some(directory.path().to_path_buf()),
                     row_count_hint,
                     cancellation.clone(),
                 )?,

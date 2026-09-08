@@ -134,6 +134,7 @@ fn suggest_arrow(
         infer_ranges,
         range_tolerance,
         infer_row_count,
+        spill: SpillPolicy::Auto,
         resources: limits(
             max_memory_bytes,
             max_temp_bytes,
@@ -240,6 +241,7 @@ fn check_arrow(
             ),
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
+            spill: SpillPolicy::Auto,
         };
         execute_reader_with_references(source.0, &plan, &options, references)
             .map(|report| (report, contract_source_digest))
@@ -283,6 +285,7 @@ fn benchmark_check_arrow(
             ),
             cancellation: crate::CancellationToken::new(),
             threads: None,
+            spill: SpillPolicy::Auto,
         };
         let started = Instant::now();
         let report =
@@ -346,6 +349,7 @@ fn check_partitions_arrow(
             ),
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
+            spill: SpillPolicy::Auto,
         };
         check_partition_readers_with_references(readers, &plan, &options, references)
             .map(|report| (report, source_digest))
@@ -405,6 +409,7 @@ fn check_partitions_with_evidence_arrow(
             ),
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
+            spill: SpillPolicy::Auto,
         };
         let (report, manifest) = check_partition_readers_with_evidence_and_references(
             readers,
@@ -547,6 +552,7 @@ fn check_with_evidence_arrow(
             ),
             cancellation: crate::CancellationToken::new(),
             threads: worker_count(threads)?,
+            spill: SpillPolicy::Auto,
         };
         let (report, fingerprint) =
             execute_reader_with_fingerprint_and_references(source.0, &plan, &options, references)?;

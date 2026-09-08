@@ -52,11 +52,14 @@ impl DatasetState {
         account: &ResourceAccount,
         row_count_hint: Option<u64>,
         cancellation: &crate::CancellationToken,
+        spill: crate::SpillPolicy,
     ) -> Result<Self, ProofFrameError> {
         let has_exact = !plan.composite_unique().is_empty()
             || !plan.distinct_counts().is_empty()
             || !plan.distinct_ratios().is_empty();
-        let directory = has_exact.then(tempfile::TempDir::new).transpose()?;
+        let directory = (has_exact && spill == crate::SpillPolicy::Auto)
+            .then(tempfile::TempDir::new)
+            .transpose()?;
         let mut distinct_specs = std::collections::BTreeMap::<
             usize,
             (
@@ -94,9 +97,6 @@ impl DatasetState {
             .into_iter()
             .map(
                 |(column_index, (column, kernel, count_range, ratio_range))| {
-                    let directory = directory
-                        .as_ref()
-                        .expect("distinct exact state owns a temporary directory");
                     Ok(DistinctState {
                         column_index,
                         column,
@@ -106,7 +106,7 @@ impl DatasetState {
                                 account.limits().max_memory_bytes,
                                 account.limits().max_temp_bytes,
                             ),
-                            directory.path().to_path_buf(),
+                            directory.as_ref().map(|dir| dir.path().to_path_buf()),
                             row_count_hint,
                             cancellation.clone(),
                         )?,
@@ -122,9 +122,6 @@ impl DatasetState {
             .composite_unique()
             .iter()
             .map(|composite| {
-                let directory = directory
-                    .as_ref()
-                    .expect("composite exact state owns a temporary directory");
                 Ok(CompositeState {
                     plan: composite.clone(),
                     exact: ExactState::new_with_cancellation(
@@ -133,7 +130,7 @@ impl DatasetState {
                             account.limits().max_memory_bytes,
                             account.limits().max_temp_bytes,
                         ),
-                        directory.path().to_path_buf(),
+                        directory.as_ref().map(|dir| dir.path().to_path_buf()),
                         row_count_hint,
                         cancellation.clone(),
                     )?,

@@ -10,7 +10,7 @@ use arrow::util::display::array_value_to_string;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    ExactState, ProofFrameError, ResourceAccount, ResourceLimits, ValueKind, ValueRef,
+    ExactState, ProofFrameError, ResourceAccount, ResourceLimits, SpillPolicy, ValueKind, ValueRef,
     canonical_value_bytes, profile_hasher, update_hash,
 };
 
@@ -25,6 +25,8 @@ pub struct SuggestOptions {
     pub range_tolerance: f64,
     pub infer_row_count: bool,
     pub resources: ResourceLimits,
+    /// Whether inferred uniqueness may spill to a temporary directory.
+    pub spill: SpillPolicy,
 }
 
 impl Default for SuggestOptions {
@@ -38,6 +40,7 @@ impl Default for SuggestOptions {
             range_tolerance: 0.0,
             infer_row_count: true,
             resources: ResourceLimits::default(),
+            spill: SpillPolicy::Auto,
         }
     }
 }
@@ -188,9 +191,7 @@ impl SuggestionState {
                     account.limits().max_memory_bytes,
                     account.limits().max_temp_bytes,
                 ),
-                directory
-                    .expect("exact suggestion owns a temporary directory")
-                    .to_path_buf(),
+                directory.map(std::path::Path::to_path_buf),
                 row_count_hint,
             )?)
         } else {
@@ -233,8 +234,7 @@ where
 
     let schema = reader.schema();
     let root = ResourceAccount::root(options.resources);
-    let directory = options
-        .infer_uniqueness
+    let directory = (options.infer_uniqueness && options.spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
     let mut states = schema

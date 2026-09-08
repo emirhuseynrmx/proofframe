@@ -23,8 +23,8 @@ use std::num::NonZeroUsize;
 
 use crate::{
     CompiledContract, ExactState, ExecutionMetrics, FastValidationReport, Finding, Fingerprint,
-    FingerprintOptions, FingerprintVersion, KernelKind, ProofFrameError, ValidationState,
-    ValueKind, encoding::V2FingerprintState,
+    FingerprintOptions, FingerprintVersion, KernelKind, ProofFrameError, SpillPolicy,
+    ValidationState, ValueKind, encoding::V2FingerprintState,
 };
 
 /// Execution hints that do not alter contract semantics.
@@ -36,6 +36,12 @@ pub struct ExecutionOptions {
     pub cancellation: CancellationToken,
     /// Maximum partition workers. `None` uses bounded host parallelism.
     pub threads: Option<NonZeroUsize>,
+    /// Whether exact state may spill to a temporary directory.
+    ///
+    /// `Never` runs uniqueness entirely in memory and fails closed when the budget
+    /// cannot hold the next value. It is what a read-only filesystem, a locked-down
+    /// container, or WebAssembly needs, and it never creates a directory at all.
+    pub spill: SpillPolicy,
 }
 
 /// Execute a compiled contract without reparsing or performing rule-map lookups.
@@ -140,6 +146,7 @@ where
         &resource_root,
         options.row_count_hint,
         &options.cancellation,
+        options.spill,
     )?;
     let (_unique_directory, mut unique_states) =
         initialize_unique_states(plan, options, &resource_root)?;
@@ -234,7 +241,9 @@ fn initialize_unique_states(
     resource_root: &ResourceAccount,
 ) -> Result<(Option<tempfile::TempDir>, Vec<Option<ExactState>>), ProofFrameError> {
     let has_unique = plan.columns().iter().any(|column| column.rules().unique());
-    let directory = has_unique.then(tempfile::TempDir::new).transpose()?;
+    let directory = (has_unique && options.spill == SpillPolicy::Auto)
+        .then(tempfile::TempDir::new)
+        .transpose()?;
     let states = plan
         .columns()
         .iter()
@@ -242,16 +251,13 @@ fn initialize_unique_states(
             if !column.rules().unique() {
                 return Ok(None);
             }
-            let directory = directory
-                .as_ref()
-                .expect("a unique plan owns a temporary directory");
             ExactState::new_with_cancellation(
                 exact_kind(column.kernel()),
                 resource_root.child(
                     options.resources.max_memory_bytes,
                     options.resources.max_temp_bytes,
                 ),
-                directory.path().to_path_buf(),
+                directory.as_ref().map(|dir| dir.path().to_path_buf()),
                 options.row_count_hint,
                 options.cancellation.clone(),
             )

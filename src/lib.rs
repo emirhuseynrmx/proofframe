@@ -132,9 +132,11 @@ impl ColumnState {
                         account.limits().max_memory_bytes,
                         account.limits().max_temp_bytes,
                     ),
-                    directory
-                        .expect("exact profiling owns a temporary directory")
-                        .to_path_buf(),
+                    Some(
+                        directory
+                            .expect("exact profiling owns a temporary directory")
+                            .to_path_buf(),
+                    ),
                     row_count_hint,
                 )?),
             },
