@@ -1,0 +1,54 @@
+name: Release preflight
+
+# Answers one question before a tag is pushed: will the release be able to
+# publish? Pushing a tag runs CI and, on success, publishes to both registries
+# with no approval step, and a crates.io version cannot be withdrawn afterwards.
+# A token that expired between releases turns that into half a release — PyPI has
+# the version and crates.io does not.
+#
+# This asks crates.io who the token belongs to. It is a read, it publishes
+# nothing, and it never prints the token.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    name: Check the crates.io token is still valid
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+    steps:
+      - name: Ask crates.io who this token is
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. A tag would publish to PyPI and not to crates.io."
+            exit 1
+          fi
+          status=$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
+            --header "Authorization: ${CARGO_REGISTRY_TOKEN}" \
+            --header "User-Agent: proofframe-release-preflight" \
+            https://crates.io/api/v1/me)
+          case "${status}" in
+            200)
+              # The response names the account; it carries no secret.
+              echo "Token accepted by crates.io as: $(jq -r '.user.login' response.json)"
+              ;;
+            401|403)
+              echo "::error::crates.io rejected the token (HTTP ${status}). Issue a new one and update the CARGO_REGISTRY_TOKEN secret before tagging."
+              exit 1
+              ;;
+            *)
+              echo "::error::crates.io answered HTTP ${status}; could not tell whether the token is valid."
+              exit 1
+              ;;
+          esac
+
+      - name: PyPI needs no token
+        run: |
+          echo "PyPI publishes through trusted publishing, so there is no key to expire."
