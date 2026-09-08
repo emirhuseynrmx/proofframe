@@ -124,6 +124,82 @@ impl CompositeUniquePlan {
     }
 }
 
+/// Two numeric columns that must total the same amount.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BalanceEqualPlan {
+    pub(crate) name: Box<str>,
+    pub(crate) left: usize,
+    pub(crate) right: usize,
+    pub(crate) left_column: Box<str>,
+    pub(crate) right_column: Box<str>,
+    pub(crate) left_kernel: KernelKind,
+    pub(crate) right_kernel: KernelKind,
+    pub(crate) tolerance: f64,
+}
+
+impl BalanceEqualPlan {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub const fn left(&self) -> usize {
+        self.left
+    }
+    #[must_use]
+    pub const fn right(&self) -> usize {
+        self.right
+    }
+    #[must_use]
+    pub fn left_column(&self) -> &str {
+        &self.left_column
+    }
+    #[must_use]
+    pub fn right_column(&self) -> &str {
+        &self.right_column
+    }
+    #[must_use]
+    pub const fn left_kernel(&self) -> &KernelKind {
+        &self.left_kernel
+    }
+    #[must_use]
+    pub const fn right_kernel(&self) -> &KernelKind {
+        &self.right_kernel
+    }
+    #[must_use]
+    pub const fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+}
+
+/// The largest share of a column one value may hold.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DominantValuePlan {
+    pub(crate) name: Box<str>,
+    pub(crate) column: Box<str>,
+    pub(crate) column_index: usize,
+    pub(crate) max: f64,
+}
+
+impl DominantValuePlan {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+    #[must_use]
+    pub const fn column_index(&self) -> usize {
+        self.column_index
+    }
+    #[must_use]
+    pub const fn max(&self) -> f64 {
+        self.max
+    }
+}
+
 /// How far this dataset's row count may move from a reference dataset's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowCountDeltaPlan {
@@ -457,6 +533,8 @@ pub struct DatasetPlan {
     pub(crate) statistics: Vec<StatisticPlan>,
     pub(crate) conditional_unique: Vec<ConditionalUniquePlan>,
     pub(crate) row_count_delta: Vec<RowCountDeltaPlan>,
+    pub(crate) balance_equal: Vec<BalanceEqualPlan>,
+    pub(crate) dominant_value: Vec<DominantValuePlan>,
 }
 
 impl DatasetPlan {
@@ -474,6 +552,18 @@ impl DatasetPlan {
             && self.statistics.is_empty()
             && self.conditional_unique.is_empty()
             && self.row_count_delta.is_empty()
+            && self.balance_equal.is_empty()
+            && self.dominant_value.is_empty()
+    }
+
+    #[must_use]
+    pub fn balance_equal(&self) -> &[BalanceEqualPlan] {
+        &self.balance_equal
+    }
+
+    #[must_use]
+    pub fn dominant_value(&self) -> &[DominantValuePlan] {
+        &self.dominant_value
     }
 
     #[must_use]
@@ -862,6 +952,94 @@ impl DatasetPlan {
                 })
             })
             .collect::<Result<Vec<_>, ProofFrameError>>()?;
+        let numeric = |column: &str, path: &str| -> Result<(usize, KernelKind), ProofFrameError> {
+            let index = schema.index_of(column).map_err(|_| {
+                ProofFrameError::contract(
+                    ErrorCode::MissingColumn,
+                    format!("Column `{column}` is absent"),
+                    Some(path.to_string()),
+                )
+            })?;
+            let data_type = schema.field(index).data_type();
+            let kernel = KernelKind::from_data_type_for_plan(data_type);
+            if !matches!(
+                kernel,
+                KernelKind::I8
+                    | KernelKind::I16
+                    | KernelKind::I32
+                    | KernelKind::I64
+                    | KernelKind::U8
+                    | KernelKind::U16
+                    | KernelKind::U32
+                    | KernelKind::U64
+                    | KernelKind::F32
+                    | KernelKind::F64
+            ) {
+                return Err(ProofFrameError::contract(
+                    ErrorCode::UnsupportedType,
+                    format!("A balance needs numeric columns; `{column}` is `{data_type}`"),
+                    Some(path.to_string()),
+                ));
+            }
+            Ok((index, kernel))
+        };
+        let balance_equal = rules
+            .balance_equal
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                let path = format!("$.dataset_rules.balance_equal[{index}]");
+                if !(rule.tolerance.is_finite() && rule.tolerance >= 0.0) {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::ContractInvalidBound,
+                        "`tolerance` must be a finite non-negative number".to_string(),
+                        Some(format!("{path}.tolerance")),
+                    ));
+                }
+                let (left, left_kernel) =
+                    numeric(&rule.left_column, &format!("{path}.left_column"))?;
+                let (right, right_kernel) =
+                    numeric(&rule.right_column, &format!("{path}.right_column"))?;
+                Ok(BalanceEqualPlan {
+                    name: rule.name.clone().into_boxed_str(),
+                    left,
+                    right,
+                    left_column: rule.left_column.clone().into_boxed_str(),
+                    right_column: rule.right_column.clone().into_boxed_str(),
+                    left_kernel,
+                    right_kernel,
+                    tolerance: rule.tolerance,
+                })
+            })
+            .collect::<Result<Vec<_>, ProofFrameError>>()?;
+        let dominant_value = rules
+            .max_dominant_value_ratio
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                let path = format!("$.dataset_rules.max_dominant_value_ratio[{index}]");
+                if !(rule.max.is_finite() && (0.0..=1.0).contains(&rule.max)) {
+                    return Err(ProofFrameError::contract(
+                        ErrorCode::ContractInvalidBound,
+                        "`max` must be a ratio between 0 and 1".to_string(),
+                        Some(format!("{path}.max")),
+                    ));
+                }
+                let column_index = schema.index_of(&rule.column).map_err(|_| {
+                    ProofFrameError::contract(
+                        ErrorCode::MissingColumn,
+                        format!("Column `{}` is absent", rule.column),
+                        Some(format!("{path}.column")),
+                    )
+                })?;
+                Ok(DominantValuePlan {
+                    name: rule.name.clone().into_boxed_str(),
+                    column: rule.column.clone().into_boxed_str(),
+                    column_index,
+                    max: rule.max,
+                })
+            })
+            .collect::<Result<Vec<_>, ProofFrameError>>()?;
         Ok(Self {
             row_count: rules.row_count.clone(),
             null_ratios,
@@ -876,6 +1054,8 @@ impl DatasetPlan {
             statistics,
             conditional_unique,
             row_count_delta,
+            balance_equal,
+            dominant_value,
         })
     }
 

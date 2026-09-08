@@ -35,7 +35,7 @@ temporary data, incompatible schemas, ambiguous contracts, and exceeded limits f
 > **0.7.1 — Nine more rules, and a review every surface can write**
 >
 > Ordering, step, exclusivity, totals, mean, standard deviation, conditional uniqueness,
-> text length, and dates written as dates. Each one joins the plan digest only when a
+> ledger balance, category dominance, row-count drift, text length, and dates written as dates. Each one joins the plan digest only when a
 > contract uses it, so existing receipts keep verifying.
 >
 > Uniqueness no longer needs a writable directory, so it runs on a read-only filesystem
@@ -249,6 +249,8 @@ cover nullability, numeric bounds, allowlists, patterns, and NaN policy without 
     "sum": [{ "name": "turnover", "column": "amount", "max": 50000000 }],
     "mean": [{ "name": "latency", "column": "latency_ms", "max": 45 }],
     "std_dev": [{ "name": "spread", "column": "latency_ms", "max": 15 }],
+    "balance_equal": [{ "name": "books", "left_column": "debit", "right_column": "credit" }],
+    "max_dominant_value_ratio": [{ "name": "skew", "column": "country", "max": 0.7 }],
     "conditional_unique": [
       {
         "name": "live_ids",

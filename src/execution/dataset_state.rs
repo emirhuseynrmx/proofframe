@@ -11,13 +11,13 @@ use std::cmp::Ordering;
 use super::exclusive;
 use super::ordering::{self, Ordered};
 use super::record_lazy;
-use super::total::{self, Moments, Total};
+use super::total::{self, Frequencies, Moments, Total};
 use crate::{
-    CompositeNullPolicyAst, CompositeUniquePlan, ConditionalUniquePlan, CountRangeAst, DatasetPlan,
-    ExactState, ExclusiveModeAst, GapDetectionPlan, KernelKind, MonotonicNullPolicyAst,
-    MonotonicityPlan, MutuallyExclusivePlan, ProofFrameError, RatioPlan, RatioRangeAst,
-    ResourceAccount, StatisticKind, StatisticPlan, SumBounds, SumPlan, ValidationState, ValueKind,
-    ValueRef,
+    BalanceEqualPlan, CompositeNullPolicyAst, CompositeUniquePlan, ConditionalUniquePlan,
+    CountRangeAst, DatasetPlan, DominantValuePlan, ExactState, ExclusiveModeAst, GapDetectionPlan,
+    KernelKind, MonotonicNullPolicyAst, MonotonicityPlan, MutuallyExclusivePlan, ProofFrameError,
+    RatioPlan, RatioRangeAst, ResourceAccount, StatisticKind, StatisticPlan, SumBounds, SumPlan,
+    ValidationState, ValueKind, ValueRef,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -54,7 +54,23 @@ pub(super) struct DatasetState {
     sums: Vec<SumState>,
     statistics: Vec<StatisticState>,
     conditional: Vec<ConditionalState>,
+    balances: Vec<BalanceState>,
+    dominants: Vec<DominantState>,
     _directory: Option<tempfile::TempDir>,
+}
+
+/// Two running totals that must meet.
+struct BalanceState {
+    plan: BalanceEqualPlan,
+    left: Total,
+    right: Total,
+}
+
+/// One column's value frequencies, bounded by the memory budget.
+struct DominantState {
+    plan: DominantValuePlan,
+    counts: Frequencies,
+    scratch: Vec<u8>,
 }
 
 /// A conditional uniqueness rule and the keys it has seen so far.
@@ -198,6 +214,24 @@ impl DatasetState {
                 })
                 .collect(),
             exclusive: plan.mutually_exclusive().to_vec(),
+            balances: plan
+                .balance_equal()
+                .iter()
+                .map(|rule| BalanceState {
+                    plan: rule.clone(),
+                    left: Total::float(),
+                    right: Total::float(),
+                })
+                .collect(),
+            dominants: plan
+                .dominant_value()
+                .iter()
+                .map(|rule| DominantState {
+                    plan: rule.clone(),
+                    counts: Frequencies::new(account.limits().max_memory_bytes / 8),
+                    scratch: Vec::with_capacity(64),
+                })
+                .collect(),
             conditional: plan
                 .conditional_unique()
                 .iter()
@@ -357,6 +391,33 @@ impl DatasetState {
             let array = batch.column(state.plan.column_index());
             total::observe(&mut state.moments, state.plan.kernel(), array.as_ref())?;
         }
+        for state in &mut self.balances {
+            total::accumulate(
+                &mut state.left,
+                state.plan.left_kernel(),
+                batch.column(state.plan.left()).as_ref(),
+            )?;
+            total::accumulate(
+                &mut state.right,
+                state.plan.right_kernel(),
+                batch.column(state.plan.right()).as_ref(),
+            )?;
+        }
+        for state in &mut self.dominants {
+            let array = batch.column(state.plan.column_index());
+            for row in 0..batch.num_rows() {
+                state.scratch.clear();
+                if array.is_null(row) {
+                    // A mostly-empty column is exactly what this rule is for, so a
+                    // null counts as the value the column held.
+                    state.scratch.push(0);
+                } else {
+                    state.scratch.push(1);
+                    append_scalar(array.as_ref(), row, &mut state.scratch)?;
+                }
+                state.counts.add(&state.scratch)?;
+            }
+        }
         for state in &mut self.conditional {
             // Only the rows the predicate selects take part; the rest are not part of
             // the claim, so counting them would answer a question nobody asked.
@@ -465,6 +526,42 @@ impl DatasetState {
         rows: u64,
         validation: &mut ValidationState,
     ) -> Result<DatasetMetrics, ProofFrameError> {
+        for state in &self.balances {
+            let plan = &state.plan;
+            let left = total::as_float(&state.left);
+            let right = total::as_float(&state.right);
+            if (left - right).abs() > plan.tolerance() {
+                record_lazy(validation, "balance_equal", "$dataset", None, || {
+                    format!(
+                        "Rule `{}` has `{}` totalling {left} and `{}` totalling {right}",
+                        plan.name(),
+                        plan.left_column(),
+                        plan.right_column()
+                    )
+                });
+            }
+        }
+        for state in &self.dominants {
+            let plan = &state.plan;
+            let Some((share, rows)) = state.counts.dominant() else {
+                continue;
+            };
+            if share > plan.max() {
+                record_lazy(
+                    validation,
+                    "max_dominant_value_ratio",
+                    plan.column(),
+                    None,
+                    || {
+                        format!(
+                            "Rule `{}` has one value in {rows} row(s), a share of {share}, above the maximum {}",
+                            plan.name(),
+                            plan.max()
+                        )
+                    },
+                );
+            }
+        }
         for state in &self.statistics {
             let plan = &state.plan;
             let observed = match plan.kind() {

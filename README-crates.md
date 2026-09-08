@@ -127,9 +127,9 @@ when signer identity matters.
 
 ## 0.7.1
 
-Nine rules join `dataset_rules` and the column rules: `monotonicity`, `gap_detection`,
-`mutually_exclusive`, `sum`, `mean`, `std_dev`, `conditional_unique`, `row_count_delta`, and
-`min_length`/`max_length` on text. Date bounds accept `"2024-01-01"` as well as a day count. Each
+Eleven rules join `dataset_rules` and the column rules: `monotonicity`, `gap_detection`,
+`mutually_exclusive`, `sum`, `mean`, `std_dev`, `conditional_unique`, `row_count_delta`,
+`balance_equal`, `max_dominant_value_ratio`, and `min_length`/`max_length` on text. Date bounds accept `"2024-01-01"` as well as a day count. Each
 rule hashes into `compiled_plan_digest` only when a plan carries it, so contracts written before
 this release keep the plan identity their receipts record.
 

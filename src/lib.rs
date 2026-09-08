@@ -22,10 +22,11 @@ mod review;
 mod suggest;
 
 pub use contract::{
-    AssertionAst, BoundAst, ColumnPlan, CompareAst, CompareOpAst, ComparePlan, CompiledContract,
-    CompiledRules, CompositeNullPolicyAst, CompositeUniqueAst, CompositeUniquePlan,
-    ConditionalUniqueAst, ConditionalUniquePlan, ContractAst, ContractAstV2, ContractDocument,
-    ContractVersion, CountPlan, CountRangeAst, DatasetPlan, DatasetRulesAst, ExclusiveModeAst,
+    AssertionAst, BalanceEqualAst, BalanceEqualPlan, BoundAst, ColumnPlan, CompareAst,
+    CompareOpAst, ComparePlan, CompiledContract, CompiledRules, CompositeNullPolicyAst,
+    CompositeUniqueAst, CompositeUniquePlan, ConditionalUniqueAst, ConditionalUniquePlan,
+    ContractAst, ContractAstV2, ContractDocument, ContractVersion, CountPlan, CountRangeAst,
+    DatasetPlan, DatasetRulesAst, DominantValueAst, DominantValuePlan, ExclusiveModeAst,
     GapDetectionAst, GapDetectionPlan, KernelKind, MonotonicDirectionAst, MonotonicNullPolicyAst,
     MonotonicityAst, MonotonicityPlan, MutuallyExclusiveAst, MutuallyExclusivePlan, NaNPolicy,
     NaNPolicyAst, NullPolicyAst, OperandAst, OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst,

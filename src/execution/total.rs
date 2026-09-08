@@ -273,6 +273,70 @@ pub(super) fn observe(
     )))
 }
 
+/// Exact frequency of the most common value in a column.
+///
+/// Counting every distinct value is the only way to know which one is most common,
+/// so this is bounded the way the rest of the engine is: the map is charged against
+/// the memory budget and the scan stops when it cannot hold another value. A
+/// category column has few values and fits; a column that does not is one this rule
+/// was never asking about, and saying so beats answering from a sketch.
+#[derive(Debug)]
+pub(super) struct Frequencies {
+    counts: std::collections::HashMap<Vec<u8>, u64>,
+    total: u64,
+    budget: u64,
+    used: u64,
+}
+
+impl Frequencies {
+    pub(super) fn new(budget: u64) -> Self {
+        Self {
+            counts: std::collections::HashMap::new(),
+            total: 0,
+            budget,
+            used: 0,
+        }
+    }
+
+    pub(super) fn add(&mut self, key: &[u8]) -> Result<(), ProofFrameError> {
+        self.total += 1;
+        if let Some(count) = self.counts.get_mut(key) {
+            *count += 1;
+            return Ok(());
+        }
+        // Charged before it is stored, so the limit is hit before the allocation.
+        let cost = (key.len() + std::mem::size_of::<u64>() + 48) as u64;
+        self.used = self.used.saturating_add(cost);
+        if self.used > self.budget {
+            return Err(ProofFrameError::ResourceLimit {
+                resource: "dominant_value_map",
+                requested: cost,
+                used: self.used,
+                limit: self.budget,
+            });
+        }
+        self.counts.insert(key.to_vec(), 1);
+        Ok(())
+    }
+
+    /// The most common value's share, and how many rows it held.
+    pub(super) fn dominant(&self) -> Option<(f64, u64)> {
+        if self.total == 0 {
+            return None;
+        }
+        let top = self.counts.values().copied().max()?;
+        Some((top as f64 / self.total as f64, top))
+    }
+}
+
+/// The total as a float, for comparisons that are inherently approximate.
+pub(super) fn as_float(total: &Total) -> f64 {
+    match total {
+        Total::Integer(value) => *value as f64,
+        Total::Float(value) => value.value(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -326,6 +326,32 @@ pub struct CompositeUniqueAst {
     pub nulls: CompositeNullPolicyAst,
 }
 
+/// Require two numeric columns to total the same amount.
+///
+/// Double-entry bookkeeping states this about debits and credits; a tolerance exists
+/// because money stored as a float does not add up exactly.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BalanceEqualAst {
+    pub name: String,
+    pub left_column: String,
+    pub right_column: String,
+    #[serde(default)]
+    pub tolerance: f64,
+}
+
+/// Bound the share of a column held by its most common value.
+///
+/// A category column where one value holds ninety percent of the rows is usually a
+/// default that was never filled in, or test data that reached production.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DominantValueAst {
+    pub name: String,
+    pub column: String,
+    pub max: f64,
+}
+
 /// Bound how far this dataset's row count may move from a reference dataset's.
 ///
 /// The ratio is `(rows - reference_rows) / reference_rows`, so `-0.05` allows a five
@@ -399,6 +425,10 @@ pub struct DatasetRulesAst {
     pub conditional_unique: Vec<ConditionalUniqueAst>,
     #[serde(default)]
     pub row_count_delta: Vec<RowCountDeltaAst>,
+    #[serde(default)]
+    pub balance_equal: Vec<BalanceEqualAst>,
+    #[serde(default)]
+    pub max_dominant_value_ratio: Vec<DominantValueAst>,
     #[serde(default)]
     pub references: Vec<ReferenceAst>,
     #[serde(default)]

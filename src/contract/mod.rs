@@ -12,17 +12,17 @@ pub use ast::{BoundAst, ContractAst, ContractVersion, NaNPolicyAst, RuleAst};
 pub use bounds::TypedBound;
 pub use compile::{ColumnPlan, CompiledContract, CompiledRules, KernelKind, NaNPolicy};
 pub use dataset::{
-    CompositeUniquePlan, ConditionalUniquePlan, CountPlan, DatasetPlan, GapDetectionPlan,
-    MonotonicityPlan, MutuallyExclusivePlan, RatioPlan, ReferencePlan, RowCountDeltaPlan,
-    StatisticKind, StatisticPlan, SumBounds, SumPlan,
+    BalanceEqualPlan, CompositeUniquePlan, ConditionalUniquePlan, CountPlan, DatasetPlan,
+    DominantValuePlan, GapDetectionPlan, MonotonicityPlan, MutuallyExclusivePlan, RatioPlan,
+    ReferencePlan, RowCountDeltaPlan, StatisticKind, StatisticPlan, SumBounds, SumPlan,
 };
 pub use document::ContractDocument;
 pub use row::{ComparePlan, OperandPlan, RowPlan, RowPlanKind, ScalarValuePlan};
 pub use v2::{
-    AssertionAst, CompareAst, CompareOpAst, CompositeNullPolicyAst, CompositeUniqueAst,
-    ConditionalUniqueAst, ContractAstV2, ContractStatus, CountRangeAst, DatasetRulesAst,
-    ExclusiveModeAst, GapDetectionAst, MonotonicDirectionAst, MonotonicNullPolicyAst,
-    MonotonicityAst, MutuallyExclusiveAst, NullPolicyAst, OperandAst, ParameterizedTypeAst,
-    PrimitiveTypeAst, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst, RowCountDeltaAst,
-    RowRuleAst, RuleAstV2, StatisticAst, SumAst, TimeUnitAst, TypeAst,
+    AssertionAst, BalanceEqualAst, CompareAst, CompareOpAst, CompositeNullPolicyAst,
+    CompositeUniqueAst, ConditionalUniqueAst, ContractAstV2, ContractStatus, CountRangeAst,
+    DatasetRulesAst, DominantValueAst, ExclusiveModeAst, GapDetectionAst, MonotonicDirectionAst,
+    MonotonicNullPolicyAst, MonotonicityAst, MutuallyExclusiveAst, NullPolicyAst, OperandAst,
+    ParameterizedTypeAst, PrimitiveTypeAst, RatioRangeAst, ReferenceAst, ReferenceNullPolicyAst,
+    RowCountDeltaAst, RowRuleAst, RuleAstV2, StatisticAst, SumAst, TimeUnitAst, TypeAst,
 };

@@ -9,13 +9,13 @@ use regex::Regex;
 use super::ast::{append_path, column_path};
 use super::bounds::parse_bound;
 use super::{
-    CompareOpAst, ComparePlan, CompositeNullPolicyAst, ConditionalUniquePlan, ContractAst,
-    ContractAstV2, ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, ExclusiveModeAst,
-    GapDetectionPlan, MonotonicDirectionAst, MonotonicNullPolicyAst, MonotonicityPlan,
-    MutuallyExclusivePlan, NaNPolicyAst, NullPolicyAst, OperandPlan, ParameterizedTypeAst,
-    PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan, RowCountDeltaPlan, RowPlan,
-    RowPlanKind, RuleAst, RuleAstV2, ScalarValuePlan, StatisticKind, StatisticPlan, SumBounds,
-    SumPlan, TimeUnitAst, TypeAst, TypedBound,
+    BalanceEqualPlan, CompareOpAst, ComparePlan, CompositeNullPolicyAst, ConditionalUniquePlan,
+    ContractAst, ContractAstV2, ContractDocument, ContractVersion, CountRangeAst, DatasetPlan,
+    DominantValuePlan, ExclusiveModeAst, GapDetectionPlan, MonotonicDirectionAst,
+    MonotonicNullPolicyAst, MonotonicityPlan, MutuallyExclusivePlan, NaNPolicyAst, NullPolicyAst,
+    OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan,
+    RowCountDeltaPlan, RowPlan, RowPlanKind, RuleAst, RuleAstV2, ScalarValuePlan, StatisticKind,
+    StatisticPlan, SumBounds, SumPlan, TimeUnitAst, TypeAst, TypedBound,
 };
 use crate::{ErrorCode, ProofFrameError};
 
@@ -597,7 +597,12 @@ fn hash_dataset_plan(hasher: &mut blake3::Hasher, plan: &DatasetPlan) {
     hash_statistic_plans(hasher, plan.statistics());
     hash_conditional_unique_plans(hasher, plan.conditional_unique());
     hash_row_count_delta_plans(hasher, plan.row_count_delta());
+    hash_balance_plans(hasher, plan.balance_equal());
+    hash_dominant_plans(hasher, plan.dominant_value());
 }
+
+const BALANCE_DOMAIN: &[u8] = b"proofframe:compiled-plan:balance-equal:v1\0";
+const DOMINANT_DOMAIN: &[u8] = b"proofframe:compiled-plan:dominant-value:v1\0";
 
 const ROW_DELTA_DOMAIN: &[u8] = b"proofframe:compiled-plan:row-count-delta:v1\0";
 
@@ -822,6 +827,38 @@ fn hash_row_count_delta_plans(hasher: &mut blake3::Hasher, rules: &[RowCountDelt
         hash_part(hasher, rule.reference().as_bytes());
         hash_optional_f64(hasher, rule.min_ratio());
         hash_optional_f64(hasher, rule.max_ratio());
+    }
+}
+
+/// Append balance rules only when the plan carries them.
+fn hash_balance_plans(hasher: &mut blake3::Hasher, rules: &[BalanceEqualPlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(BALANCE_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.left() as u64).to_le_bytes());
+        hasher.update(&(rule.right() as u64).to_le_bytes());
+        hash_kernel(hasher, rule.left_kernel());
+        hash_kernel(hasher, rule.right_kernel());
+        hasher.update(&rule.tolerance().to_bits().to_le_bytes());
+    }
+}
+
+/// Append dominance rules only when the plan carries them.
+fn hash_dominant_plans(hasher: &mut blake3::Hasher, rules: &[DominantValuePlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(DOMINANT_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.column_index() as u64).to_le_bytes());
+        hash_part(hasher, rule.column().as_bytes());
+        hasher.update(&rule.max().to_bits().to_le_bytes());
     }
 }
 

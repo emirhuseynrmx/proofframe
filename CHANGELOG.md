@@ -45,6 +45,19 @@
     length in Unicode characters. Characters rather than bytes: a rule about an
     eight-character password should not depend on the alphabet it is written in.
 
+- `dataset_rules.balance_equal` requires two numeric columns to total the same
+  amount, which is what double-entry bookkeeping says about debits and credits. The
+  tolerance exists because money stored as a float does not add up exactly; the
+  totals themselves are still counted the way `sum` counts them, so the verdict does
+  not move with the batch size.
+
+- `dataset_rules.max_dominant_value_ratio` bounds the share of a column held by its
+  most common value, for the default nobody filled in and the test data that reached
+  production. Knowing which value is most common means counting all of them, so the
+  map is charged against the memory budget and the scan stops when it cannot hold
+  another value rather than answering from a sketch. Nulls count as a value the
+  column held, because a mostly-empty column is exactly what the rule is for.
+
 - `dataset_rules.row_count_delta` bounds how far this dataset's row count may move
   from a reference dataset's, which is the check that catches a pipeline delivering
   half of yesterday. Only the count is read, so the reference is drained without
