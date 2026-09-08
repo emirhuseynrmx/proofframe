@@ -106,6 +106,72 @@ def _write_new(path: Path, bundle: dict) -> None:
         lock.unlink()
 
 
+def _read_plan(source: Path, csv_options: dict | None) -> tuple[dict, dict]:
+    """Validates the format and resolves the reader settings it will be read with."""
+    suffix = source.suffix.lower()
+    if suffix not in {".csv", ".parquet"}:
+        raise ValueError("Use .csv or .parquet")
+    if suffix == ".parquet" and csv_options is not None:
+        raise ValueError("CSV options cannot apply to Parquet")
+    return _csv_options(csv_options)
+
+
+def _open(source: Path, options: dict) -> tuple[Any, Any]:
+    """Opens the file as an Arrow reader, returning the ParquetFile that owns it."""
+    if source.suffix.lower() == ".csv":
+        return csv.open_csv(source, **options), None
+    handle = parquet.ParquetFile(source)
+    return pa.RecordBatchReader.from_batches(handle.schema_arrow, handle.iter_batches()), handle
+
+
+def _decide(report: dict, names: list[str], policy: dict) -> dict:
+    """Turns a completed report into accepted or rejected under this policy."""
+    evaluated = {
+        names[i]: n
+        for i, n in zip(report.get("evaluated_indices", []), report.get("evaluated_columns", []))
+    }
+    reasons = []
+    if report["violation_count"] > policy["max_violations"]:
+        reasons.append("violation_limit_exceeded")
+    for name, minimum in policy["minimum_evaluated"].items():
+        if name not in evaluated or evaluated[name] < minimum:
+            reasons.append("minimum_evaluated:" + name)
+    return {
+        "status": "rejected" if reasons else "accepted",
+        "reasons": reasons,
+        "evaluated": evaluated,
+    }
+
+
+def _scan(
+    source: Path, contract: dict, policy: dict, options: dict, scan_options: dict
+) -> tuple[dict | None, dict]:
+    """Reads the file once and decides, or reports why the scan could not complete.
+
+    An operational failure is `unknown` with the exception's name as its reason. A
+    contract error is the caller's mistake and is raised, not absorbed.
+    """
+    decision = {"status": "unknown", "reasons": [], "evaluated": {}}
+    reader = handle = None
+    try:
+        reader, handle = _open(source, options)
+        names = reader.schema.names
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate column names are ambiguous")
+        checked = check_with_evidence(reader, contract, **scan_options)
+        return checked, _decide(checked["report"], names, policy)
+    except ContractError:
+        raise
+    except (OSError, pa.ArrowException, ProofFrameError) as error:
+        decision["reasons"] = [type(error).__name__]
+        return None, decision
+    finally:
+        if reader is not None:
+            reader.close()
+        if handle is not None:
+            handle.close()
+
+
 def accept_file(
     path: str | Path,
     contract: dict,
@@ -129,11 +195,7 @@ def accept_file(
     contract = json.loads(_canonical(contract))
     contract.setdefault("version", "proofframe.contract.v1")
     source = Path(path)
-    if source.suffix.lower() not in {".csv", ".parquet"}:
-        raise ValueError("Use .csv or .parquet")
-    if source.suffix.lower() == ".parquet" and csv_options is not None:
-        raise ValueError("CSV options cannot apply to Parquet")
-    settings, options = _csv_options(csv_options)
+    settings, options = _read_plan(source, csv_options)
     read_settings = {
         "format": source.suffix.lower()[1:],
         "csv": settings if source.suffix.lower() == ".csv" else None,
@@ -141,47 +203,7 @@ def accept_file(
     if output is not None and os.path.lexists(output):
         raise FileExistsError(output)
     scan_options.setdefault("max_samples", 0)
-    checked = None
-    decision = {"status": "unknown", "reasons": [], "evaluated": {}}
-    reader = None
-    pf = None
-    try:
-        if source.suffix.lower() == ".csv":
-            reader = csv.open_csv(source, **options)
-        else:
-            pf = parquet.ParquetFile(source)
-            reader = pa.RecordBatchReader.from_batches(pf.schema_arrow, pf.iter_batches())
-        names = reader.schema.names
-        if len(names) != len(set(names)):
-            raise ValueError("Duplicate column names are ambiguous")
-        checked = check_with_evidence(reader, contract, **scan_options)
-        report = checked["report"]
-        evaluated = {
-            names[i]: n
-            for i, n in zip(
-                report.get("evaluated_indices", []), report.get("evaluated_columns", [])
-            )
-        }
-        reasons = []
-        if report["violation_count"] > policy["max_violations"]:
-            reasons.append("violation_limit_exceeded")
-        for name, minimum in policy["minimum_evaluated"].items():
-            if name not in evaluated or evaluated[name] < minimum:
-                reasons.append("minimum_evaluated:" + name)
-        decision = {
-            "status": "rejected" if reasons else "accepted",
-            "reasons": reasons,
-            "evaluated": evaluated,
-        }
-    except ContractError:
-        raise
-    except (OSError, pa.ArrowException, ProofFrameError) as error:
-        decision["reasons"] = [type(error).__name__]
-    finally:
-        if reader is not None:
-            reader.close()
-        if pf is not None:
-            pf.close()
+    checked, decision = _scan(source, contract, policy, options, scan_options)
     payload = {
         "version": BUNDLE_VERSION,
         "contract": contract,
@@ -268,7 +290,7 @@ def _typed(value: object, fields: dict[str, type | tuple[type, ...]]) -> bool:
     ``bool`` is checked before ``int`` because Python's ``bool`` is an ``int``: a count
     of ``True`` would otherwise pass as a row count.
     """
-    if not isinstance(value, dict) or not fields.keys() <= value.keys():
+    if not isinstance(value, dict) or fields.keys() - value.keys():
         return False
     for name, expected in fields.items():
         found = value[name]
@@ -305,36 +327,45 @@ def _well_formed(payload: object) -> bool:
     """
     if not isinstance(payload, dict) or set(payload) != PAYLOAD_FIELDS:
         return False
-    decision = payload["decision"]
+    if not _well_formed_decision(payload["decision"]):
+        return False
+    if not _scan_matches_decision(payload):
+        return False
+    return all(
+        isinstance(payload[field], dict) for field in ("contract", "policy", "read_settings")
+    )
+
+
+def _well_formed_decision(decision: object) -> bool:
+    """Whether the decision is one of the three, stated in the shape it is written in."""
     if not isinstance(decision, dict) or set(decision) != {"status", "reasons", "evaluated"}:
         return False
     if decision["status"] not in DECISION_STATUSES:
         return False
-    if not isinstance(decision["reasons"], list) or not all(
-        isinstance(reason, str) for reason in decision["reasons"]
-    ):
+    if not isinstance(decision["reasons"], list):
         return False
-    if not isinstance(decision["evaluated"], dict):
+    if not all(isinstance(reason, str) for reason in decision["reasons"]):
         return False
-    # Only an incomplete scan may lack a report, and only by being absent outright.
-    # Anything else in that slot has to be the scan the producer writes: a present
-    # field of the wrong shape is a stronger claim than a missing one, not a weaker
-    # one, because a reader will go on to use it.
-    if decision["status"] == "unknown":
-        if not (payload["report"] is None and payload["evidence"] is None):
-            return False
-    else:
-        if not _typed(payload["report"], REPORT_FIELDS):
-            return False
-        if not _counts_are_sane(payload["report"]):
-            return False
-        if not _typed(payload["evidence"], EVIDENCE_FIELDS):
-            return False
-        if payload["evidence"]["schema"] != EVIDENCE_SCHEMA:
-            return False
-    return all(
-        isinstance(payload[field], dict) for field in ("contract", "policy", "read_settings")
-    )
+    return isinstance(decision["evaluated"], dict)
+
+
+def _scan_matches_decision(payload: dict) -> bool:
+    """Whether the report and evidence are what this decision implies they must be.
+
+    Only an incomplete scan may lack a report, and only by being absent outright.
+    Anything else in that slot has to be the scan the producer writes: a present field
+    of the wrong shape is a stronger claim than a missing one, not a weaker one,
+    because a reader will go on to use it.
+    """
+    if payload["decision"]["status"] == "unknown":
+        return payload["report"] is None and payload["evidence"] is None
+    if not _typed(payload["report"], REPORT_FIELDS):
+        return False
+    if not _counts_are_sane(payload["report"]):
+        return False
+    if not _typed(payload["evidence"], EVIDENCE_FIELDS):
+        return False
+    return payload["evidence"]["schema"] == EVIDENCE_SCHEMA
 
 
 def verify_acceptance(bundle: dict, *, expected_public_key: str | None = None) -> dict:

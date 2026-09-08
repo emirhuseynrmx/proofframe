@@ -169,6 +169,51 @@ def markdown(
     yield "This review is local. Evidence is unsigned until signed separately.\n"
 
 
+def _findings_section(report: Mapping[str, Any]) -> Iterator[str]:
+    """The sampled findings, with the sampling stated rather than implied."""
+    yield '<section><h2>Where to investigate</h2><p class="muted">'
+    yield f"{len(report['findings'])} sampled finding(s). "
+    yield ("This is not a complete list. " if report.get("truncated") else "")
+    yield "A violation count is not a count of distinct failing rows. Unlisted rules are not marked as passed.</p>"
+    for finding in report["findings"]:
+        yield '<article class="finding"><div class="location">'
+        yield f"<code>{escape(finding.get('column', 'Dataset'))}</code>"
+        yield f"<span>row {escape(finding.get('row', '—'))}</span><span>{escape(finding['rule'])}</span></div>"
+        yield f"<p>{escape(finding.get('message', ''))}</p></article>"
+    yield "</section>"
+
+
+def _idle_section(report: Mapping[str, Any], column_names: Sequence[str]) -> Iterator[str]:
+    """Columns whose rules had nothing to check. Silence here would read as a pass."""
+    idle = unexercised(report, column_names)
+    if not idle:
+        return
+    yield "<section><h2>Rules that were never asked</h2>"
+    yield (
+        f"<p>{len(idle)} column(s) had no value for their rules to check. "
+        "A rule that was never asked did not pass.</p>"
+    )
+    for name in idle:
+        yield '<article class="finding"><div class="location">'
+        yield f"<code>{escape(name)}</code><span>0 values evaluated</span></div></article>"
+    yield "</section>"
+
+
+def _contract_section(contract: Mapping[str, Any]) -> Iterator[str]:
+    """The declared rules, disclosed verbatim rather than summarized."""
+    yield "<section><h2>What was checked</h2>"
+    yield "<p>These are the declared rules, not individual pass verdicts.</p>"
+    for name in ("columns", "row_rules", "dataset_rules"):
+        value = contract.get(name)
+        if value:
+            yield f"<details><summary>{escape(name.replace('_', ' ').capitalize())}</summary><pre>"
+            # Rules may contain sensitive literal values: disclose rather than claim redaction.
+            for chunk in json.JSONEncoder(indent=2, ensure_ascii=True).iterencode(value):
+                yield html.escape(chunk, quote=True)
+            yield "</pre></details>"
+    yield "</section>"
+
+
 def document(
     report: Mapping[str, Any],
     evidence: Mapping[str, Any],
@@ -204,38 +249,11 @@ def document(
         (len(report["findings"]), "Sampled findings"),
     ]:
         yield f'<div class="metric"><span class="value">{escape(value)}</span><span class="label">{name}</span></div>'
-    yield '</div><section><h2>Where to investigate</h2><p class="muted">'
-    yield f"{len(report['findings'])} sampled finding(s). "
-    yield ("This is not a complete list. " if report.get("truncated") else "")
-    yield "A violation count is not a count of distinct failing rows. Unlisted rules are not marked as passed.</p>"
-    for finding in report["findings"]:
-        yield '<article class="finding"><div class="location">'
-        yield f"<code>{escape(finding.get('column', 'Dataset'))}</code>"
-        yield f"<span>row {escape(finding.get('row', '—'))}</span><span>{escape(finding['rule'])}</span></div>"
-        yield f"<p>{escape(finding.get('message', ''))}</p></article>"
-    yield "</section>"
-    idle = unexercised(report, column_names)
-    if idle:
-        yield "<section><h2>Rules that were never asked</h2>"
-        yield (
-            f"<p>{len(idle)} column(s) had no value for their rules to check. "
-            "A rule that was never asked did not pass.</p>"
-        )
-        for name in idle:
-            yield '<article class="finding"><div class="location">'
-            yield f"<code>{escape(name)}</code><span>0 values evaluated</span></div></article>"
-        yield "</section>"
-    yield "<section><h2>What was checked</h2>"
-    yield "<p>These are the declared rules, not individual pass verdicts.</p>"
-    for name in ("columns", "row_rules", "dataset_rules"):
-        value = contract.get(name)
-        if value:
-            yield f"<details><summary>{escape(name.replace('_', ' ').capitalize())}</summary><pre>"
-            # Rules may contain sensitive literal values: disclose rather than claim redaction.
-            for chunk in json.JSONEncoder(indent=2, ensure_ascii=True).iterencode(value):
-                yield html.escape(chunk, quote=True)
-            yield "</pre></details>"
-    yield "</section><section><h2>Data identity and execution</h2><dl>"
+    yield "</div>"
+    yield from _findings_section(report)
+    yield from _idle_section(report, column_names)
+    yield from _contract_section(contract)
+    yield "<section><h2>Data identity and execution</h2><dl>"
     pairs = [
         ("Dataset fingerprint", fingerprint(evidence)),
         ("Contract digest", report.get("contract_source_digest", "")),

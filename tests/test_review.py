@@ -20,7 +20,8 @@ def contract():
 
 def test_default_privacy_has_exact_total_and_action_without_samples(tmp_path):
     result = review(data(), contract(), tmp_path / "report")
-    assert result["valid"] is False and result["violation_count"] == 3
+    assert result["valid"] is False
+    assert result["violation_count"] == 3
     report = json.loads((tmp_path / "report/report.json").read_text())
     evidence = json.loads((tmp_path / "report/evidence.json").read_text())
     assert report["findings"] == []
@@ -36,8 +37,10 @@ def test_bounded_sample_does_not_turn_three_violations_into_one(tmp_path):
     review(data(), contract(), tmp_path / "sample", max_samples=1)
     report = json.loads((tmp_path / "sample/report.json").read_text())
     text = (tmp_path / "sample/summary.md").read_text()
-    assert report["violation_count"] == 3 and len(report["findings"]) == 1
-    assert "1 sampled finding" in text and "3 violations" in text
+    assert report["violation_count"] == 3
+    assert len(report["findings"]) == 1
+    assert "1 sampled finding" in text
+    assert "3 violations" in text
     assert "not a complete list" in text
 
 
@@ -77,11 +80,13 @@ def test_html_escapes_untrusted_content_with_samples_enabled(tmp_path):
 
 def test_draft_and_output_limit_never_publish_partial_results(tmp_path):
     rules = contract() | {"status": "draft"}
+    table = data()
     with pytest.raises(pf.ContractError):
-        review(data(), rules, tmp_path / "draft")
+        review(table, rules, tmp_path / "draft")
     assert not (tmp_path / "draft").exists()
+    table, valid = data(), contract()
     with pytest.raises(pf.ResourceLimitError):
-        review(data(), contract(), tmp_path / "small", max_output_bytes=100)
+        review(table, valid, tmp_path / "small", max_output_bytes=100)
     assert not (tmp_path / "small").exists()
     assert list(tmp_path.iterdir()) == []
 
@@ -90,8 +95,9 @@ def test_existing_output_is_preserved(tmp_path):
     target = tmp_path / "existing"
     target.mkdir()
     (target / "keep").write_text("user file")
+    table, rules = data(), contract()
     with pytest.raises(FileExistsError):
-        review(data(), contract(), target)
+        review(table, rules, target)
     assert (target / "keep").read_text() == "user file"
 
 
@@ -118,9 +124,10 @@ def test_io_failure_cleans_staging_and_never_publishes(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise OSError("disk write failed")
 
+    table, rules = data(), contract()
     monkeypatch.setattr(module, "_write_chunks", fail)
     with pytest.raises(OSError):
-        review(data(), contract(), tmp_path / "broken")
+        review(table, rules, tmp_path / "broken")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -170,19 +177,18 @@ def test_cli_review_exit_code_and_evidence_compatibility(tmp_path, valid, capsys
 
 @pytest.mark.parametrize("typ", ["string", "integer", {"name": "decimal128", "scale": 2}])
 def test_python_type_error_identifies_column(tmp_path, typ):
+    table = data()
+    rules = {"version": "proofframe.contract.v2", "columns": {"amount": {"type": typ}}}
     with pytest.raises(pf.ContractError) as error:
-        review(
-            data(),
-            {"version": "proofframe.contract.v2", "columns": {"amount": {"type": typ}}},
-            tmp_path / "invalid",
-        )
+        review(table, rules, tmp_path / "invalid")
     assert "amount" in str(error.value)
     assert "untagged enum" not in str(error.value)
 
 
 def test_missing_version_points_to_v2_in_python():
+    table = data()
     with pytest.raises(pf.ContractError) as error:
-        pf.check(data(), {"status": "active", "columns": {}})
+        pf.check(table, {"status": "active", "columns": {}})
     assert "proofframe.contract.v2" in str(error.value)
 
 

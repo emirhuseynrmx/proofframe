@@ -250,7 +250,8 @@ fn merge_reports(
     for report in reports {
         violation_count = violation_count.saturating_add(report.violation_count);
         if indices.len() < report.evaluated_indices.len() {
-            indices = report.evaluated_indices.clone();
+            indices.clear();
+            indices.extend_from_slice(&report.evaluated_indices);
         }
         if evaluated.len() < report.evaluated_columns.len() {
             evaluated.resize(report.evaluated_columns.len(), 0);

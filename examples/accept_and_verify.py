@@ -51,36 +51,46 @@ def main() -> None:
         )
         decision = bundle["payload"]["decision"]
         print(json.dumps(decision, indent=2))
-        assert decision["status"] == "accepted"
-        assert decision["evaluated"]["amount"] == 3
+        # Checked rather than asserted: `python -O` drops an assert, and an example
+        # that prints a decision it never confirmed is worse than no example.
+        if decision["status"] != "accepted" or decision["evaluated"]["amount"] != 3:
+            raise SystemExit(f"the delivery was not accepted as documented: {decision}")
 
         # The bundle verifies without the data, the contract file, or this script.
         # Verification answers whether the bundle is intact, not what the decision
         # was: the decision is read from the payload it just vouched for.
         saved = json.loads((root / "acceptance.json").read_text(encoding="utf-8"))
-        assert pf.verify_acceptance(saved)["valid"]
-        assert saved["payload"]["decision"]["status"] == "accepted"
-        for identity in ("contract_id", "policy_id", "read_settings_id"):
-            assert bundle["payload"][identity]
+        if not pf.verify_acceptance(saved)["valid"]:
+            raise SystemExit("the saved bundle did not verify")
+        if saved["payload"]["decision"]["status"] != "accepted":
+            raise SystemExit("the saved bundle carries a different decision")
+        if not all(bundle["payload"][i] for i in ("contract_id", "policy_id", "read_settings_id")):
+            raise SystemExit("the bundle is missing a bound identity")
 
         # Editing any bound part invalidates the bundle, including the settings
         # the file was read with.
         tampered = json.loads(json.dumps(saved))
         tampered["payload"]["read_settings"]["csv"]["decimal_point"] = "."
-        assert not pf.verify_acceptance(tampered)["valid"]
+        if pf.verify_acceptance(tampered)["valid"]:
+            raise SystemExit("an edited read setting still verified")
 
         # A file the policy does not accept says so, and says why.
         short = root / "short.csv"
         short.write_text("order_id;amount\n2001;10,00\n", encoding="utf-8")
         rejected = pf.accept_file(short, CONTRACT, policy=POLICY, csv_options=CSV_OPTIONS)
-        assert rejected["payload"]["decision"]["status"] == "rejected"
-        assert rejected["payload"]["decision"]["reasons"] == ["minimum_evaluated:amount"]
+        if rejected["payload"]["decision"] != {
+            "status": "rejected",
+            "reasons": ["minimum_evaluated:amount"],
+            "evaluated": rejected["payload"]["decision"]["evaluated"],
+        }:
+            raise SystemExit(f"unexpected rejection: {rejected['payload']['decision']}")
 
         # A file that cannot be read is unknown. It is never quietly accepted.
         unreadable = pf.accept_file(
             root / "never-delivered.csv", CONTRACT, policy=POLICY, csv_options=CSV_OPTIONS
         )
-        assert unreadable["payload"]["decision"]["status"] == "unknown"
+        if unreadable["payload"]["decision"]["status"] != "unknown":
+            raise SystemExit("a file that could not be read was not reported as unknown")
         print("rejected:", rejected["payload"]["decision"]["reasons"])
         print("unknown:", unreadable["payload"]["decision"]["reasons"])
 
