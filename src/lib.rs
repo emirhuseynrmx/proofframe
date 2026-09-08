@@ -105,6 +105,10 @@ pub struct ColumnProfile {
     pub non_null_count: u64,
     /// Count of distinct canonical values seen in the column, when exact distinct is enabled.
     pub distinct_count: Option<usize>,
+    /// True when the count was abandoned because the column held more distinct
+    /// values than the budget could keep. `distinct_count` is then `None` for a
+    /// reason, and saying which reason is the difference between a gap and a lie.
+    pub distinct_limited: bool,
     /// Minimum numeric value, when the column parses as a number.
     pub min: Option<f64>,
     /// Maximum numeric value, when the column parses as a number.
@@ -115,6 +119,7 @@ struct ColumnState {
     null_count: u64,
     non_null_count: u64,
     distinct: Option<ExactState>,
+    distinct_limited: bool,
     min: Option<f64>,
     max: Option<f64>,
 }
@@ -130,6 +135,7 @@ impl ColumnState {
         Ok(Self {
             null_count: 0,
             non_null_count: 0,
+            distinct_limited: false,
             distinct: match distinct_mode {
                 DistinctMode::None => None,
                 DistinctMode::Exact => Some(ExactState::new(
@@ -906,7 +912,22 @@ impl BatchInspection<'_> {
         state.non_null_count += 1;
         let value_key = canonical_value_bytes(array, row)?;
         if let Some(distinct) = &mut state.distinct {
-            distinct.insert(ValueRef::Bytes(&value_key), global_row)?;
+            // A profile describes; it does not decide. One column holding more
+            // distinct values than the budget can keep is a count this run cannot
+            // give, not a reason to withhold the types, the null counts and the
+            // ranges of every other column. The count is dropped, said to be
+            // dropped, and the memory goes back to the columns still counting.
+            //
+            // Nothing that returns a verdict does this. `unique` still fails
+            // closed, because there is no honest way to pass a rule you stopped
+            // checking.
+            if let Err(error) = distinct.insert(ValueRef::Bytes(&value_key), global_row) {
+                if error.code() != ErrorCode::ResourceLimit {
+                    return Err(error);
+                }
+                state.distinct = None;
+                state.distinct_limited = true;
+            }
         }
         if let Some(number) = numeric_value(array, row)? {
             state.min = Some(state.min.map_or(number, |current| current.min(number)));
@@ -1076,6 +1097,7 @@ fn finish_column_profiles(
                 null_count: state.null_count,
                 non_null_count: state.non_null_count,
                 distinct_count,
+                distinct_limited: state.distinct_limited,
                 min: state.min,
                 max: state.max,
             })

@@ -352,3 +352,61 @@ fn one_wide_column_may_use_the_budget_the_others_did_not() {
     suggest_reader_with_options(reader_from_batches(vec![batch]), options, None)
         .expect("the wide column must be allowed the room the narrow ones did not take");
 }
+
+/// A profile describes; it does not decide.
+///
+/// One column holding more distinct values than the budget can keep used to end
+/// the whole scan, so a ten-million-row file returned no types, no null counts and
+/// no ranges either. The count is now dropped for that column alone, and the
+/// profile says it was dropped rather than leaving an empty cell to interpret.
+#[test]
+fn a_column_too_wide_to_count_loses_its_count_not_the_profile() {
+    use arrow::array::StringArray;
+    use proofframe::{DistinctMode, ResourceLimits, profile_reader_in_memory};
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("wide", DataType::Utf8, true),
+        Field::new("narrow", DataType::Utf8, true),
+    ]));
+    let rows = 200_000;
+    let wide = (0..rows)
+        .map(|row| format!("{row:0>200}"))
+        .collect::<Vec<_>>();
+    let narrow = (0..rows)
+        .map(|row| format!("n{}", row % 5))
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(wide)) as ArrayRef,
+            Arc::new(StringArray::from(narrow)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+
+    // The exact state keeps every occurrence, not every distinct value, so the
+    // narrow column still needs room for 200,000 short records — about 4 MB. The
+    // wide one needs ten times that and cannot have it.
+    let resources = ResourceLimits {
+        max_memory_bytes: 24 * 1024 * 1024,
+        ..ResourceLimits::default()
+    };
+    let profile = profile_reader_in_memory(
+        reader_from_batches(vec![batch]),
+        DistinctMode::Exact,
+        resources,
+    )
+    .expect("one uncountable column must not take the profile with it");
+
+    assert_eq!(profile.rows, rows as u64);
+    let wide = &profile.columns[0];
+    assert!(wide.distinct_limited, "the wide column gave up its count");
+    assert_eq!(wide.distinct_count, None);
+    // Everything the scan could still say, it still says.
+    assert_eq!(wide.non_null_count, rows as u64);
+    assert_eq!(wide.null_count, 0);
+
+    let narrow = &profile.columns[1];
+    assert!(!narrow.distinct_limited, "the narrow column kept counting");
+    assert_eq!(narrow.distinct_count, Some(5));
+}
