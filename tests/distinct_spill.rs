@@ -271,3 +271,41 @@ fn sibling_states_without_a_spill_target_each_get_a_share() {
             .unwrap_or_else(|error| panic!("{columns} columns without spill: {error}"));
     }
 }
+
+/// A full segment with nowhere to spill is a reason to grow, not to stop.
+///
+/// The segment size decides when to write a run. With no run to write it decided
+/// nothing and still ended the scan: a column of a million values refused the next
+/// one while five hundred megabytes of its budget sat unused, and said so with
+/// numbers that described neither. The budget is now the only thing that stops it.
+#[test]
+fn a_full_segment_without_a_spill_target_grows_instead_of_refusing() {
+    let account = ResourceAccount::root(limits(64 * 1024 * 1024, 0, 8));
+    let mut state = ExactState::new(ValueKind::I64, account, None, None).unwrap();
+    // Well past any single segment the constructor would have chosen.
+    for row in 0..600_000u64 {
+        state
+            .insert(ValueRef::I64(row as i64), row)
+            .unwrap_or_else(|error| panic!("refused at row {row}: {error}"));
+    }
+    let summary = state.finish().unwrap();
+    assert_eq!(summary.distinct_count, 600_000);
+    assert_eq!(summary.metrics.spill_bytes, 0, "nothing may be written");
+}
+
+/// The same for text, where the index and the arena fill up separately.
+#[test]
+fn a_growing_text_segment_keeps_both_halves_in_step() {
+    let account = ResourceAccount::root(limits(64 * 1024 * 1024, 0, 8));
+    let mut state = ExactState::new(ValueKind::Bytes, account, None, None).unwrap();
+    for row in 0..200_000u64 {
+        // Lengths vary so the arena and the index do not fill at the same moment.
+        let value = "x".repeat(1 + (row % 37) as usize);
+        state
+            .insert(ValueRef::Bytes(value.as_bytes()), row)
+            .unwrap_or_else(|error| panic!("refused at row {row}: {error}"));
+    }
+    let summary = state.finish().unwrap();
+    assert_eq!(summary.distinct_count, 37);
+    assert_eq!(summary.duplicate_count, 200_000 - 37);
+}

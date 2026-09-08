@@ -180,19 +180,15 @@ impl ExactState {
                 "Exact-state temporary directory does not exist",
             )));
         }
-        // Without a spill target the segment is sized from the budget this state was
-        // actually given, not from the theoretical maximum. Asking for the maximum
-        // made the first state of a scan swallow the whole budget and every later one
-        // fail on its first value, which is how profiling a twelve-column file
-        // stopped working while a one-column file was fine.
-        let hinted = row_count_hint
-            .and_then(|rows| usize::try_from(rows).ok())
-            .or_else(|| {
-                directory.is_none().then(|| {
-                    let budget = account.limits().max_memory_bytes;
-                    usize::try_from(budget / ASSUMED_BYTES_PER_VALUE as u64).unwrap_or(usize::MAX)
-                })
-            });
+        // With a spill target the segment is sized to the file, so a scan that fits
+        // writes one run and no more. Without one there is nothing to size against:
+        // sizing from the budget made the first column of a scan swallow it and
+        // every later column fail on its first value. The segment now starts at the
+        // default and grows while the budget allows, which is the only bound left.
+        let hinted = directory
+            .is_some()
+            .then(|| row_count_hint.and_then(|rows| usize::try_from(rows).ok()))
+            .flatten();
         let storage = match kind {
             ValueKind::I64 => Storage::I64(FixedStore::new(
                 hinted.unwrap_or(DEFAULT_FIXED_RECORDS_PER_SEGMENT),
@@ -239,8 +235,20 @@ impl ExactState {
             }
         };
         if needs_spill {
-            self.spill_current()?;
-            self.compact_runs_if_needed()?;
+            if self.directory.is_none() {
+                match (&mut self.storage, value) {
+                    (Storage::I64(store), _) => grow_fixed(store, &self.account)?,
+                    (Storage::U64(store), _) => grow_fixed(store, &self.account)?,
+                    (Storage::F64(store), _) => grow_fixed(store, &self.account)?,
+                    (Storage::Bytes(store), ValueRef::Bytes(value)) => {
+                        grow_bytes(store, value.len(), &self.account)?;
+                    }
+                    (Storage::Bytes(store), _) => grow_bytes(store, 0, &self.account)?,
+                }
+            } else {
+                self.spill_current()?;
+                self.compact_runs_if_needed()?;
+            }
         }
         match (&mut self.storage, value) {
             (Storage::I64(store), ValueRef::I64(value)) => {
@@ -429,7 +437,9 @@ pub(super) struct FixedRecord<T> {
 struct FixedSegment<T> {
     records: Vec<FixedRecord<T>>,
     capacity: usize,
-    _memory: MemoryReservation,
+    // One reservation per enlargement. A segment that grows keeps every charge it
+    // was granted, so releasing it releases all of them.
+    _memory: Vec<MemoryReservation>,
 }
 
 struct FixedStore<T> {
@@ -461,6 +471,85 @@ fn insert_fixed<T: FixedValue>(
     Ok(())
 }
 
+/// Enlarge the in-memory segment rather than spilling it.
+///
+/// Spilling is how a scan stays inside a small budget when it has somewhere to put
+/// the overflow. With nowhere to put it, a full segment is not a reason to stop:
+/// the only real bound is the memory budget, and the account enforces that on
+/// every allocation. So the segment doubles and the account decides when to say no,
+/// with numbers that describe the memory rather than a segment size nobody chose.
+fn grow_fixed<T>(
+    store: &mut FixedStore<T>,
+    account: &ResourceAccount,
+) -> Result<(), ProofFrameError> {
+    let Some(segment) = store.segment.as_mut() else {
+        return Ok(());
+    };
+    let extra = segment.capacity.max(1);
+    let bytes = extra
+        .checked_mul(std::mem::size_of::<FixedRecord<T>>())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| ProofFrameError::CorruptData("Exact segment size overflowed".into()))?;
+    // Charged before the allocation, so the budget is what refuses rather than the
+    // allocator. Reallocating holds the old buffer alongside the new one for the
+    // length of the move; the charge covers the larger of the two.
+    let memory = account.try_reserve_memory(bytes)?;
+    segment.records.reserve_exact(extra);
+    segment.capacity += extra;
+    segment._memory.push(memory);
+    Ok(())
+}
+
+/// The same, for values whose size is not known in advance.
+///
+/// Either the index or the arena can be what filled up, so only the one that did
+/// is enlarged, and the arena is never grown past the range a `u32` offset can
+/// address — that bound belongs to the run format rather than to a budget.
+fn grow_bytes(
+    store: &mut ByteStore,
+    value_length: usize,
+    account: &ResourceAccount,
+) -> Result<(), ProofFrameError> {
+    let Some(segment) = store.segment.as_mut() else {
+        return Ok(());
+    };
+    let extra_records = if segment.records.len() == segment.record_capacity {
+        segment.record_capacity.max(1)
+    } else {
+        0
+    };
+    let free = segment.byte_capacity - segment.arena.len();
+    let extra_bytes = if value_length > free {
+        segment.byte_capacity.max(value_length - free).max(1)
+    } else {
+        0
+    };
+    let grown = segment
+        .byte_capacity
+        .checked_add(extra_bytes)
+        .filter(|total| *total <= u32::MAX as usize)
+        .ok_or(ProofFrameError::ResourceLimit {
+            resource: "exact_state_arena",
+            requested: extra_bytes as u64,
+            used: segment.byte_capacity as u64,
+            limit: u64::from(u32::MAX),
+        })?;
+    let index_bytes = extra_records
+        .checked_mul(std::mem::size_of::<ByteIndex>())
+        .ok_or_else(|| ProofFrameError::CorruptData("Exact byte index overflowed".into()))?;
+    let bytes = index_bytes
+        .checked_add(extra_bytes)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| ProofFrameError::CorruptData("Exact byte arena overflowed".into()))?;
+    let memory = account.try_reserve_memory(bytes)?;
+    segment.records.reserve_exact(extra_records);
+    segment.arena.reserve_exact(extra_bytes);
+    segment.record_capacity += extra_records;
+    segment.byte_capacity = grown;
+    segment._memory.push(memory);
+    Ok(())
+}
+
 fn fixed_store_is_full<T>(store: &FixedStore<T>) -> bool {
     store
         .segment
@@ -483,7 +572,7 @@ fn allocate_fixed_segment<T>(
                 return Ok(FixedSegment {
                     records: Vec::with_capacity(capacity),
                     capacity,
-                    _memory: memory,
+                    _memory: vec![memory],
                 });
             }
             Err(error) if capacity > 1 && error.code() == crate::ErrorCode::ResourceLimit => {
@@ -533,7 +622,7 @@ struct ByteSegment {
     records: Vec<ByteIndex>,
     record_capacity: usize,
     byte_capacity: usize,
-    _memory: MemoryReservation,
+    _memory: Vec<MemoryReservation>,
 }
 
 struct ByteStore {
@@ -726,7 +815,7 @@ fn allocate_byte_segment(
                     records: Vec::with_capacity(record_capacity),
                     record_capacity,
                     byte_capacity,
-                    _memory: memory,
+                    _memory: vec![memory],
                 });
             }
             Err(error)
