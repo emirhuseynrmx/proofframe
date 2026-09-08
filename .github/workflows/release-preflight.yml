@@ -7,7 +7,9 @@ name: Release preflight
 # the version and crates.io does not.
 #
 # This asks crates.io who the token belongs to. It is a read, it publishes
-# nothing, and it never prints the token.
+# nothing, and it never prints the token. It can prove a token good; it cannot
+# always prove one bad, because a publish-scoped token is refused by this
+# endpoint the same way a revoked one is.
 
 on:
   workflow_dispatch:
@@ -39,8 +41,16 @@ jobs:
               # The response names the account; it carries no secret.
               echo "Token accepted by crates.io as: $(jq -r '.user.login' response.json)"
               ;;
-            401|403)
-              echo "::error::crates.io rejected the token (HTTP ${status}). Issue a new one and update the CARGO_REGISTRY_TOKEN secret before tagging."
+            401)
+              echo "::error::crates.io rejected the token (HTTP 401). Issue a new one and update the CARGO_REGISTRY_TOKEN secret before tagging."
+              exit 1
+              ;;
+            403)
+              # Two things look the same from here: a revoked token, and a live
+              # token whose scopes cover publishing but not this endpoint. Neither
+              # can be told apart without publishing, which is the thing this job
+              # exists to avoid, so it reports the doubt rather than a verdict.
+              echo "::error::crates.io answered 403. Either the token was revoked, or it is scoped to publishing only and cannot answer this endpoint. Issue a fresh token and update the secret; that is the only way to know before tagging."
               exit 1
               ;;
             *)
