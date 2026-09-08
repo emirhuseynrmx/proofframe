@@ -338,7 +338,34 @@ def _check(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
-def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+def _execute_compat(args: argparse.Namespace) -> tuple[dict[str, Any], int] | None:
+    """Runs the commands kept for 0.5 compatibility, or returns None."""
+    if args.command == "profile":
+        warnings.warn(
+            "The profile command is retained for 0.5 compatibility; use fingerprint or check.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return profile(
+            _open_reader(args.path, args.batch_size),
+            distinct=args.distinct,
+            max_memory=args.max_memory,
+            max_temp=args.max_temp,
+            spill=args.spill,
+        ), 0
+    if args.command == "validate":
+        warnings.warn(
+            "The validate command is retained for 0.5 compatibility; use check.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        result = _check(args)
+        return result, 0 if result["valid"] else 1
+    return None
+
+
+def _execute_acceptance(args: argparse.Namespace) -> tuple[dict[str, Any], int] | None:
+    """Runs the commands this release added, or returns None for an older one."""
     if args.command == "accept":
         result = accept_file(
             args.path,
@@ -379,6 +406,14 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             max_output_bytes=args.max_output_bytes,
         )
         return result, 0 if result["valid"] else 1
+    return None
+
+
+def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    for handler in (_execute_acceptance, _execute_compat):
+        handled = handler(args)
+        if handled is not None:
+            return handled
     if args.command == "check":
         result = _check(args)
         return result, 0 if result["valid"] else 1
@@ -431,19 +466,6 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         receipt = _load_mapping(args.receipt, "receipt")
         result = verify_receipt(receipt, expected_public_key=args.expected_public_key)
         return result, 0 if result["valid"] else 1
-    if args.command == "profile":
-        warnings.warn(
-            "The profile command is retained for 0.5 compatibility; use fingerprint or check.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return profile(
-            _open_reader(args.path, args.batch_size),
-            distinct=args.distinct,
-            max_memory=args.max_memory,
-            max_temp=args.max_temp,
-            spill=args.spill,
-        ), 0
     if args.command == "suggest":
         return suggest_contract(
             _open_reader(args.path, args.batch_size),
@@ -458,14 +480,6 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             max_temp=args.max_temp,
             spill=args.spill,
         ), 0
-    if args.command == "validate":
-        warnings.warn(
-            "The validate command is retained for 0.5 compatibility; use check.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        result = _check(args)
-        return result, 0 if result["valid"] else 1
     raise ValueError(f"Unsupported command: {args.command}")
 
 
