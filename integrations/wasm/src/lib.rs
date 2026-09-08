@@ -394,3 +394,38 @@ pub fn bundle_files(
     })
     .to_string())
 }
+
+/// Compile `contract_json` against the CSV's schema without scanning it.
+///
+/// The editor shows the engine's own diagnostic, with the path it points at, rather
+/// than a second schema written in JavaScript that would have to be kept in step
+/// with this one and would eventually disagree about what is legal.
+#[wasm_bindgen]
+pub fn validate_contract(csv: &[u8], delimiter: u8, has_header: bool, contract_json: &str) -> String {
+    let problem = |message: String, path: Option<String>| {
+        json!({ "ok": false, "message": message, "path": path }).to_string()
+    };
+    let runnable = match without_unsupported(contract_json) {
+        Ok(runnable) => runnable,
+        Err(_) => return problem("contract is not valid JSON".to_owned(), None),
+    };
+    // A draft is not a mistake, it is the state a suggestion arrives in, and the page
+    // already says so plainly. The editor asks the useful question instead: would
+    // this compile once it is activated?
+    let activated = match set_contract_status(&runnable, "active") {
+        Ok(activated) => activated,
+        Err(_) => return problem("contract is not valid JSON".to_owned(), None),
+    };
+    let document = match ContractDocument::from_json(&activated) {
+        Ok(document) => document,
+        Err(error) => return problem(error.to_string(), error.path().map(str::to_owned)),
+    };
+    let schema = match read_csv(csv, delimiter, has_header) {
+        Ok((schema, _)) => schema,
+        Err(message) => return problem(message, None),
+    };
+    match CompiledContract::compile_document(&document, schema.as_ref()) {
+        Ok(_) => json!({ "ok": true }).to_string(),
+        Err(error) => problem(error.to_string(), error.path().map(str::to_owned)),
+    }
+}
