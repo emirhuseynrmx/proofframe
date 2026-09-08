@@ -114,8 +114,10 @@ draft contract, refuses to execute that draft until you have reviewed it, and re
 review `proofframe review` writes. Nothing is uploaded, and the page reports the engine time it
 measured on your machine.
 
-Two rules need a filesystem to spill to and are refused there rather than silently skipped:
-uniqueness and the dataset-level exact rules. Everything else is the native code below.
+Uniqueness and the dataset-level exact rules run there too, in memory, failing closed on the
+budget rather than on a missing folder. Only `references` is refused, because it resolves against a
+second dataset the page cannot bind; a contract that uses it is still checked for everything else,
+and that result is reported as incomplete and carries no evidence.
 
 ## Evidence and trust
 
@@ -124,6 +126,19 @@ V2 uses Ed25519 signatures and should be verified with `TrustPolicy::ExpectedKey
 when signer identity matters.
 
 ## 0.7.1
+
+Nine rules join `dataset_rules` and the column rules: `monotonicity`, `gap_detection`,
+`mutually_exclusive`, `sum`, `mean`, `std_dev`, `conditional_unique`, `row_count_delta`, and
+`min_length`/`max_length` on text. Date bounds accept `"2024-01-01"` as well as a day count. Each
+rule hashes into `compiled_plan_digest` only when a plan carries it, so contracts written before
+this release keep the plan identity their receipts record.
+
+Totals are counted in `i128` for integers and with Neumaier compensation for floats: the Arrow
+kernel wraps silently past `i64::MAX` and reduces floats in a tree whose shape follows the batch
+length, and a verdict must not depend on how a reader chose to chunk the file.
+
+`ExactState` no longer requires a spill directory. Without one it uses the memory budget and fails
+closed, so uniqueness works on a read-only filesystem and under `wasm32-unknown-unknown`.
 
 `review_html` and `review_markdown` render the offline HTML review and the CI Markdown summary from
 a report, its evidence and the contract. They were Python-only, so a Rust caller had no review at

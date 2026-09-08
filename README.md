@@ -66,8 +66,10 @@ draft contract, refuses to execute that draft until you have reviewed it, and re
 review `proofframe review` writes. Nothing is uploaded, and the page reports the engine time it
 measured on your machine.
 
-Two rules need a filesystem to spill to and are refused there rather than silently skipped:
-uniqueness and the dataset-level exact rules. Everything else is the native code below.
+Uniqueness and the dataset-level exact rules run there too, in memory, failing closed on the
+budget rather than on a missing folder. Only `references` is refused, because it resolves against a
+second dataset the page cannot bind; a contract that uses it is still checked for everything else,
+and that result is reported as incomplete and carries no evidence.
 
 ## Review a dataset
 
