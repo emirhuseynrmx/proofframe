@@ -8,11 +8,15 @@ use arrow::array::{
 use arrow::record_batch::RecordBatch;
 use std::cmp::Ordering;
 
+use super::exclusive;
+use super::ordering::{self, Ordered};
 use super::record_lazy;
+use super::total::{self, Total};
 use crate::{
     CompositeNullPolicyAst, CompositeUniquePlan, CountRangeAst, DatasetPlan, ExactState,
-    KernelKind, ProofFrameError, RatioPlan, RatioRangeAst, ResourceAccount, ValidationState,
-    ValueKind, ValueRef,
+    ExclusiveModeAst, GapDetectionPlan, KernelKind, MonotonicNullPolicyAst, MonotonicityPlan,
+    MutuallyExclusivePlan, ProofFrameError, RatioPlan, RatioRangeAst, ResourceAccount, SumBounds,
+    SumPlan, ValidationState, ValueKind, ValueRef,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,7 +47,31 @@ pub(super) struct DatasetState {
     null_counts: Vec<u64>,
     distinct: Vec<DistinctState>,
     composites: Vec<CompositeState>,
+    ordering: Vec<OrderingState>,
+    gaps: Vec<GapState>,
+    exclusive: Vec<MutuallyExclusivePlan>,
+    sums: Vec<SumState>,
     _directory: Option<tempfile::TempDir>,
+}
+
+/// One total rule and its running accumulator.
+struct SumState {
+    plan: SumPlan,
+    total: Total,
+}
+
+/// One step rule, the last value it saw, and how many gaps it has counted.
+struct GapState {
+    plan: GapDetectionPlan,
+    previous: Option<Ordered>,
+    gaps: u64,
+    first_row: Option<u64>,
+}
+
+/// One ordering rule and the last value it accepted.
+struct OrderingState {
+    plan: MonotonicityPlan,
+    previous: Option<Ordered>,
 }
 
 impl DatasetState {
@@ -144,6 +172,36 @@ impl DatasetState {
             null_counts: vec![0; plan.null_ratios().len()],
             distinct,
             composites,
+            ordering: plan
+                .monotonicity()
+                .iter()
+                .map(|rule| OrderingState {
+                    plan: rule.clone(),
+                    previous: None,
+                })
+                .collect(),
+            exclusive: plan.mutually_exclusive().to_vec(),
+            sums: plan
+                .sums()
+                .iter()
+                .map(|rule| SumState {
+                    total: match rule.bounds() {
+                        SumBounds::Integer { .. } => Total::integer(),
+                        SumBounds::Float { .. } => Total::float(),
+                    },
+                    plan: rule.clone(),
+                })
+                .collect(),
+            gaps: plan
+                .gap_detection()
+                .iter()
+                .map(|rule| GapState {
+                    plan: rule.clone(),
+                    previous: None,
+                    gaps: 0,
+                    first_row: None,
+                })
+                .collect(),
             _directory: directory,
         })
     }
@@ -172,6 +230,110 @@ impl DatasetState {
                         row_offset + row as u64,
                     )?;
                 }
+            }
+        }
+        for state in &mut self.ordering {
+            let array = batch.column(state.plan.column_index());
+            for row in 0..batch.num_rows() {
+                let global_row = row_offset + row as u64;
+                if array.is_null(row) {
+                    // A null has no place in an order. `skip` keeps the previous value
+                    // so the sequence is compared across the gap, not through it.
+                    if state.plan.nulls() == MonotonicNullPolicyAst::Reject {
+                        record_lazy(
+                            validation,
+                            "monotonicity",
+                            state.plan.column(),
+                            Some(global_row),
+                            || format!("Rule `{}` rejects null values", state.plan.name()),
+                        );
+                    }
+                    continue;
+                }
+                let value = ordering::ordered_value(state.plan.kernel(), array.as_ref(), row)?;
+                if let Some(previous) = state.previous.as_ref() {
+                    if !ordering::follows(state.plan.direction(), previous, &value)? {
+                        record_lazy(
+                            validation,
+                            "monotonicity",
+                            state.plan.column(),
+                            Some(global_row),
+                            || {
+                                format!(
+                                    "Rule `{}` {} but this row is out of order",
+                                    state.plan.name(),
+                                    ordering::describe(state.plan.direction())
+                                )
+                            },
+                        );
+                    }
+                }
+                state.previous = Some(value);
+            }
+        }
+        for state in &mut self.gaps {
+            let array = batch.column(state.plan.column_index());
+            for row in 0..batch.num_rows() {
+                let global_row = row_offset + row as u64;
+                if array.is_null(row) {
+                    if state.plan.nulls() == MonotonicNullPolicyAst::Reject {
+                        record_lazy(
+                            validation,
+                            "gap_detection",
+                            state.plan.column(),
+                            Some(global_row),
+                            || format!("Rule `{}` rejects null values", state.plan.name()),
+                        );
+                    }
+                    continue;
+                }
+                let value = ordering::ordered_value(state.plan.kernel(), array.as_ref(), row)?;
+                if let Some(previous) = state.previous.as_ref() {
+                    let step = ordering::distance(previous, &value).ok_or_else(|| {
+                        ProofFrameError::CorruptData(
+                            "Gap detection compared two different value kinds".into(),
+                        )
+                    })?;
+                    if step > state.plan.expected_step() + state.plan.tolerance() {
+                        state.gaps = state.gaps.saturating_add(1);
+                        if state.first_row.is_none() {
+                            state.first_row = Some(global_row);
+                        }
+                    }
+                }
+                state.previous = Some(value);
+            }
+        }
+        for state in &mut self.sums {
+            let array = batch.column(state.plan.column_index());
+            total::accumulate(&mut state.total, state.plan.kernel(), array.as_ref())?;
+        }
+        for plan in &self.exclusive {
+            let broken = exclusive::violations(plan, batch);
+            for row in broken.set_indices() {
+                let filled = exclusive::filled_columns(plan, batch, row);
+                record_lazy(
+                    validation,
+                    "mutually_exclusive",
+                    "$dataset",
+                    Some(row_offset + row as u64),
+                    || match plan.mode() {
+                        ExclusiveModeAst::AtMostOne => format!(
+                            "Rule `{}` allows at most one of its columns; this row fills {}",
+                            plan.name(),
+                            filled.join(", ")
+                        ),
+                        ExclusiveModeAst::ExactlyOne if filled.is_empty() => format!(
+                            "Rule `{}` needs exactly one of its columns; this row fills none",
+                            plan.name()
+                        ),
+                        ExclusiveModeAst::ExactlyOne => format!(
+                            "Rule `{}` needs exactly one of its columns; this row fills {}",
+                            plan.name(),
+                            filled.join(", ")
+                        ),
+                    },
+                );
             }
         }
         for state in &mut self.composites {
@@ -214,6 +376,37 @@ impl DatasetState {
         rows: u64,
         validation: &mut ValidationState,
     ) -> Result<DatasetMetrics, ProofFrameError> {
+        for state in &self.sums {
+            let total = total::describe(&state.total);
+            if let Some(reason) = total::outside(&state.total, state.plan.bounds()) {
+                let plan = &state.plan;
+                record_lazy(validation, "sum", plan.column(), None, || {
+                    format!("Rule `{}` totals {total}, which is {reason}", plan.name())
+                });
+            }
+        }
+        for state in &self.gaps {
+            if state.gaps <= state.plan.max_gaps() {
+                continue;
+            }
+            let plan = &state.plan;
+            record_lazy(
+                validation,
+                "gap_detection",
+                plan.column(),
+                state.first_row,
+                || {
+                    format!(
+                        "Rule `{}` found {} step(s) longer than {} {} (allowed {})",
+                        plan.name(),
+                        state.gaps,
+                        plan.expected_step(),
+                        plan.unit(),
+                        plan.max_gaps()
+                    )
+                },
+            );
+        }
         if let Some(range) = self.row_count.as_ref() {
             let valid = range.exact.is_none_or(|exact| rows == exact)
                 && range.min.is_none_or(|min| rows >= min)
@@ -469,7 +662,7 @@ pub(super) fn append_scalar(
     )))
 }
 
-fn downcast<T: 'static>(array: &dyn Array) -> &T {
+pub(super) fn downcast<T: 'static>(array: &dyn Array) -> &T {
     array
         .as_any()
         .downcast_ref::<T>()

@@ -10,9 +10,11 @@ use super::ast::{append_path, column_path};
 use super::bounds::parse_bound;
 use super::{
     CompareOpAst, ComparePlan, CompositeNullPolicyAst, ContractAst, ContractAstV2,
-    ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, NaNPolicyAst, NullPolicyAst,
-    OperandPlan, ParameterizedTypeAst, PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan,
-    RowPlan, RowPlanKind, RuleAst, RuleAstV2, ScalarValuePlan, TimeUnitAst, TypeAst, TypedBound,
+    ContractDocument, ContractVersion, CountRangeAst, DatasetPlan, ExclusiveModeAst,
+    GapDetectionPlan, MonotonicDirectionAst, MonotonicNullPolicyAst, MonotonicityPlan,
+    MutuallyExclusivePlan, NaNPolicyAst, NullPolicyAst, OperandPlan, ParameterizedTypeAst,
+    PrimitiveTypeAst, ReferenceNullPolicyAst, ReferencePlan, RowPlan, RowPlanKind, RuleAst,
+    RuleAstV2, ScalarValuePlan, SumBounds, SumPlan, TimeUnitAst, TypeAst, TypedBound,
 };
 use crate::{ErrorCode, ProofFrameError};
 
@@ -560,6 +562,44 @@ fn hash_dataset_plan(hasher: &mut blake3::Hasher, plan: &DatasetPlan) {
         }]);
     }
     hash_reference_plans(hasher, plan.references());
+    hash_monotonicity_plans(hasher, plan.monotonicity());
+    hash_gap_plans(hasher, plan.gap_detection());
+    hash_exclusive_plans(hasher, plan.mutually_exclusive());
+    hash_sum_plans(hasher, plan.sums());
+}
+
+const SUM_DOMAIN: &[u8] = b"proofframe:compiled-plan:sum:v1\0";
+
+const EXCLUSIVE_DOMAIN: &[u8] = b"proofframe:compiled-plan:mutually-exclusive:v1\0";
+
+const GAP_DOMAIN: &[u8] = b"proofframe:compiled-plan:gap-detection:v1\0";
+
+/// Append ordering rules only when the plan carries them.
+///
+/// Same reason as references: a contract written before this rule existed must keep
+/// the `pf-plan-v2` digest its receipts already record.
+fn hash_monotonicity_plans(hasher: &mut blake3::Hasher, rules: &[MonotonicityPlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(b"proofframe:compiled-plan:monotonicity:v1\0");
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.column_index() as u64).to_le_bytes());
+        hash_part(hasher, rule.column().as_bytes());
+        hash_kernel(hasher, rule.kernel());
+        hasher.update(&[match rule.direction() {
+            MonotonicDirectionAst::Increasing => 0,
+            MonotonicDirectionAst::StrictlyIncreasing => 1,
+            MonotonicDirectionAst::Decreasing => 2,
+            MonotonicDirectionAst::StrictlyDecreasing => 3,
+        }]);
+        hasher.update(&[match rule.nulls() {
+            MonotonicNullPolicyAst::Skip => 0,
+            MonotonicNullPolicyAst::Reject => 1,
+        }]);
+    }
 }
 
 /// Append referential rules only when the plan carries them.
@@ -595,6 +635,86 @@ fn hash_reference_plans(hasher: &mut blake3::Hasher, references: &[ReferencePlan
             ReferenceNullPolicyAst::Reject => 1,
         }]);
     }
+}
+
+/// Append step rules only when the plan carries them, for the same reason as the
+/// rules above: a contract written before they existed keeps its plan identity.
+fn hash_gap_plans(hasher: &mut blake3::Hasher, rules: &[GapDetectionPlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(GAP_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.column_index() as u64).to_le_bytes());
+        hash_part(hasher, rule.column().as_bytes());
+        hash_kernel(hasher, rule.kernel());
+        hasher.update(&rule.expected_step().to_bits().to_le_bytes());
+        hasher.update(&rule.tolerance().to_bits().to_le_bytes());
+        hasher.update(&rule.max_gaps().to_le_bytes());
+        hasher.update(&[match rule.nulls() {
+            MonotonicNullPolicyAst::Skip => 0,
+            MonotonicNullPolicyAst::Reject => 1,
+        }]);
+    }
+}
+
+/// Append exclusivity rules only when the plan carries them.
+fn hash_exclusive_plans(hasher: &mut blake3::Hasher, rules: &[MutuallyExclusivePlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(EXCLUSIVE_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.columns().len() as u64).to_le_bytes());
+        for column in rule.columns() {
+            hasher.update(&(*column as u64).to_le_bytes());
+        }
+        hasher.update(&[match rule.mode() {
+            ExclusiveModeAst::AtMostOne => 0,
+            ExclusiveModeAst::ExactlyOne => 1,
+        }]);
+    }
+}
+
+/// Append total rules only when the plan carries them.
+fn hash_sum_plans(hasher: &mut blake3::Hasher, rules: &[SumPlan]) {
+    if rules.is_empty() {
+        return;
+    }
+    hasher.update(SUM_DOMAIN);
+    hasher.update(&(rules.len() as u64).to_le_bytes());
+    for rule in rules {
+        hash_part(hasher, rule.name().as_bytes());
+        hasher.update(&(rule.column_index() as u64).to_le_bytes());
+        hash_part(hasher, rule.column().as_bytes());
+        hash_kernel(hasher, rule.kernel());
+        match rule.bounds() {
+            SumBounds::Integer { min, max } => {
+                hasher.update(&[0]);
+                hash_optional_i128(hasher, *min);
+                hash_optional_i128(hasher, *max);
+            }
+            SumBounds::Float { min, max } => {
+                hasher.update(&[1]);
+                hash_optional_f64(hasher, *min);
+                hash_optional_f64(hasher, *max);
+            }
+        }
+    }
+}
+
+fn hash_optional_i128(hasher: &mut blake3::Hasher, value: Option<i128>) {
+    match value {
+        None => hasher.update(&[0]),
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_le_bytes())
+        }
+    };
 }
 
 fn hash_optional_count_range(hasher: &mut blake3::Hasher, range: Option<&CountRangeAst>) {

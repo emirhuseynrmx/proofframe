@@ -1,11 +1,14 @@
 //! Schema-compiled, column-oriented validation execution.
 
 mod dataset_state;
+mod exclusive;
 mod kernels;
+mod ordering;
 mod partition;
 mod references;
 mod resource;
 mod row_kernels;
+mod total;
 
 pub use partition::{
     PartitionReader, check_partition_readers, check_partition_readers_with_evidence,

@@ -183,6 +183,99 @@ pub struct RowRuleAst {
     pub assertion: Option<AssertionAst>,
 }
 
+/// Bound the total of a numeric column.
+///
+/// The bounds keep their source spelling rather than becoming `f64`, because a
+/// turnover limit past 2^53 is exactly the number a finance contract states.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SumAst {
+    pub name: String,
+    pub column: String,
+    pub min: Option<BoundAst>,
+    pub max: Option<BoundAst>,
+}
+
+/// Require that a row fills at most one, or exactly one, of a set of columns.
+///
+/// Presence means non-null. An empty string is a value the author chose to store, so
+/// it counts as filled; a rule that treated it as absent would be guessing.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MutuallyExclusiveAst {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub mode: ExclusiveModeAst,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExclusiveModeAst {
+    /// Zero or one column filled.
+    #[default]
+    AtMostOne,
+    /// Exactly one column filled; an empty row is a violation too.
+    ExactlyOne,
+}
+
+/// Require consecutive values to stay within one step of each other.
+///
+/// `expected_step` is expressed in the column's own units: seconds for a
+/// `Timestamp(Second)` column, days for `Date32`, and the plain numeric difference
+/// for an integer. Findings name the unit, because `60` meaning nanoseconds when the
+/// author meant minutes is the failure this rule exists to catch.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GapDetectionAst {
+    pub name: String,
+    pub column: String,
+    pub expected_step: f64,
+    /// Extra room above `expected_step` before a step counts as a gap.
+    #[serde(default)]
+    pub tolerance: f64,
+    /// How many gaps the dataset may contain before the rule fails.
+    #[serde(default)]
+    pub max_gaps: u64,
+    #[serde(default)]
+    pub nulls: MonotonicNullPolicyAst,
+}
+
+/// Require a column to move in one direction as the dataset is read in order.
+///
+/// The check is a comparison against the previous value, so it costs one scalar of
+/// state per rule and says nothing about rows it never saw in that order.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MonotonicityAst {
+    pub name: String,
+    pub column: String,
+    pub direction: MonotonicDirectionAst,
+    #[serde(default)]
+    pub nulls: MonotonicNullPolicyAst,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonotonicDirectionAst {
+    Increasing,
+    StrictlyIncreasing,
+    Decreasing,
+    StrictlyDecreasing,
+}
+
+/// What a null means for an ordering rule.
+///
+/// A null has no position in an order, so `skip` leaves the previous value in place
+/// rather than pretending the sequence continued through it.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonotonicNullPolicyAst {
+    #[default]
+    Skip,
+    Reject,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CountRangeAst {
@@ -242,6 +335,14 @@ pub struct ReferenceAst {
 #[serde(deny_unknown_fields)]
 pub struct DatasetRulesAst {
     pub row_count: Option<CountRangeAst>,
+    #[serde(default)]
+    pub monotonicity: Vec<MonotonicityAst>,
+    #[serde(default)]
+    pub gap_detection: Vec<GapDetectionAst>,
+    #[serde(default)]
+    pub mutually_exclusive: Vec<MutuallyExclusiveAst>,
+    #[serde(default)]
+    pub sum: Vec<SumAst>,
     #[serde(default)]
     pub composite_unique: Vec<CompositeUniqueAst>,
     #[serde(default)]
