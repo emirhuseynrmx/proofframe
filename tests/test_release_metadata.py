@@ -107,14 +107,17 @@ def test_ci_installs_dependencies_needed_during_full_test_collection() -> None:
         if "pip install" in command and "pytest" in command
     ]
 
-    assert len(installs) == 2, installs
-    quality = next(command for command in installs if "ruff" in command)
-    matrix = next(command for command in installs if command is not quality)
+    # Partitioned rather than searched with `next()`: an unmatched search would end
+    # the test with StopIteration, which says nothing about what was wrong.
+    quality = [command for command in installs if "ruff" in command]
+    matrix = [command for command in installs if "ruff" not in command]
+    assert len(quality) == 1, quality
+    assert len(matrix) == 1, matrix
 
     for package in ("pytest", "pyarrow", "pandas", "polars", "psutil", "cryptography"):
-        assert package in matrix, f"{package} missing from the matrix job"
+        assert package in matrix[0], f"{package} missing from the matrix job"
     for package in ("maturin", "pytest-cov", "ruff", "twine", "pyarrow", "pandas", "cryptography"):
-        assert package in quality, f"{package} missing from the coverage job"
+        assert package in quality[0], f"{package} missing from the coverage job"
 
 
 def test_release_gate_remains_compatible_with_python_310() -> None:
