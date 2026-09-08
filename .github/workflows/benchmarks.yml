@@ -36,12 +36,19 @@ jobs:
       - run: python -m pip install ".[dev,benchmark]"
       - name: Measure release cases
         shell: bash
+        # The inputs arrive as environment variables rather than being interpolated
+        # into the script. `${{ }}` is substituted before bash ever sees the line, so
+        # a dispatch value containing shell syntax would have run as shell.
+        env:
+          ROWS: ${{ inputs.rows }}
+          RUNS: ${{ inputs.runs }}
+          PERF: ${{ inputs.perf }}
         run: |
           PERF_FLAG=""
-          if [[ "${{ inputs.perf }}" == "true" ]]; then PERF_FLAG="--perf"; fi
+          if [[ "$PERF" == "true" ]]; then PERF_FLAG="--perf"; fi
           python benchmarks/release_gate.py \
-            --rows "${{ inputs.rows }}" \
-            --runs "${{ inputs.runs }}" \
+            --rows "$ROWS" \
+            --runs "$RUNS" \
             --warmups 1 \
             --output target/release-gate.json \
             ${PERF_FLAG}
