@@ -125,6 +125,7 @@ impl ColumnState {
         account: &ResourceAccount,
         directory: Option<&std::path::Path>,
         row_count_hint: Option<u64>,
+        memory_share: u64,
     ) -> Result<Self, ProofFrameError> {
         Ok(Self {
             null_count: 0,
@@ -133,15 +134,8 @@ impl ColumnState {
                 DistinctMode::None => None,
                 DistinctMode::Exact => Some(ExactState::new(
                     ValueKind::Bytes,
-                    account.child(
-                        account.limits().max_memory_bytes,
-                        account.limits().max_temp_bytes,
-                    ),
-                    Some(
-                        directory
-                            .expect("exact profiling owns a temporary directory")
-                            .to_path_buf(),
-                    ),
+                    account.child(memory_share, account.limits().max_temp_bytes),
+                    directory.map(std::path::Path::to_path_buf),
                     row_count_hint,
                 )?),
             },
@@ -743,15 +737,24 @@ fn inspect_batches<R>(
     distinct_mode: DistinctMode,
     resources: ResourceLimits,
     row_count_hint: Option<u64>,
+    spill: SpillPolicy,
 ) -> Result<(Profile, ValidationOutcome), ProofFrameError>
 where
     R: RecordBatchReader,
 {
     let schema = reader.schema();
     let resource_root = ResourceAccount::root(resources);
-    let distinct_directory = (distinct_mode == DistinctMode::Exact)
+    let distinct_directory = (distinct_mode == DistinctMode::Exact && spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
+    // With nowhere to spill the per-column states share the budget rather than
+    // racing for it; the first would otherwise take what the rest still need.
+    let share = if distinct_directory.is_none() {
+        let columns = u64::try_from(schema.fields().len().max(1)).unwrap_or(1);
+        resources.max_memory_bytes / columns
+    } else {
+        resources.max_memory_bytes
+    };
     let mut states = schema
         .fields()
         .iter()
@@ -761,6 +764,7 @@ where
                 &resource_root,
                 distinct_directory.as_ref().map(tempfile::TempDir::path),
                 row_count_hint,
+                share,
             )
         })
         .collect::<Result<Vec<_>, ProofFrameError>>()?;
@@ -1225,6 +1229,29 @@ where
     profile_reader_with_resources_and_hint(reader, distinct_mode, resources, None)
 }
 
+/// Profile without a spill target, for a filesystem that cannot be written to.
+///
+/// Exact distinct counting then runs in memory and fails closed on the budget, the
+/// same way uniqueness does.
+pub fn profile_reader_in_memory<R>(
+    reader: R,
+    distinct_mode: DistinctMode,
+    resources: ResourceLimits,
+) -> Result<Profile, ProofFrameError>
+where
+    R: RecordBatchReader,
+{
+    inspect_batches(
+        reader,
+        None,
+        distinct_mode,
+        resources,
+        None,
+        SpillPolicy::Never,
+    )
+    .map(|(profile, _)| profile)
+}
+
 /// Profile with hard resource budgets and an exact, non-consuming row-count hint.
 pub fn profile_reader_with_resources_and_hint<R>(
     reader: R,
@@ -1235,8 +1262,15 @@ pub fn profile_reader_with_resources_and_hint<R>(
 where
     R: RecordBatchReader,
 {
-    inspect_batches(reader, None, distinct_mode, resources, row_count_hint)
-        .map(|(profile, _)| profile)
+    inspect_batches(
+        reader,
+        None,
+        distinct_mode,
+        resources,
+        row_count_hint,
+        SpillPolicy::Auto,
+    )
+    .map(|(profile, _)| profile)
 }
 
 fn fingerprint_batches<R>(reader: R) -> Result<(u64, String), ProofFrameError>
@@ -1280,6 +1314,7 @@ where
         DistinctMode::Exact,
         ResourceLimits::default(),
         None,
+        SpillPolicy::Auto,
     )?;
     Ok(ValidationReport {
         valid: outcome.violation_count == 0,
@@ -1489,6 +1524,7 @@ mod tests {
                     DistinctMode::Exact,
                     ResourceLimits::default(),
                     None,
+                    SpillPolicy::Auto,
                 )
                     .unwrap();
             let fast_report = validate_fast_batches(reader_from_batch(batch), &contract).unwrap();

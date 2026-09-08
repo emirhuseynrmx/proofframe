@@ -304,6 +304,19 @@ fn initialize_unique_states(
     let directory = (has_unique && options.spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
+    // Without a spill target the states cannot each claim the whole budget: the
+    // first would take what the rest still need and they would fail on their first
+    // value.
+    let share = if directory.is_none() {
+        let unique_columns = plan
+            .columns()
+            .iter()
+            .filter(|column| column.rules().unique())
+            .count();
+        options.resources.max_memory_bytes / u64::try_from(unique_columns.max(1)).unwrap_or(1)
+    } else {
+        options.resources.max_memory_bytes
+    };
     let states = plan
         .columns()
         .iter()
@@ -313,10 +326,7 @@ fn initialize_unique_states(
             }
             ExactState::new_with_cancellation(
                 exact_kind(column.kernel()),
-                resource_root.child(
-                    options.resources.max_memory_bytes,
-                    options.resources.max_temp_bytes,
-                ),
+                resource_root.child(share, options.resources.max_temp_bytes),
                 directory.as_ref().map(|dir| dir.path().to_path_buf()),
                 options.row_count_hint,
                 options.cancellation.clone(),

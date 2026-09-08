@@ -131,11 +131,12 @@ pub struct ExactState {
 fn spill_target<'a>(
     directory: Option<&'a PathBuf>,
     account: &ResourceAccount,
+    held: u64,
 ) -> Result<&'a PathBuf, ProofFrameError> {
     directory.ok_or(ProofFrameError::ResourceLimit {
-        resource: "exact_state_memory_without_spill",
-        requested: 0,
-        used: 0,
+        resource: "exact_state_values_without_spill",
+        requested: 1,
+        used: held,
         limit: account.limits().max_memory_bytes,
     })
 }
@@ -179,11 +180,19 @@ impl ExactState {
                 "Exact-state temporary directory does not exist",
             )));
         }
-        // Without a spill target the segment should claim as much of the budget as
-        // it is allowed to; the allocator halves the request until it fits.
+        // Without a spill target the segment is sized from the budget this state was
+        // actually given, not from the theoretical maximum. Asking for the maximum
+        // made the first state of a scan swallow the whole budget and every later one
+        // fail on its first value, which is how profiling a twelve-column file
+        // stopped working while a one-column file was fine.
         let hinted = row_count_hint
             .and_then(|rows| usize::try_from(rows).ok())
-            .or_else(|| directory.is_none().then_some(usize::MAX));
+            .or_else(|| {
+                directory.is_none().then(|| {
+                    let budget = account.limits().max_memory_bytes;
+                    usize::try_from(budget / ASSUMED_BYTES_PER_VALUE as u64).unwrap_or(usize::MAX)
+                })
+            });
         let storage = match kind {
             ValueKind::I64 => Storage::I64(FixedStore::new(
                 hinted.unwrap_or(DEFAULT_FIXED_RECORDS_PER_SEGMENT),
@@ -297,7 +306,13 @@ impl ExactState {
     }
 
     fn spill_current(&mut self) -> Result<(), ProofFrameError> {
-        let directory = spill_target(self.directory.as_ref(), &self.account)?;
+        let held = match &self.storage {
+            Storage::I64(store) => store.segment.as_ref().map_or(0, |s| s.records.len() as u64),
+            Storage::U64(store) => store.segment.as_ref().map_or(0, |s| s.records.len() as u64),
+            Storage::F64(store) => store.segment.as_ref().map_or(0, |s| s.records.len() as u64),
+            Storage::Bytes(store) => store.segment.as_ref().map_or(0, |s| s.records.len() as u64),
+        };
+        let directory = spill_target(self.directory.as_ref(), &self.account, held)?;
         match &mut self.storage {
             Storage::I64(store) => spill_fixed(store, &self.account, directory, &mut self.runs)?,
             Storage::U64(store) => spill_fixed(store, &self.account, directory, &mut self.runs)?,
@@ -314,7 +329,7 @@ impl ExactState {
             let compacted = run::compact(
                 &inputs,
                 &self.account,
-                spill_target(self.directory.as_ref(), &self.account)?,
+                spill_target(self.directory.as_ref(), &self.account, 0)?,
                 &self.cancellation,
             )?;
             self.max_merge_fan_in = self

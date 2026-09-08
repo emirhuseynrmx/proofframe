@@ -183,14 +183,12 @@ impl SuggestionState {
         account: &ResourceAccount,
         directory: Option<&std::path::Path>,
         row_count_hint: Option<u64>,
+        memory_share: u64,
     ) -> Result<Self, ProofFrameError> {
         let distinct = if options.infer_uniqueness {
             Some(ExactState::new(
                 ValueKind::Bytes,
-                account.child(
-                    account.limits().max_memory_bytes,
-                    account.limits().max_temp_bytes,
-                ),
+                account.child(memory_share, account.limits().max_temp_bytes),
                 directory.map(std::path::Path::to_path_buf),
                 row_count_hint,
             )?)
@@ -237,6 +235,15 @@ where
     let directory = (options.infer_uniqueness && options.spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
+    // Every column gets its own exact state. With a spill target they can each ask
+    // for the whole budget because the overflow goes to disk; without one, the first
+    // column would take what the rest still need, so the budget is divided up front.
+    let share = if directory.is_none() {
+        let columns = u64::try_from(schema.fields().len().max(1)).unwrap_or(1);
+        options.resources.max_memory_bytes / columns
+    } else {
+        options.resources.max_memory_bytes
+    };
     let mut states = schema
         .fields()
         .iter()
@@ -247,6 +254,7 @@ where
                 &root,
                 directory.as_ref().map(tempfile::TempDir::path),
                 row_count_hint,
+                share,
             )
         })
         .collect::<Result<Vec<_>, ProofFrameError>>()?;

@@ -121,6 +121,17 @@ impl DatasetState {
         let directory = (has_exact && spill == crate::SpillPolicy::Auto)
             .then(tempfile::TempDir::new)
             .transpose()?;
+        // Same reason as the column states: with nowhere to spill, sharing the budget
+        // is what keeps every rule able to hold its first value.
+        let exact_states = plan.distinct_counts().len()
+            + plan.distinct_ratios().len()
+            + plan.composite_unique().len()
+            + plan.conditional_unique().len();
+        let share = if directory.is_none() {
+            account.limits().max_memory_bytes / u64::try_from(exact_states.max(1)).unwrap_or(1)
+        } else {
+            account.limits().max_memory_bytes
+        };
         let mut distinct_specs = std::collections::BTreeMap::<
             usize,
             (
@@ -163,10 +174,7 @@ impl DatasetState {
                         column,
                         exact: ExactState::new_with_cancellation(
                             super::exact_kind(&kernel),
-                            account.child(
-                                account.limits().max_memory_bytes,
-                                account.limits().max_temp_bytes,
-                            ),
+                            account.child(share, account.limits().max_temp_bytes),
                             directory.as_ref().map(|dir| dir.path().to_path_buf()),
                             row_count_hint,
                             cancellation.clone(),
@@ -187,10 +195,7 @@ impl DatasetState {
                     plan: composite.clone(),
                     exact: ExactState::new_with_cancellation(
                         ValueKind::Bytes,
-                        account.child(
-                            account.limits().max_memory_bytes,
-                            account.limits().max_temp_bytes,
-                        ),
+                        account.child(share, account.limits().max_temp_bytes),
                         directory.as_ref().map(|dir| dir.path().to_path_buf()),
                         row_count_hint,
                         cancellation.clone(),
@@ -239,10 +244,7 @@ impl DatasetState {
                     Ok(ConditionalState {
                         exact: ExactState::new_with_cancellation(
                             ValueKind::Bytes,
-                            account.child(
-                                account.limits().max_memory_bytes,
-                                account.limits().max_temp_bytes,
-                            ),
+                            account.child(share, account.limits().max_temp_bytes),
                             directory.as_ref().map(|dir| dir.path().to_path_buf()),
                             row_count_hint,
                             cancellation.clone(),

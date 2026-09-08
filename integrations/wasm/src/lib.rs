@@ -14,7 +14,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use proofframe::evidence::{contract_source_digest, evidence_for_check};
 use proofframe::{
     CancellationToken, CompiledContract, ContractDocument, ExecutionOptions, ReferenceBindings,
-    ResourceLimits, SpillPolicy, SuggestOptions, execute_reader_with_fingerprint_and_references,
+    DistinctMode, ResourceLimits, SpillPolicy, SuggestOptions, profile_reader_in_memory, execute_reader_with_fingerprint_and_references,
     review_html, review_markdown,
     suggest_reader_with_options,
 };
@@ -428,4 +428,23 @@ pub fn validate_contract(csv: &[u8], delimiter: u8, has_header: bool, contract_j
         Ok(_) => json!({ "ok": true }).to_string(),
         Err(error) => problem(error.to_string(), error.path().map(str::to_owned)),
     }
+}
+
+/// What the file actually contains, before any contract is written about it.
+///
+/// The counts, the distinct totals and the ranges come from the engine's own
+/// profiler over the same Arrow reader the check uses, so the panel a person reads
+/// and the verdict they get afterwards describe one reading of the file.
+#[wasm_bindgen]
+pub fn profile_csv(csv: &[u8], delimiter: u8, has_header: bool) -> Result<String, JsError> {
+    let (schema, reader) =
+        read_csv(csv, delimiter, has_header).map_err(|error| JsError::new(&error))?;
+    let profile = profile_reader_in_memory(reader, DistinctMode::Exact, ResourceLimits::default())
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    let payload = json!({
+        "engine": { "name": "proofframe", "version": proofframe_version() },
+        "schema": schema_columns(&schema),
+        "profile": profile,
+    });
+    serde_json::to_string(&payload).map_err(|error| JsError::new(&error.to_string()))
 }

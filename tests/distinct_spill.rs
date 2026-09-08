@@ -236,3 +236,38 @@ fn exact_state_without_a_spill_target_stays_exact_or_stops() {
     let error = refused.expect("an unbounded scan on a tiny budget must stop");
     assert_eq!(error.code(), ErrorCode::ResourceLimit, "{error}");
 }
+
+/// Many columns with nowhere to spill must share the budget, not race for it.
+///
+/// Each column gets its own exact state. When they could each ask for the whole
+/// budget, the first took what the rest still needed and every later one failed on
+/// its first value: profiling a twelve-column file stopped working while a
+/// one-column file was fine.
+#[test]
+fn sibling_states_without_a_spill_target_each_get_a_share() {
+    use arrow::array::StringArray;
+    use proofframe::{SpillPolicy, SuggestOptions, suggest_reader_with_options};
+
+    for columns in [1usize, 12, 40, 80] {
+        let fields = (0..columns)
+            .map(|index| Field::new(format!("c{index}"), DataType::Utf8, true))
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        let arrays = (0..columns)
+            .map(|index| {
+                let values = (0..64)
+                    .map(|row| format!("v{row}_{index}"))
+                    .collect::<Vec<_>>();
+                Arc::new(StringArray::from(values)) as ArrayRef
+            })
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+        let options = SuggestOptions {
+            infer_uniqueness: true,
+            spill: SpillPolicy::Never,
+            ..SuggestOptions::default()
+        };
+        suggest_reader_with_options(reader_from_batches(vec![batch]), options, None)
+            .unwrap_or_else(|error| panic!("{columns} columns without spill: {error}"));
+    }
+}
