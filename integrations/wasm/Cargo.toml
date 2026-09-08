@@ -1,0 +1,31 @@
+[package]
+name = "proofframe-wasm"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.85"
+description = "WebAssembly surface for the ProofFrame engine"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+proofframe = { path = "../.." }
+arrow = { version = "=59.1.0", default-features = false, features = ["csv", "ipc"] }
+serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
+wasm-bindgen = "=0.2.126"
+console_error_panic_hook = "0.1.7"
+
+# The engine never asks for randomness on this path, but ed25519-dalek and
+# blake3 pull getrandom in. wasm32-unknown-unknown has no default backend.
+getrandom_03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4.3", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
