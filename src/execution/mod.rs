@@ -304,19 +304,10 @@ fn initialize_unique_states(
     let directory = (has_unique && options.spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
-    // Without a spill target the states cannot each claim the whole budget: the
-    // first would take what the rest still need and they would fail on their first
-    // value.
-    let share = if directory.is_none() {
-        let unique_columns = plan
-            .columns()
-            .iter()
-            .filter(|column| column.rules().unique())
-            .count();
-        options.resources.max_memory_bytes / u64::try_from(unique_columns.max(1)).unwrap_or(1)
-    } else {
-        options.resources.max_memory_bytes
-    };
+    // Every column may ask for the whole budget. A child account charges its
+    // parent too, so the real total is enforced by the root: what one column does
+    // not use, another may.
+    let share = options.resources.max_memory_bytes;
     let states = plan
         .columns()
         .iter()

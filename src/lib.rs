@@ -747,14 +747,10 @@ where
     let distinct_directory = (distinct_mode == DistinctMode::Exact && spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
-    // With nowhere to spill the per-column states share the budget rather than
-    // racing for it; the first would otherwise take what the rest still need.
-    let share = if distinct_directory.is_none() {
-        let columns = u64::try_from(schema.fields().len().max(1)).unwrap_or(1);
-        resources.max_memory_bytes / columns
-    } else {
-        resources.max_memory_bytes
-    };
+    // Every column may ask for the whole budget. A child account charges its
+    // parent too, so the real total is enforced by the root: a file with one wide
+    // column and five narrow ones is not refused on the wide one's account.
+    let share = resources.max_memory_bytes;
     let mut states = schema
         .fields()
         .iter()

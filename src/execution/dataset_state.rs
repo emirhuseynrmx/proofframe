@@ -121,17 +121,10 @@ impl DatasetState {
         let directory = (has_exact && spill == crate::SpillPolicy::Auto)
             .then(tempfile::TempDir::new)
             .transpose()?;
-        // Same reason as the column states: with nowhere to spill, sharing the budget
-        // is what keeps every rule able to hold its first value.
-        let exact_states = plan.distinct_counts().len()
-            + plan.distinct_ratios().len()
-            + plan.composite_unique().len()
-            + plan.conditional_unique().len();
-        let share = if directory.is_none() {
-            account.limits().max_memory_bytes / u64::try_from(exact_states.max(1)).unwrap_or(1)
-        } else {
-            account.limits().max_memory_bytes
-        };
+        // Every rule may ask for the whole budget. A child account charges its
+        // parent too, so the total is enforced where it is true, and a rule that
+        // needs most of it is not refused because of rules that needed none.
+        let share = account.limits().max_memory_bytes;
         let mut distinct_specs = std::collections::BTreeMap::<
             usize,
             (

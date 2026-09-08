@@ -235,15 +235,10 @@ where
     let directory = (options.infer_uniqueness && options.spill == SpillPolicy::Auto)
         .then(tempfile::TempDir::new)
         .transpose()?;
-    // Every column gets its own exact state. With a spill target they can each ask
-    // for the whole budget because the overflow goes to disk; without one, the first
-    // column would take what the rest still need, so the budget is divided up front.
-    let share = if directory.is_none() {
-        let columns = u64::try_from(schema.fields().len().max(1)).unwrap_or(1);
-        options.resources.max_memory_bytes / columns
-    } else {
-        options.resources.max_memory_bytes
-    };
+    // Every column gets its own exact state, and each may ask for the whole
+    // budget: a child account charges its parent too, so the root enforces the
+    // real total and the columns compete for it rather than being rationed.
+    let share = options.resources.max_memory_bytes;
     let mut states = schema
         .fields()
         .iter()

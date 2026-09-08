@@ -237,14 +237,16 @@ fn exact_state_without_a_spill_target_stays_exact_or_stops() {
     assert_eq!(error.code(), ErrorCode::ResourceLimit, "{error}");
 }
 
-/// Many columns with nowhere to spill must share the budget, not race for it.
+/// Many columns with nowhere to spill must all get through.
 ///
-/// Each column gets its own exact state. When they could each ask for the whole
-/// budget, the first took what the rest still needed and every later one failed on
-/// its first value: profiling a twelve-column file stopped working while a
-/// one-column file was fine.
+/// Each column gets its own exact state. Rationing the budget between them was one
+/// way to stop the first from taking what the rest needed, and it bought that at
+/// the price of refusing any column that needed more than its slice: six columns
+/// meant a sixth of the budget each, and a scan died holding 67 MB with 512 MB
+/// allowed. The states now compete for the whole budget, which the root account
+/// enforces, and a segment that fills grows rather than ending the scan.
 #[test]
-fn sibling_states_without_a_spill_target_each_get_a_share() {
+fn many_columns_without_a_spill_target_all_get_through() {
     use arrow::array::StringArray;
     use proofframe::{SpillPolicy, SuggestOptions, suggest_reader_with_options};
 
@@ -308,4 +310,45 @@ fn a_growing_text_segment_keeps_both_halves_in_step() {
     let summary = state.finish().unwrap();
     assert_eq!(summary.distinct_count, 37);
     assert_eq!(summary.duplicate_count, 200_000 - 37);
+}
+
+/// One demanding column must be able to use what the others left alone.
+///
+/// The budget used to be divided by the number of columns before the scan began,
+/// so a file with one high-cardinality column and five narrow ones refused the
+/// wide one at a sixth of the budget while the other five sixths sat untouched.
+#[test]
+fn one_wide_column_may_use_the_budget_the_others_did_not() {
+    use arrow::array::StringArray;
+    use proofframe::{SpillPolicy, SuggestOptions, suggest_reader_with_options};
+
+    // Five columns holding one value each, and one holding a different value per
+    // row. Only the sixth needs any room at all.
+    let fields = (0..6)
+        .map(|index| Field::new(format!("c{index}"), DataType::Utf8, true))
+        .collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(fields));
+    let rows = 120_000;
+    let arrays = (0..6)
+        .map(|column| {
+            let values = (0..rows)
+                .map(|row| {
+                    if column == 5 {
+                        format!("key-{row:012}")
+                    } else {
+                        "same".to_string()
+                    }
+                })
+                .collect::<Vec<_>>();
+            Arc::new(StringArray::from(values)) as ArrayRef
+        })
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+    let options = SuggestOptions {
+        infer_uniqueness: true,
+        spill: SpillPolicy::Never,
+        ..SuggestOptions::default()
+    };
+    suggest_reader_with_options(reader_from_batches(vec![batch]), options, None)
+        .expect("the wide column must be allowed the room the narrow ones did not take");
 }
