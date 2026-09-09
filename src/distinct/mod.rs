@@ -236,14 +236,19 @@ impl ExactState {
         };
         if needs_spill {
             if self.directory.is_none() {
-                match (&mut self.storage, value) {
-                    (Storage::I64(store), _) => grow_fixed(store, &self.account)?,
-                    (Storage::U64(store), _) => grow_fixed(store, &self.account)?,
-                    (Storage::F64(store), _) => grow_fixed(store, &self.account)?,
-                    (Storage::Bytes(store), ValueRef::Bytes(value)) => {
-                        grow_bytes(store, value.len(), &self.account)?;
-                    }
-                    (Storage::Bytes(store), _) => grow_bytes(store, 0, &self.account)?,
+                // The kinds were already reconciled above, so the value has nothing
+                // left to say here except how long it is, and only the byte store
+                // has a use for that.
+                let length = if let ValueRef::Bytes(bytes) = value {
+                    bytes.len()
+                } else {
+                    0
+                };
+                match &mut self.storage {
+                    Storage::I64(store) => grow_fixed(store, &self.account)?,
+                    Storage::U64(store) => grow_fixed(store, &self.account)?,
+                    Storage::F64(store) => grow_fixed(store, &self.account)?,
+                    Storage::Bytes(store) => grow_bytes(store, length, &self.account)?,
                 }
             } else {
                 self.spill_current()?;
