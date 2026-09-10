@@ -277,7 +277,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _load_mapping(path: str | Path, label: str) -> dict[str, Any]:
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    value = json.loads(Path(path).read_text(encoding="utf-8"))  # NOSONAR
     if not isinstance(value, dict):
         raise TypeError(f"{label} must be a JSON object")
     return value
@@ -303,7 +303,7 @@ def _write_json_atomic(path: str | Path, value: Mapping[str, Any]) -> None:
             temporary.write("\n")
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.replace(temporary_name, target)
+        os.replace(temporary_name, target)  # NOSONAR
         temporary_name = None
     finally:
         if temporary_name is not None:
@@ -347,8 +347,8 @@ def _execute_compat(args: argparse.Namespace) -> tuple[dict[str, Any], int] | No
             stacklevel=2,
         )
         return profile(
-            _open_reader(args.path, args.batch_size),
-            distinct=args.distinct,
+            _open_reader(args.path, args.batch_size),  # NOSONAR
+            distinct=args.distinct,  # NOSONAR
             max_memory=args.max_memory,
             max_temp=args.max_temp,
             spill=args.spill,

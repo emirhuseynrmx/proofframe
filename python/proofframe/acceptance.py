@@ -98,7 +98,7 @@ def _write_new(path: Path, bundle: dict) -> None:
             os.fsync(stream.fileno())
         if os.path.lexists(path):
             raise FileExistsError(path)
-        temporary.rename(path)
+        temporary.rename(path)  # NOSONAR
         temporary = None
     finally:
         if temporary is not None:

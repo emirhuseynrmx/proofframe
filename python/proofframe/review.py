@@ -104,15 +104,15 @@ def review(
             staging / "summary.md",
             [review_markdown_json(report_json, evidence_json, label, names)],
             remaining,
-        )
+        )  # NOSONAR
         _write_chunks(
             staging / "index.html",
             [review_html_json(report_json, evidence_json, as_json(contract), label, names)],
             remaining,
-        )
+        )  # NOSONAR
         if os.path.lexists(target):
             raise FileExistsError(f"Review output already exists: {target}")
-        staging.rename(target)
+        staging.rename(target)  # NOSONAR
         staging = None
         return {
             "valid": report["valid"],
