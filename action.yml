@@ -124,8 +124,11 @@ runs:
         PF_FAIL_ON_UNKNOWN: ${{ inputs.fail-on-unknown }}
       run: |
         set -uo pipefail
-        # Inputs travel as environment variables. `${{ }}` is substituted before bash
-        # reads the line, so a value carrying shell syntax would otherwise run as shell.
+        # Inputs travel as environment variables. An expression written inline is
+        # substituted before bash reads the line, so a value carrying shell syntax
+        # would otherwise run as shell. Naming one here, even inside a comment, is
+        # enough to make the whole manifest unloadable: the runner expands the
+        # script before it is a script.
         case "$PF_MODE" in
           review|accept) ;;
           *) echo "proofframe: mode must be review or accept, got '$PF_MODE'" >&2; exit 2 ;;
