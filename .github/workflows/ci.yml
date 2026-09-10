@@ -217,7 +217,7 @@ jobs:
 
   benchmark-gate:
     name: Release benchmark gate
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '.')
     runs-on: ubuntu-latest
     outputs:
       artifact-digest: ${{ steps.benchmark-artifact.outputs.artifact-digest }}
@@ -247,7 +247,7 @@ jobs:
 
   release-evidence:
     name: Release evidence
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '.')
     needs: [rust, python, python-quality, miri, fuzz, benchmark-gate]
     runs-on: ubuntu-latest
     steps:
