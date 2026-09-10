@@ -85,7 +85,12 @@ jobs:
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           args: --release --locked --out dist --compatibility pypi
-      - run: python -m pip install --find-links dist "proofframe[signing]"
+      # Pinned, and the wheel goes in with --no-deps, the same way the matrix above
+      # does it: an unlocked install here resolves whatever PyPI is serving today
+      # and the run stops naming what produced it. Only the review path is
+      # exercised, so the signing extra is not needed.
+      - run: python -m pip install pyarrow==25.0.1
+      - run: python -m pip install --no-index --find-links dist --no-deps proofframe
 
       - name: A delivery that matches the contract, and one that does not
         run: |
