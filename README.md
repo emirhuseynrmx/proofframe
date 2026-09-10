@@ -125,6 +125,46 @@ Read the [acceptance guide](docs/acceptance.md) for the decision contract and it
 [the runnable example](examples/accept_and_verify.py) for an accepted delivery, a rejected one,
 one that could not be read, and a tampered bundle that fails verification.
 
+## In GitHub Actions
+
+Check a delivered file on the way in, and fail the job when it does not match the
+contract. Nothing is uploaded anywhere: the check runs on the runner.
+
+```yaml
+- uses: emirhuseynrmx/proofframe@v1
+  with:
+    path: data/orders.csv
+    contract: contracts/orders.json
+```
+
+The default mode writes an offline HTML review, a Markdown summary, report JSON
+and Evidence V2, uploads them as a build artifact, puts the summary in the job
+summary, and exits non-zero on a violation.
+
+`accept` mode answers a different question — whether to take the delivery at all:
+
+```yaml
+- id: gate
+  uses: emirhuseynrmx/proofframe@v1
+  with:
+    path: data/orders.csv
+    contract: contracts/orders.json
+    policy: contracts/acceptance.json
+    mode: accept
+    out: acceptance.json
+
+- if: steps.gate.outputs.status == 'accepted'
+  run: ./load-into-warehouse.sh
+```
+
+`status` is `accepted`, `rejected` or `unknown`. A missing file, a parse failure
+or an exhausted limit answers `unknown` and fails the step; it never becomes an
+acceptance. Set `fail-on-unknown: false` to handle that case yourself — to retry
+a delivery that has not landed yet, for example.
+
+Findings are not sampled by default: a sample can carry values out of your data
+and into a build artifact. Set `max-samples` when you want them.
+
 ## Install
 
 Python 3.10–3.13:
