@@ -1,4 +1,4 @@
-name: ProofFrame
+name: ProofFrame Action
 description: Check a delivered CSV or Parquet file against a data contract, and decide whether to accept it.
 author: Emir Hüseyin İnci
 
