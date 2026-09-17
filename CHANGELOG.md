@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.2
+
+- Airflow and Dagster get real packages instead of a sample DAG. `integrations/airflow`
+  publishes `proofframe-airflow` with `ProofFrameAcceptOperator` and
+  `ProofFrameVerifyOperator`; `integrations/dagster` publishes `proofframe-dagster`
+  with `build_acceptance_check` and `acceptance_result`. Both call the bindings in
+  process rather than shelling out to the CLI, so the library's exception types
+  survive and the engine's own memory and temporary-storage limits are the ones
+  that apply. The old `BashOperator` example moved to
+  `integrations/airflow/example_dags/`, for workers without the bindings installed.
+
+- Acceptance has three statuses and both schedulers offer two, so neither mapping is
+  left to the caller. Dagster reports `accepted` as a pass, `rejected` as a failed
+  check at `ERROR`, and `unknown` at `WARN`: a scan that did not complete decided
+  nothing, and reporting it at `ERROR` would claim the data failed. Airflow raises
+  the non-retryable `AirflowFailException` on `rejected`, because the same bytes
+  under the same contract cannot reach a different decision, and leaves `unknown`
+  to `on_unknown`, which is the one status a retry can legitimately change. Both
+  defaults are overridable, and both packages say in their metadata whether the
+  bundle they produced was signed rather than implying every bundle is.
+
+- The Airflow operator pushes a summary, not a bundle. XCom lives in the scheduler's
+  metadata database and a bundle carries the full report and the Evidence V2
+  envelope; the decision, the digests that identify it, and the path the bundle was
+  written to go through instead.
+
 ## 0.7.1
 
 - Uniqueness no longer needs a writable directory to compare three rows. `ExactState`

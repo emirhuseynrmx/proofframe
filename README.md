@@ -170,13 +170,13 @@ and into a build artifact. Set `max-samples` when you want them.
 Python 3.10–3.13:
 
 ```bash
-pip install proofframe==0.7.1
+pip install proofframe==0.7.2
 ```
 
 Rust 1.85 or newer:
 
 ```bash
-cargo add proofframe@0.7.1
+cargo add proofframe@0.7.2
 ```
 
 ## The 30-second demo
@@ -511,7 +511,7 @@ See the [crate guide](README-crates.md) and [API documentation](https://docs.rs/
 
 ## Compatibility and performance evidence
 
-Version 0.7.1 preserves V1 fingerprints and the established compatibility entry points. New work
+Version 0.7.2 preserves V1 fingerprints and the established compatibility entry points. New work
 should use `check`, explicit fingerprint versions, Evidence V2, and Receipt V2.
 
 Performance claims are tied to raw samples, dataset hashes, compiler and package versions, and
