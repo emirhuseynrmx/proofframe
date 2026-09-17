@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 pytest.importorskip("airflow")
 
 from airflow.exceptions import AirflowFailException, AirflowSkipException
+from airflow.models import BaseOperator
 from proofframe_airflow import ProofFrameAcceptOperator, ProofFrameVerifyOperator
 from proofframe_airflow.operators import _summary
 
@@ -44,6 +46,25 @@ def operator(**kwargs) -> ProofFrameAcceptOperator:
     return ProofFrameAcceptOperator(
         task_id="check", path="orders.parquet", contract={"columns": {}}, **kwargs
     )
+
+
+def test_no_constructor_argument_shadows_a_base_operator_property():
+    """An operator that stores an argument over a BaseOperator property cannot be built.
+
+    `output` was one: BaseOperator exposes it as a read-only XComArg for the task's
+    return value, so `self.output = output` raised on construction and every use of
+    the operator failed at line one. It is the kind of collision that is invisible
+    until Airflow is actually installed, which is why this asserts the rule rather
+    than the one name that broke.
+    """
+    reserved = {
+        name
+        for name in dir(BaseOperator)
+        if isinstance(getattr(BaseOperator, name, None), property)
+    }
+    for operator in (ProofFrameAcceptOperator, ProofFrameVerifyOperator):
+        stored = set(inspect.signature(operator.__init__).parameters) - {"self", "kwargs"}
+        assert not (stored & reserved), (operator.__name__, sorted(stored & reserved))
 
 
 def test_accepted_returns_the_summary(monkeypatch):

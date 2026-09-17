@@ -59,12 +59,12 @@ class ProofFrameAcceptOperator(BaseOperator):
     :param path: the CSV or Parquet file to scan, on a filesystem the worker can read
     :param contract: the contract itself, or a path to a JSON file holding one
     :param policy: acceptance policy; the library's default is used when omitted
-    :param output: where to write the acceptance bundle; nothing is written when omitted
+    :param output_path: where to write the acceptance bundle; nothing is written when omitted
     :param private_key: signs the bundle when given, leaving it hash-bound when not
     :param on_unknown: ``fail``, ``skip`` or ``pass`` for a scan that could not complete
     """
 
-    template_fields = ("path", "output")
+    template_fields = ("path", "output_path")
     ui_color = "#d8e6f3"
 
     def __init__(
@@ -74,7 +74,7 @@ class ProofFrameAcceptOperator(BaseOperator):
         contract: Mapping[str, Any] | str | Path,
         policy: Mapping[str, Any] | None = None,
         csv_options: Mapping[str, Any] | None = None,
-        output: str | Path | None = None,
+        output_path: str | Path | None = None,
         private_key: str | None = None,
         on_unknown: str = "fail",
         **kwargs: Any,
@@ -86,7 +86,7 @@ class ProofFrameAcceptOperator(BaseOperator):
         self.contract = contract
         self.policy = policy
         self.csv_options = csv_options
-        self.output = output
+        self.output_path = output_path
         self.private_key = private_key
         self.on_unknown = on_unknown
 
@@ -96,10 +96,10 @@ class ProofFrameAcceptOperator(BaseOperator):
             _contract(self.contract),
             policy=dict(self.policy) if self.policy is not None else None,
             csv_options=dict(self.csv_options) if self.csv_options is not None else None,
-            output=self.output,
+            output=self.output_path,
             private_key=self.private_key,
         )
-        summary = _summary(bundle, Path(self.output) if self.output is not None else None)
+        summary = _summary(bundle, Path(self.output_path) if self.output_path is not None else None)
         status = summary["status"]
         self.log.info("ProofFrame decision for %s: %s", self.path, status)
 

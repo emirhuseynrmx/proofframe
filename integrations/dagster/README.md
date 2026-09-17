@@ -23,7 +23,7 @@ orders_accepted = build_acceptance_check(
     asset=orders,
     path="data/orders.parquet",
     contract="contracts/orders.json",
-    output="evidence/orders.json",
+    output_path="evidence/orders.json",
 )
 
 defs = Definitions(assets=[orders], asset_checks=[orders_accepted])
@@ -64,7 +64,7 @@ proofframe/rows            rows scanned          (absent on unknown)
 proofframe/violations      violation count       (absent on unknown)
 proofframe/schema_digest   resolved Arrow schema (absent on unknown)
 proofframe/reasons         why, when there is a why
-proofframe/bundle          path, when output was written
+proofframe/bundle          path, when output_path was given
 ```
 
 An `unknown` has no report, so the row-level fields are absent rather than zero.

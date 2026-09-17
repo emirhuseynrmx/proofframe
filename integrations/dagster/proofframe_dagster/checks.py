@@ -89,7 +89,7 @@ def build_acceptance_check(
     name: str = "proofframe_acceptance",
     policy: Mapping[str, Any] | None = None,
     csv_options: Mapping[str, Any] | None = None,
-    output: str | Path | None = None,
+    output_path: str | Path | None = None,
     private_key: str | None = None,
     unknown_severity: str = "warn",
     blocking: bool = True,
@@ -99,7 +99,7 @@ def build_acceptance_check(
     :param asset: the asset whose materialisation produced ``path``
     :param path: the CSV or Parquet file to scan
     :param contract: the contract itself, or a path to a JSON file holding one
-    :param output: where to write the acceptance bundle; nothing is written when omitted
+    :param output_path: where to write the acceptance bundle; nothing is written when omitted
     :param private_key: signs the bundle when given, leaving it hash-bound when not
     :param unknown_severity: ``warn`` or ``error`` for a scan that could not complete
     :param blocking: whether a failed check stops downstream assets
@@ -116,9 +116,9 @@ def build_acceptance_check(
             dict(resolved),
             policy=dict(policy) if policy is not None else None,
             csv_options=dict(csv_options) if csv_options is not None else None,
-            output=output,
+            output=output_path,
             private_key=private_key,
         )
-        return acceptance_result(bundle, unknown_severity=severity, bundle_path=output)
+        return acceptance_result(bundle, unknown_severity=severity, bundle_path=output_path)
 
     return _check

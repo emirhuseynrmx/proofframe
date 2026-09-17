@@ -84,7 +84,7 @@ def test_unknown_severity_is_validated(tmp_path):
 
 def test_the_bundle_is_written_when_asked(tmp_path):
     output = tmp_path / "evidence.json"
-    orders, check = built(tmp_path, "1,5\n", output=output)
+    orders, check = built(tmp_path, "1,5\n", output_path=output)
     result = materialize([orders, check])
     assert result.success
     assert output.exists()

@@ -16,11 +16,11 @@ validate = ProofFrameAcceptOperator(
     task_id="validate_orders",
     path="/opt/airflow/data/orders.parquet",
     contract="/opt/airflow/contracts/orders.json",
-    output="/opt/airflow/evidence/{{ ds }}/orders.json",
+    output_path="/opt/airflow/evidence/{{ ds }}/orders.json",
 )
 ```
 
-`path` and `output` are templated, so `{{ ds }}` and the rest of the Airflow
+`path` and `output_path` are templated, so `{{ ds }}` and the rest of the Airflow
 context resolve as usual.
 
 ## What each status does to the task
@@ -60,10 +60,10 @@ the digests that identify it:
 }
 ```
 
-The bundle itself is written to `output`, and `bundle_path` names it. Omit
-`output` and nothing is written; `bundle_path` is then null.
+The bundle itself is written to `output_path`, and `bundle_path` names it. Omit
+`output_path` and nothing is written; `bundle_path` is then null.
 
-`accept_file` refuses to overwrite an existing `output`. Give the path something
+`accept_file` refuses to overwrite an existing `output_path`. Give the path something
 per-run, as the `{{ ds }}` above does, or a cleared task will fail on the file its
 first attempt wrote.
 
