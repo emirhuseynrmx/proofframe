@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,11 @@ def _run_commands(source: str, job: str | None = None) -> list[str]:
     for index, line in enumerate(lines):
         stripped = line.strip()
         # A job header is the only key at exactly two spaces of indentation.
-        if stripped.endswith(":") and len(line) - len(line.lstrip()) == 2 and " " not in stripped[:-1]:
+        if (
+            stripped.endswith(":")
+            and len(line) - len(line.lstrip()) == 2
+            and " " not in stripped[:-1]
+        ):
             current = stripped[:-1]
         if job is not None and current != job:
             continue
@@ -134,6 +139,37 @@ def test_ci_installs_dependencies_needed_during_full_test_collection() -> None:
         assert package in quality[0], f"{package} missing from the coverage job"
 
 
+def test_release_evidence_requires_every_job_that_gates_a_release() -> None:
+    """The evidence job, the list it records, and the publish gate agree on one set.
+
+    These three drifted apart the moment a job was added: a release could be cut with
+    the integrations job red, because `needs` did not mention it, and the publish gate
+    counted the jobs rather than naming them.
+    """
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    publish = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+
+    needs = re.search(r"release-evidence:.*?needs: \[([^\]]+)\]", ci, re.DOTALL)
+    assert needs, "release-evidence declares no needs"
+    gating = {name.strip() for name in needs.group(1).split(",")}
+
+    recorded = re.search(r"required_jobs: \[([^\]]+)\]", ci)
+    assert recorded, "release evidence records no required_jobs"
+    listed = {name.strip().strip('"') for name in recorded.group(1).split(",")}
+
+    assert gating == listed, (sorted(gating), sorted(listed))
+    assert "integrations" in gating, "the scheduler packages must gate their own release"
+    assert f"(.required_jobs | length == {len(listed)})" in publish, (
+        f"the publish gate counts a different number than the {len(listed)} recorded"
+    )
+
+
+def test_scheduler_packages_require_the_engine_version_they_ship_with() -> None:
+    from scripts.verify_release_version import read_versions, verify_integrations
+
+    verify_integrations(ROOT, read_versions(ROOT)[1])
+
+
 def test_release_gate_remains_compatible_with_python_310() -> None:
     source = (ROOT / "benchmarks/release_gate.py").read_text(encoding="utf-8")
 
@@ -159,12 +195,9 @@ def test_release_artifacts_are_checksummed_sbomed_and_attested_before_publish() 
     assert "SHA256SUMS" in publish
     assert "format: spdx-json" in publish
     assert "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610" in publish
-    assert (
-        "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be"
-        in publish
-    )
+    assert "actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be" in publish
     assert "actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b" in publish
-    assert "subject-path: \"dist/*\"" in publish
+    assert 'subject-path: "dist/*"' in publish
     assert "sbom-path: release-metadata/proofframe.spdx.json" in publish
 
 

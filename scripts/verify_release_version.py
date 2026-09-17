@@ -1,4 +1,4 @@
-"""Fail a release when Cargo, Python metadata, or the Git tag disagree."""
+"""Fail a release when Cargo, Python metadata, the integrations, or the Git tag disagree."""
 
 from __future__ import annotations
 
@@ -44,13 +44,53 @@ def verify_versions(root: Path, tag: str) -> None:
         raise ValueError(f"release tag must be {expected_tag}, got {tag}")
 
 
+#: The distributions published alongside the engine from this same tag.
+INTEGRATIONS = ("integrations/airflow", "integrations/dagster")
+
+DEPENDS_ON_ENGINE = re.compile(r'"proofframe>=([^,"]+),<([^"]+)"')
+
+
+def verify_integrations(root: Path, version: str) -> None:
+    """Require each scheduler package to carry the release version and require it.
+
+    Two things can drift independently and neither shows up in a green test run: a
+    package can keep the previous version string, and it can keep a lower bound that
+    a resolver would satisfy with the previous engine. Both would publish happily and
+    install the wrong pair.
+    """
+
+    for name in INTEGRATIONS:
+        manifest = root / name / "pyproject.toml"
+        declared = _section_version(manifest, "project")
+        if declared != version:
+            raise ValueError(f"{name} is {declared}, expected {version}")
+
+        match = DEPENDS_ON_ENGINE.search(manifest.read_text(encoding="utf-8"))
+        if match is None:
+            raise ValueError(f"{name} does not pin a proofframe range")
+        lower = match.group(1)
+        if lower != version:
+            raise ValueError(
+                f"{name} requires proofframe>={lower}, which a resolver can satisfy "
+                f"with an engine older than {version}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--integrations",
+        action="store_true",
+        help="also check the scheduler distributions published from this tag",
+    )
     args = parser.parse_args()
+    root = args.root.resolve()
     try:
-        verify_versions(args.root.resolve(), args.tag)
+        verify_versions(root, args.tag)
+        if args.integrations:
+            verify_integrations(root, args.tag.removeprefix("v"))
     except ValueError as error:
         parser.error(str(error))
     return 0

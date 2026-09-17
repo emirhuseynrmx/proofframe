@@ -106,7 +106,7 @@ jobs:
 
       - name: Lint
         run: |
-          python -m pip install ruff==0.15.1
+          python -m pip install ruff==0.16.6
           python -m ruff check integrations/
           python -m ruff format --check integrations/
 
@@ -287,7 +287,7 @@ jobs:
   release-evidence:
     name: Release evidence
     if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '.')
-    needs: [rust, python, python-quality, miri, fuzz, benchmark-gate]
+    needs: [rust, python, python-quality, miri, fuzz, benchmark-gate, integrations]
     runs-on: ubuntu-latest
     steps:
       - name: Record the exact validated tag commit
@@ -298,7 +298,7 @@ jobs:
             --arg ref "${GITHUB_REF}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg benchmark_digest "${{ needs.benchmark-gate.outputs.artifact-digest }}" \
-            '{schema: $schema, sha: $sha, ref: $ref, ci_run_id: $run_id, benchmark_artifact_digest: $benchmark_digest, required_jobs: ["rust", "python", "python-quality", "miri", "fuzz", "benchmark-gate"]}' \
+            '{schema: $schema, sha: $sha, ref: $ref, ci_run_id: $run_id, benchmark_artifact_digest: $benchmark_digest, required_jobs: ["rust", "python", "python-quality", "miri", "fuzz", "benchmark-gate", "integrations"]}' \
             > release-evidence.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

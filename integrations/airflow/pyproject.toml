@@ -18,7 +18,12 @@ classifiers = [
 ]
 dependencies = [
   "proofframe>=0.7.2,<0.8",
-  "apache-airflow>=2.7",
+  # Upper-bounded deliberately. The operators import BaseOperator from
+  # airflow.models, which is the Airflow 2 location; Airflow 3 moves the provider
+  # surface to airflow.sdk. Claiming >=2.7 with no ceiling would tell a resolver
+  # that Airflow 3 is supported when nothing here has been run against it. CI
+  # tests 2.10.5; the ceiling lifts in the release that adds a 3.x job beside it.
+  "apache-airflow>=2.7,<3",
 ]
 
 [project.optional-dependencies]

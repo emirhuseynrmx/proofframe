@@ -50,7 +50,7 @@ jobs:
             --arg sha "$SHA" \
             --arg ref "refs/tags/$tag" \
             --arg run_id "$RUN_ID" \
-            '.schema == "proofframe.release-evidence.v1" and .sha == $sha and .ref == $ref and .ci_run_id == $run_id and (.benchmark_artifact_digest | length > 0) and (.required_jobs | length == 6)' \
+            '.schema == "proofframe.release-evidence.v1" and .sha == $sha and .ref == $ref and .ci_run_id == $run_id and (.benchmark_artifact_digest | length > 0) and (.required_jobs | length == 7)' \
             release-evidence/release-evidence.json
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -176,6 +176,67 @@ jobs:
           path: release-metadata
           if-no-files-found: error
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+
+  integration-dists:
+    name: Build the scheduler packages
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build==1.3.0 twine==6.2.0
+      # The declared dependency on the engine must be the version being released,
+      # or a green publish could ship a package that resolves to the previous one.
+      - name: Both packages require the version being released
+        run: python scripts/verify_release_version.py --tag "${{ needs.gate.outputs.tag }}" --integrations
+      - run: python -m build --outdir dist/airflow integrations/airflow
+      - run: python -m build --outdir dist/dagster integrations/dagster
+      - run: python -m twine check dist/airflow/* dist/dagster/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-dists
+          path: dist
+          if-no-files-found: error
+
+  publish-airflow:
+    needs: [gate, integration-dists]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-airflow
+      url: https://pypi.org/project/proofframe-airflow/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: integration-dists
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/airflow
+
+  publish-dagster:
+    needs: [gate, integration-dists]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-dagster
+      url: https://pypi.org/project/proofframe-dagster/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: integration-dists
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/dagster
 
   publish-crate:
     needs: [gate, wheels, sdist]

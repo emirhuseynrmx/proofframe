@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/emirhuseynrmx/proofframe/main/assets/banner.png" alt="ProofFrame" width="100%" />
+  <img src="https://raw.githubusercontent.com/emirhuseynrmx/proofframe/main/assets/banner.png" alt="ProofFrame 0.7.2 — verifiable data contracts" width="100%" />
 </div>
 
 # ProofFrame
@@ -13,56 +13,76 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)](https://www.rust-lang.org/)
 
-**Relational Arrow contracts, exact dataset rules, and verifiable evidence.**
+**A validator that tells you when it did not run, and hands you the evidence when it did.**
 
-ProofFrame is a Rust-native data quality engine for PyArrow, Pandas, Polars, CSV, Parquet, and Arrow
-streams. It compiles strict contracts against the physical schema, scans record batches without
-turning rows into Python objects, and produces evidence that can be stored, compared, and signed.
+ProofFrame is a Rust data-quality engine for PyArrow, Pandas, Polars, CSV, Parquet and Arrow
+streams. It compiles a contract against the physical schema before the first row is read, scans
+record batches without turning cells into Python objects, and returns a decision you can verify
+months later without the data in front of you.
 
-## Why ProofFrame
+## What is different
 
-Most data checks answer one question: did the table pass? Production systems usually need three:
+**The answer has three values, not two.** `accepted`, `rejected`, `unknown`. A file that could not
+be opened, a limit that was exhausted, a schema that did not match — none of those become an
+acceptance. Most validators have nowhere to put *the check did not run*, so it lands on one of the
+two real outcomes, and which one you inherit is an accident of how the error was caught.
 
-1. **What exactly was checked?** Versioned BLAKE3 fingerprints identify the ordered dataset.
-2. **Why did it fail?** Exact violation counts and bounded row-level findings explain the verdict.
-3. **What changed?** Keyed diffs report added, removed, and changed records without loading both
-   datasets into memory.
+**The verdict travels with what produced it.** Evidence V2 binds the dataset fingerprint, the
+resolved Arrow schema, the contract source, the compiled plan and the resources the scan actually
+used. Verification is offline and rescans nothing — it proves the envelope, which is what lets it
+tell you that the contract you are reading now is not the contract that ran.
 
-ProofFrame keeps these answers deterministic and resource-bounded. Exact uniqueness, diff, and
-leakage operations have explicit memory, temporary-storage, sample, and output limits. Corrupt
-temporary data, incompatible schemas, ambiguous contracts, and exceeded limits fail closed.
+**Counts are exact while output stays bounded.** You get the true number of violations and a capped
+set of example rows, rather than a sampled estimate or an unbounded dump. A truncated finding list
+says it was truncated; the count beside it is still the count.
 
+**The limits are stated before the scan, not discovered during it.** 512 MiB of memory and 4 GiB of
+temporary storage by default, charged before each allocation rather than observed afterwards. A scan
+that would exceed them fails instead of growing, and `spill="never"` refuses rather than touching
+the disk at all. Corrupt temporary data, ambiguous contracts and incompatible schemas fail closed.
+
+**One compiled engine behind every surface.** The CLI, the Python package, the browser build and the
+scheduler operators call the same compiled functions. The offline review you save from a browser tab
+is byte for byte the document the CLI writes, because no second renderer exists to disagree with the
+first.
+
+**A new rule cannot invalidate an old receipt.** A rule joins the compiled plan digest only when a
+contract uses it, and the V1 contract format and both fingerprint protocols stay frozen. Receipts
+written before a release keep verifying after it, and there is a test for each rule that says so.
+
+> **0.7.2 — The contract moves into the scheduler**
+>
+> Airflow and Dagster get real packages instead of a sample DAG. `proofframe-airflow`
+> ships `ProofFrameAcceptOperator` and `ProofFrameVerifyOperator`; `proofframe-dagster`
+> ships `build_acceptance_check`. Both call the bindings in process rather than shelling
+> out to the CLI, so the library's exception types survive and the engine's own memory
+> and temporary-storage limits are the ones that apply.
+>
+> Acceptance answers with three statuses and each scheduler offers two, so neither
+> mapping is left to the caller. Dagster reports `accepted` as a pass, `rejected` as a
+> failed check at `ERROR`, and `unknown` at `WARN` — a scan that did not complete decided
+> nothing, and reporting it at `ERROR` would claim the data failed. Airflow raises the
+> non-retryable failure on `rejected`, because the same bytes under the same contract
+> cannot reach a different decision, and leaves `unknown` to `on_unknown`, which is the
+> one status a retry can legitimately change.
+>
+> The Airflow operator pushes a summary rather than a bundle. XCom lives in the
+> scheduler's metadata database and a bundle carries the full report and the Evidence V2
+> envelope; the decision, the digests that identify it, and the path the bundle was
+> written to go through instead.
+>
 > **0.7.1 — Nine more rules, and a review every surface can write**
 >
 > Ordering, step, exclusivity, totals, mean, standard deviation, conditional uniqueness,
-> ledger balance, category dominance, row-count drift, text length, and dates written as dates. Each one joins the plan digest only when a
-> contract uses it, so existing receipts keep verifying.
+> ledger balance, category dominance, row-count drift, text length, and dates written as
+> dates. Each joins the plan digest only when a contract uses it, so existing receipts
+> keep verifying. Uniqueness no longer needs a writable directory, so it runs on a
+> read-only filesystem and in a browser, failing closed on the memory budget instead of
+> on a missing folder. A profile drops the one count it cannot finish rather than the
+> whole scan, and says which. `review_html` and `review_markdown` are part of the crate,
+> so every surface renders the same report from the same code.
 >
-> Uniqueness no longer needs a writable directory, so it runs on a read-only filesystem
-> and in a browser, failing closed on the memory budget instead of on a missing folder.
-> With nowhere to spill, state grows until the budget stops it, and the columns compete
-> for that budget rather than being rationed a slice each.
->
-> A profile now drops the one count it cannot finish instead of the whole scan, and says
-> which: `ColumnProfile.distinct_limited` marks a column whose distinct values outran the
-> budget, so an absent count is absent for a stated reason. Rules that return a verdict
-> are unchanged — `unique` still fails closed.
->
-> The review is rendered by the engine. `review_html` and `review_markdown` are part of the
-> crate, so a Rust caller gets the same offline report the CLI writes, and Python calls the
-> same code instead of its own copy. Fixtures pin the output byte for byte against the
-> renderer this replaced.
->
-> **0.7.0 — Review and acceptance**
->
-> Turn a validation run into an offline HTML report, CI Markdown summary, validation JSON,
-> and signable Evidence V2. One scan, exact counts, bounded samples.
->
-> Then decide with it: `accept_file` answers **accepted**, **rejected** or **unknown**, and a
-> file that could not be read is never quietly accepted. The bundle binds the contract, the
-> acceptance policy, the CSV reader settings and the evidence, and verifies offline.
->
-> Contract errors now identify the offending column and explain the expected type or version.
+> Earlier releases are in the [changelog](CHANGELOG.md).
 
 ## Try it without installing anything
 
@@ -165,6 +185,53 @@ a delivery that has not landed yet, for example.
 Findings are not sampled by default: a sample can carry values out of your data
 and into a build artifact. Set `max-samples` when you want them.
 
+## In Airflow and Dagster
+
+The same acceptance scan, inside the worker rather than in a subprocess.
+
+```python
+from proofframe_airflow import ProofFrameAcceptOperator
+
+validate = ProofFrameAcceptOperator(
+    task_id="validate_orders",
+    path="/opt/airflow/data/orders.parquet",
+    contract="/opt/airflow/contracts/orders.json",
+    output_path="/opt/airflow/evidence/{{ ds }}/orders.json",
+)
+```
+
+`accepted` succeeds and returns a summary. `rejected` raises Airflow's non-retryable
+failure, because the same bytes under the same contract cannot decide differently.
+`unknown` is the one status a retry can change, so it is the one left configurable
+through `on_unknown`. `ProofFrameVerifyOperator` checks a bundle a previous task wrote,
+and rescans nothing.
+
+In Dagster the result belongs on the asset that produced the file:
+
+```python
+from proofframe_dagster import build_acceptance_check
+
+orders_accepted = build_acceptance_check(
+    asset=orders,
+    path="data/orders.parquet",
+    contract="contracts/orders.json",
+    output_path="evidence/orders.json",
+)
+```
+
+`accepted` passes; `rejected` fails the check at `ERROR`; `unknown` fails it at `WARN`,
+because a scan that never completed decided nothing about the rows. The check is
+blocking by default, so downstream assets wait for a verdict.
+
+Both packages put the decision, the digests and the bundle path in the scheduler's own
+metadata, and leave the report and the Evidence V2 envelope on disk.
+
+`proofframe-airflow` requires `apache-airflow>=2.7,<3`. The operators import
+`BaseOperator` from `airflow.models`, which is where Airflow 2 keeps it; Airflow 3 moves
+the provider surface to `airflow.sdk`. The ceiling is there so a resolver is not told
+that a version nothing has been tested against will work, and it lifts in the release
+that adds a 3.x job to CI beside the 2.10.5 one.
+
 ## Install
 
 Python 3.10–3.13:
@@ -177,6 +244,14 @@ Rust 1.85 or newer:
 
 ```bash
 cargo add proofframe@0.7.2
+```
+
+The scheduler integrations are separate distributions, so the core package keeps its
+dependency surface and you install only the one you run:
+
+```bash
+pip install proofframe-airflow==0.7.2
+pip install proofframe-dagster==0.7.2
 ```
 
 ## The 30-second demo
@@ -465,7 +540,7 @@ than established data-quality platforms.
 | Tool | Prefer it when | ProofFrame trade-off |
 | --- | --- | --- |
 | [Pandera](https://pandera.readthedocs.io/) | You want Python-first dataframe schemas, typing, and familiar pandas workflows. | ProofFrame prioritizes Arrow streams, exact global rules, and evidence over dataframe typing ergonomics. |
-| [Great Expectations](https://docs.greatexpectations.io/) | You need a large expectation library, data docs, and broad orchestration connectors. | ProofFrame has a narrower rule surface and fewer integrations, but keeps validation and proof artifacts compact. |
+| [Great Expectations](https://docs.greatexpectations.io/) | You need a large expectation library, data docs, and broad orchestration connectors. | ProofFrame has a narrower rule surface and a smaller connector set — GitHub Actions, Airflow, Dagster and dbt — but keeps validation and proof artifacts compact. |
 | [Soda](https://docs.soda.io/) | You want monitors, alerting, and a mature data-observability workflow. | ProofFrame is a library/CLI for deterministic checks; it does not replace an observability platform. |
 | [Deequ](https://github.com/awslabs/deequ) | Your data platform is Spark/Scala and you value its constraint-suggestion ecosystem. | ProofFrame avoids a Spark dependency and works directly with Arrow, but does not provide Deequ's Spark ecosystem. |
 
