@@ -28,7 +28,6 @@ with DAG(
     validate_contract = BashOperator(
         task_id="validate_contract",
         bash_command=(
-            "proofframe check '{{ params.data_path }}' "
-            "--contract '{{ params.contract_path }}'"
+            "proofframe check '{{ params.data_path }}' --contract '{{ params.contract_path }}'"
         ),
     )

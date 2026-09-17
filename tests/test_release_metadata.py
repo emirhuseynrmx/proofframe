@@ -8,8 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_rust_and_python_versions_match_release() -> None:
-    assert read_versions(ROOT) == ("0.7.1", "0.7.1")
-    verify_versions(ROOT, "v0.7.1")
+    assert read_versions(ROOT) == ("0.7.2", "0.7.2")
+    verify_versions(ROOT, "v0.7.2")
 
 
 def test_python_package_is_classified_as_stable() -> None:
@@ -64,16 +64,26 @@ def test_ci_installs_built_wheels_without_assuming_an_activated_virtualenv() -> 
         assert "maturin develop" not in source, workflow.name
 
 
-def _run_commands(source: str) -> list[str]:
+def _run_commands(source: str, job: str | None = None) -> list[str]:
     """Every `run:` script in a workflow as one line, folded YAML blocks joined.
 
     A folded block puts the command on the lines after `run: >`, so a naive search of
     single lines misses it entirely.
+
+    Pass `job` to read one job rather than the file. Without it every job answers at
+    once, which was fine while the only jobs running pytest were the two that run the
+    package suite, and stopped being fine when a third arrived.
     """
     commands: list[str] = []
     lines = source.splitlines()
+    current: str | None = None
     for index, line in enumerate(lines):
         stripped = line.strip()
+        # A job header is the only key at exactly two spaces of indentation.
+        if stripped.endswith(":") and len(line) - len(line.lstrip()) == 2 and " " not in stripped[:-1]:
+            current = stripped[:-1]
+        if job is not None and current != job:
+            continue
         if not stripped.startswith("- run:") and not stripped.startswith("run:"):
             continue
         head = stripped.split(":", 1)[1].strip()
@@ -101,9 +111,13 @@ def test_ci_installs_dependencies_needed_during_full_test_collection() -> None:
     dropped from a line it had stopped matching anyway.
     """
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    # Named rather than searched file-wide. The integrations job also installs pytest,
+    # for Airflow's and Dagster's own suites, and it is not one of the two jobs that
+    # collect the package tests.
     installs = [
         command
-        for command in _run_commands(ci)
+        for name in ("python", "python-quality")
+        for command in _run_commands(ci, name)
         if "pip install" in command and "pytest" in command
     ]
 
