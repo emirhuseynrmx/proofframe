@@ -1,5 +1,7 @@
 [build-system]
-requires = ["hatchling"]
+# Pinned: newer hatchling writes metadata 2.5, which the release job's twine 6.2
+# rejects in `twine check`; bump the two together.
+requires = ["hatchling==1.29.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,7 +10,7 @@ version = "0.7.2"
 description = "ProofFrame acceptance operators for Apache Airflow"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "../../LICENSE" }
+license = { file = "LICENSE" }
 keywords = ["airflow", "data-quality", "contracts", "arrow", "proofframe"]
 classifiers = [
   "Framework :: Apache Airflow",
