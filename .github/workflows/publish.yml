@@ -4,6 +4,14 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
+  # Publishes only the Airflow and Dagster packages, from the branch it is run on,
+  # for a release whose engine is already on PyPI. For when a tag's engine shipped
+  # and its scheduler packages did not; the tagged path above is unchanged.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release whose scheduler packages to publish, e.g. v0.7.2"
+        required: true
 
 permissions:
   contents: read
@@ -301,3 +309,68 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         working-directory: ${{ steps.crate-source.outputs.root }}
         run: cargo publish --locked
+
+  scheduler-dists:
+    name: Build the scheduler packages (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build==1.3.0 twine==6.2.0
+      - name: Both packages require the version being released
+        run: python scripts/verify_release_version.py --tag "${{ inputs.tag }}" --integrations
+      # The packages pin the engine exactly; publishing them before it exists would
+      # ship something no resolver can install.
+      - name: The engine they require is already on PyPI
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version="${TAG#v}"
+          curl --fail --silent --show-error --output /dev/null "https://pypi.org/pypi/proofframe/${version}/json"
+      - run: python -m build --outdir dist/airflow integrations/airflow
+      - run: python -m build --outdir dist/dagster integrations/dagster
+      - run: python -m twine check dist/airflow/* dist/dagster/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scheduler-dists
+          path: dist
+          if-no-files-found: error
+
+  publish-airflow-manual:
+    needs: scheduler-dists
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-airflow
+      url: https://pypi.org/project/proofframe-airflow/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: scheduler-dists
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/airflow
+
+  publish-dagster-manual:
+    needs: scheduler-dists
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-dagster
+      url: https://pypi.org/project/proofframe-dagster/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: scheduler-dists
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/dagster
