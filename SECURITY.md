@@ -36,9 +36,13 @@ limits, exact violation count, and retained output count. Receipt V2 signs the e
 envelope with an Ed25519 domain-separated message. V1 report receipts are migration-only and must
 be requested explicitly.
 
-Signature integrity and signer authorization are different properties. `SignatureOnly` proves only
-that the embedded key signed the receipt. Production authorization should supply an expected public
-key or a `TrustStore`. A valid receipt does not prove honest data collection or contract sufficiency.
+Signature integrity and signer authorization are different properties. Since 0.7.2 a receipt is
+`valid` only when a trusted key signed it: `SignatureOnly` trusts no signer, so a receipt verified
+under it is never valid, and `ReceiptVerification::intact()` (Python: `"intact"`) reports integrity
+alone. Supply an expected public key or a `TrustStore`. Before 0.7.2, `SignatureOnly` and a
+missing expected key accepted any signer, so a receipt signed with a freshly generated key verified
+as valid. Acceptance bundles follow the same rule: unsigned or unpinned bundles are never valid. A
+valid receipt does not prove honest data collection or contract sufficiency.
 
 ## Redacted PII fingerprints
 

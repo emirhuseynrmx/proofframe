@@ -67,7 +67,7 @@ def test_a_missing_file_is_unknown_not_rejected(tmp_path):
     result = materialize([orders, check], raise_on_error=False)
     evaluation = result.get_asset_check_evaluations()[0]
     assert not evaluation.passed
-    assert evaluation.severity == AssetCheckSeverity.WARN
+    assert evaluation.severity == AssetCheckSeverity.ERROR
     assert evaluation.metadata["proofframe/status"].value == "unknown"
 
 

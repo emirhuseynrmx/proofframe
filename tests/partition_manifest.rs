@@ -83,9 +83,16 @@ fn signed_partition_manifest_rejects_body_tampering() {
     let signing = SigningKey::from_bytes(&[42_u8; 32]);
     let receipt = sign_partition_manifest(manifest, &signing).unwrap();
 
-    let verified =
-        verify_partition_manifest_receipt(&receipt, &TrustPolicy::SignatureOnly).unwrap();
+    let verified = verify_partition_manifest_receipt(
+        &receipt,
+        &TrustPolicy::ExpectedKey(signing.verifying_key()),
+    )
+    .unwrap();
     assert!(verified.valid);
+    let unpinned =
+        verify_partition_manifest_receipt(&receipt, &TrustPolicy::SignatureOnly).unwrap();
+    assert!(unpinned.intact());
+    assert!(!unpinned.valid);
 
     let mut tampered = receipt;
     tampered.unsigned.manifest.partitions[0].rows += 1;

@@ -3,7 +3,8 @@ use proofframe::evidence::{
     DatasetEvidence, EngineEvidence, EvidenceSchema, EvidenceV2, ExecutionEvidence, ResultEvidence,
 };
 use proofframe::receipt::{
-    TrustPolicy, generate_keypair_json, sign_json, sign_v2, verify_json_with_policy, verify_v2,
+    TrustPolicy, generate_keypair_json, sign_json, sign_v2, verify_json_with_expected_key,
+    verify_json_with_policy, verify_v2,
 };
 use proofframe::{FingerprintVersion, ResourceLimits};
 
@@ -161,8 +162,36 @@ fn legacy_v1_receipts_remain_explicitly_readable() {
     .unwrap();
 
     let verification = verify_json_with_policy(&receipt, &TrustPolicy::SignatureOnly).unwrap();
-
-    assert!(verification.valid);
+    assert!(verification.intact());
     assert!(verification.legacy);
-    assert!(verification.signer_trusted);
+    assert!(!verification.signer_trusted);
+    assert!(!verification.valid);
+
+    let public = keys["public_key"].as_str().unwrap();
+    let trusted = verify_json_with_expected_key(&receipt, Some(public)).unwrap();
+    assert!(trusted.valid);
+    assert!(trusted.legacy);
+    assert!(trusted.signer_trusted);
+}
+
+// Before 0.7.2 a receipt signed with any freshly generated key verified as valid
+// and trusted when no key was pinned. Integrity is not authenticity.
+#[test]
+fn a_receipt_signed_by_an_unknown_key_is_never_valid_without_a_trusted_key() {
+    let attacker = SigningKey::from_bytes(&[99; 32]);
+    let forged = sign_v2(fixture(), &attacker).unwrap();
+
+    let unpinned = verify_v2(&forged, &TrustPolicy::SignatureOnly).unwrap();
+    assert!(unpinned.intact());
+    assert!(!unpinned.signer_trusted);
+    assert!(!unpinned.valid);
+
+    let json = serde_json::to_string(&forged).unwrap();
+    let no_key = verify_json_with_expected_key(&json, None).unwrap();
+    assert!(no_key.intact());
+    assert!(!no_key.valid);
+
+    let issuer = SigningKey::from_bytes(&[21; 32]);
+    let pinned = verify_v2(&forged, &TrustPolicy::ExpectedKey(issuer.verifying_key())).unwrap();
+    assert!(!pinned.valid);
 }

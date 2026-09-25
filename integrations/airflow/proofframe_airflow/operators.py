@@ -123,7 +123,9 @@ class ProofFrameVerifyOperator(BaseOperator):
     """Verifies an acceptance bundle another task produced.
 
     Verification rescans nothing. It checks that the bundle's bytes still bind to
-    its digests and, when a key is pinned, that the signature is that signer's.
+    its digests and that the pinned key signed it. Without ``expected_public_key``
+    the task fails, because an unsigned bundle can be edited and re-hashed by anyone;
+    ``integrity_only=True`` accepts an intact bundle whose signer is not checked.
     """
 
     template_fields = ("bundle_path",)
@@ -135,22 +137,35 @@ class ProofFrameVerifyOperator(BaseOperator):
         bundle_path: str | Path,
         expected_public_key: str | None = None,
         require_accepted: bool = True,
+        integrity_only: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.bundle_path = bundle_path
         self.expected_public_key = expected_public_key
         self.require_accepted = require_accepted
+        self.integrity_only = integrity_only
 
     def execute(self, context: Any) -> dict:
         bundle = json.loads(Path(self.bundle_path).read_text(encoding="utf-8"))
         result = pf.verify_acceptance(bundle, expected_public_key=self.expected_public_key)
-        if not result["valid"]:
-            raise AirflowFailException(f"{self.bundle_path} did not verify: {result}")
+        verified = result["intact"] if self.integrity_only else result["valid"]
+        if not verified:
+            hint = (
+                ""
+                if self.expected_public_key or self.integrity_only
+                else ("; no expected_public_key was given")
+            )
+            raise AirflowFailException(f"{self.bundle_path} did not verify: {result}{hint}")
 
         status = bundle["payload"]["decision"]["status"]
         if self.require_accepted and status != "accepted":
             # An authentic bundle is not an accepted one; an unknown that verifies
             # is still unknown.
             raise AirflowFailException(f"{self.bundle_path} verified but is {status}")
-        return {"valid": True, "status": status, "authenticated": result["authenticated"]}
+        return {
+            "valid": result["valid"],
+            "intact": result["intact"],
+            "status": status,
+            "authenticated": result["authenticated"],
+        }

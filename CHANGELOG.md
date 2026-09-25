@@ -2,6 +2,44 @@
 
 ## 0.7.2
 
+### Security
+
+- **A receipt signed by any key verified as valid when no key was pinned.**
+  `TrustPolicy::SignatureOnly` accepted every signer, and it was what
+  `verify_json_with_expected_key(.., None)`, `verify_receipt(receipt)` and
+  `proofframe verify receipt.json` used, so a receipt signed with a freshly generated
+  key came back `valid: true, signer_trusted: true` and the CLI exited 0.
+  `SignatureOnly` now trusts no signer and a receipt is `valid` only under a key the
+  policy accepts. `ReceiptVerification::intact()` (Python: the new `"intact"` key)
+  reports integrity alone.
+- **An unsigned acceptance bundle could be edited and re-hashed.** `verify_acceptance`
+  called an unsigned bundle `valid` when its hash matched, and anyone can recompute a
+  hash, so a `rejected` decision edited to `accepted` verified. It now returns
+  `intact`, `authenticated` and `valid`, and `valid` needs the pinned key.
+- The CLI's `verify` and `verify-acceptance` exit 1 without `--expected-public-key` and
+  say why; `--integrity-only` checks integrity alone and labels the result.
+  `ProofFrameVerifyOperator` fails without `expected_public_key` unless
+  `integrity_only=True`.
+- **Dagster let downstream assets run on `unknown`.** `unknown` now defaults to `ERROR`,
+  the only severity at which a blocking check stops downstream assets; the description
+  still says `unknown`. `unknown_severity="warn"` restores the old behaviour explicitly.
+- `sign` reads the key from `--private-key-file`. `--private-key` still works and warns,
+  because a key on the command line lands in shell history and process listings.
+- The CLI notes on stderr when it reads a CSV with inferred types and pyarrow's null
+  tokens, under which a value such as the country code `NA` becomes null; `accept
+  --csv-options` pins both. The default itself changes in 0.8, because changing it in a
+  patch would change existing results.
+
+Adapting: pin the signer's public key wherever you verify (`expected_public_key=` in
+Python, `--expected-public-key` on the CLI, `TrustPolicy::ExpectedKey` or a `TrustStore`
+in Rust). Where only integrity was ever meant, read `intact` or pass `--integrity-only`.
+Found by an API misuse review (Trail of Bits' sharp-edges method). Still open, for 0.8: a
+fingerprint binds physical Arrow types, so the same values from Polars and PyArrow can
+fingerprint differently; the fix needs a new fingerprint mode and is kept out of a patch
+release.
+
+### Schedulers
+
 - Airflow and Dagster get real packages instead of a sample DAG. `integrations/airflow`
   publishes `proofframe-airflow` with `ProofFrameAcceptOperator` and
   `ProofFrameVerifyOperator`; `integrations/dagster` publishes `proofframe-dagster`
@@ -12,9 +50,8 @@
   `integrations/airflow/example_dags/`, for workers without the bindings installed.
 
 - Acceptance has three statuses and both schedulers offer two, so neither mapping is
-  left to the caller. Dagster reports `accepted` as a pass, `rejected` as a failed
-  check at `ERROR`, and `unknown` at `WARN`: a scan that did not complete decided
-  nothing, and reporting it at `ERROR` would claim the data failed. Airflow raises
+  left to the caller. Dagster reports `accepted` as a pass and fails `rejected` and
+  `unknown` at `ERROR` (see Security above). Airflow raises
   the non-retryable `AirflowFailException` on `rejected`, because the same bytes
   under the same contract cannot reach a different decision, and leaves `unknown`
   to `on_unknown`, which is the one status a retry can legitimately change. Both

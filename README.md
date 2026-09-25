@@ -1,5 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/emirhuseynrmx/proofframe/main/assets/banner.png" alt="ProofFrame 0.7.2 — verifiable data contracts" width="100%" />
+  <br/><br/>
+  <a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_ProofFrame-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor ProofFrame on GitHub Sponsors" height="36" /></a>
 </div>
 
 # ProofFrame
@@ -12,6 +14,7 @@
 [![DeepSource](https://app.deepsource.com/gh/emirhuseynrmx/proofframe.svg/?label=active+issues&show_trend=true)](https://app.deepsource.com/gh/emirhuseynrmx/proofframe/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)](https://www.rust-lang.org/)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emirhuseynrmx)
 
 **A validator that tells you when it did not run, and hands you the evidence when it did.**
 
@@ -19,6 +22,15 @@ ProofFrame is a Rust data-quality engine for PyArrow, Pandas, Polars, CSV, Parqu
 streams. It compiles a contract against the physical schema before the first row is read, scans
 record batches without turning cells into Python objects, and returns a decision you can verify
 months later without the data in front of you.
+
+## Sponsor ProofFrame
+
+ProofFrame is built and maintained by one person, in the open, under Apache-2.0. Sponsorship
+pays for the parts that do not ship as features: security fixes like the ones in 0.7.2,
+keeping the Airflow and Dagster packages current, and the logical fingerprint mode planned for
+0.8. If ProofFrame guards data you depend on, sponsoring keeps it maintained.
+
+<p align="center"><a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_ProofFrame-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor ProofFrame on GitHub Sponsors" height="36" /></a></p>
 
 ## What is different
 
@@ -50,7 +62,15 @@ first.
 contract uses it, and the V1 contract format and both fingerprint protocols stay frozen. Receipts
 written before a release keep verifying after it, and there is a test for each rule that says so.
 
-> **0.7.2 — The contract moves into the scheduler**
+> **0.7.2 — Trust fixes, and the contract moves into the scheduler**
+>
+> **Security.** A receipt or acceptance bundle is `valid` only under a key you trust.
+> Before 0.7.2 a receipt signed with any freshly generated key verified as `valid`
+> when no key was pinned, and an unsigned acceptance bundle whose decision was edited
+> and re-hashed verified as `valid`. Now `valid` means intact *and* signed by the key
+> you pinned; `intact` reports integrity alone, and the CLI asks for
+> `--expected-public-key` or an explicit `--integrity-only`. See the
+> [changelog](CHANGELOG.md#072) for every change and how to adapt.
 >
 > Airflow and Dagster get real packages instead of a sample DAG. `proofframe-airflow`
 > ships `ProofFrameAcceptOperator` and `ProofFrameVerifyOperator`; `proofframe-dagster`
@@ -59,9 +79,9 @@ written before a release keep verifying after it, and there is a test for each r
 > and temporary-storage limits are the ones that apply.
 >
 > Acceptance answers with three statuses and each scheduler offers two, so neither
-> mapping is left to the caller. Dagster reports `accepted` as a pass, `rejected` as a
-> failed check at `ERROR`, and `unknown` at `WARN` — a scan that did not complete decided
-> nothing, and reporting it at `ERROR` would claim the data failed. Airflow raises the
+> mapping is left to the caller. Dagster reports `accepted` as a pass and fails
+> `rejected` and `unknown` at `ERROR`, so a blocking check stops downstream assets on data
+> nobody accepted; the description still says `unknown`. Airflow raises the
 > non-retryable failure on `rejected`, because the same bytes under the same contract
 > cannot reach a different decision, and leaves `unknown` to `on_unknown`, which is the
 > one status a retry can legitimately change.
@@ -117,8 +137,9 @@ A review tells you what the data looks like. Acceptance turns that into a decisi
 application can act on.
 
 ```bash
-proofframe accept orders.csv --contract contract.json --policy policy.json   --csv-options reader.json --output acceptance.json
-proofframe verify-acceptance acceptance.json
+proofframe accept orders.csv --contract contract.json --policy policy.json \
+  --csv-options reader.json --private-key-file signer.key --output acceptance.json
+proofframe verify-acceptance acceptance.json --expected-public-key "$PROOFFRAME_PUBLIC_KEY"
 ```
 
 ```python
@@ -139,7 +160,10 @@ agree or disagree visibly. `1.234` is not silently guessed.
 
 `verify_acceptance` checks the bundle offline without rescanning, and checks its shape before
 it trusts any digest — a hash proves that what is present was not edited and says nothing about
-what is absent. Optional Ed25519 signing (`proofframe[signing]`) covers the whole payload.
+what is absent. It returns three answers: `intact` (the payload binds to its digests and any
+signature on it is correct), `authenticated` (the key you pinned signed it) and `valid` (both).
+An unsigned hash can be recomputed by anyone, so a bundle is never `valid` without a pinned key.
+Ed25519 signing (`proofframe[signing]`) covers the whole payload.
 
 Read the [acceptance guide](docs/acceptance.md) for the decision contract and its limits, and
 [the runnable example](examples/accept_and_verify.py) for an accepted delivery, a rejected one,
@@ -219,9 +243,10 @@ orders_accepted = build_acceptance_check(
 )
 ```
 
-`accepted` passes; `rejected` fails the check at `ERROR`; `unknown` fails it at `WARN`,
-because a scan that never completed decided nothing about the rows. The check is
-blocking by default, so downstream assets wait for a verdict.
+`accepted` passes; `rejected` and `unknown` fail the check at `ERROR`. The check is
+blocking by default and Dagster stops downstream assets only on `ERROR`, so data nobody
+accepted does not flow on. The description still says `unknown` for a scan that never
+completed; pass `unknown_severity="warn"` to let downstream assets run on it.
 
 Both packages put the decision, the digests and the bundle path in the scheduler's own
 metadata, and leave the report and the Evidence V2 envelope on disk.
@@ -555,12 +580,19 @@ proofframe fingerprint data.csv --fingerprint-version v2
 proofframe diff old.parquet new.parquet --key order_id --output changes.jsonl
 proofframe evidence data.parquet --contract contract.json --output evidence.json
 proofframe verify receipt.json --expected-public-key "$PROOFFRAME_PUBLIC_KEY"
+proofframe verify receipt.json --integrity-only   # intact, whoever signed it
 ```
+
+`verify` and `verify-acceptance` exit 0 only for a receipt or bundle signed by the key you
+pinned. Without a key they exit 1 and say why; `--integrity-only` checks integrity alone and
+says that the signer was not verified. `sign` reads the key from `--private-key-file`; the
+older `--private-key` still works but warns, because a key on the command line lands in shell
+history and process listings.
 
 | Exit code | Meaning |
 | ---: | --- |
 | 0 | Operation succeeded; check or receipt is valid |
-| 1 | Contract violation or invalid receipt |
+| 1 | Contract violation, invalid receipt, or no trusted key given |
 | 2 | Invalid input, contract, or command configuration |
 | 3 | Engine, I/O, schema, or corrupt-data failure |
 | 4 | Resource limit exceeded |
@@ -588,6 +620,12 @@ See the [crate guide](README-crates.md) and [API documentation](https://docs.rs/
 
 Version 0.7.2 preserves V1 fingerprints and the established compatibility entry points. New work
 should use `check`, explicit fingerprint versions, Evidence V2, and Receipt V2.
+
+Known limitation: a fingerprint binds the physical Arrow types, not the logical values. The same
+rows arriving as `large_string` from Polars and as `string` from PyArrow produce different
+fingerprints. Changing that would invalidate every existing receipt, so a separate logical
+fingerprint mode is planned for 0.8 rather than slipped into a patch release. Cast to one schema
+before fingerprinting when two producers must agree.
 
 Performance claims are tied to raw samples, dataset hashes, compiler and package versions, and
 machine metadata. The committed smoke harness is deterministic; the pinned 7,645,034-row Bitcoin
@@ -618,4 +656,6 @@ coverage, DeepSource, and SonarCloud.
 ## License and security
 
 ProofFrame is licensed under [Apache-2.0](LICENSE). Report vulnerabilities through the process in
-[SECURITY.md](SECURITY.md). Sponsorship is available through [GitHub Sponsors](https://github.com/sponsors/emirhuseynrmx).
+[SECURITY.md](SECURITY.md).
+
+If ProofFrame is useful to you, [sponsor it on GitHub](https://github.com/sponsors/emirhuseynrmx).
