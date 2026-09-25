@@ -1,7 +1,5 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/emirhuseynrmx/proofframe/main/assets/banner.png" alt="ProofFrame 0.7.2 — verifiable data contracts" width="100%" />
-  <br/><br/>
-  <a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_ProofFrame-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor ProofFrame on GitHub Sponsors" height="36" /></a>
 </div>
 
 # ProofFrame
@@ -22,15 +20,6 @@ ProofFrame is a Rust data-quality engine for PyArrow, Pandas, Polars, CSV, Parqu
 streams. It compiles a contract against the physical schema before the first row is read, scans
 record batches without turning cells into Python objects, and returns a decision you can verify
 months later without the data in front of you.
-
-## Sponsor ProofFrame
-
-ProofFrame is built and maintained by one person, in the open, under Apache-2.0. Sponsorship
-pays for the parts that do not ship as features: security fixes like the ones in 0.7.2,
-keeping the Airflow and Dagster packages current, and the logical fingerprint mode planned for
-0.8. If ProofFrame guards data you depend on, sponsoring keeps it maintained.
-
-<p align="center"><a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_ProofFrame-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor ProofFrame on GitHub Sponsors" height="36" /></a></p>
 
 ## What is different
 
@@ -653,9 +642,14 @@ CI covers Rust 1.85, Python 3.10–3.13 on Linux, macOS, and Windows, portable w
 allocation contracts, Miri-compatible state machines, fuzz targets, source-package hygiene,
 coverage, DeepSource, and SonarCloud.
 
+## Sponsoring
+
+ProofFrame is built and maintained by one person. If it guards data you depend on, or you want
+the logical fingerprint mode planned for 0.8 sooner, you can support it on GitHub Sponsors.
+
+<a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_ProofFrame-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor ProofFrame on GitHub Sponsors" /></a>
+
 ## License and security
 
 ProofFrame is licensed under [Apache-2.0](LICENSE). Report vulnerabilities through the process in
 [SECURITY.md](SECURITY.md).
-
-If ProofFrame is useful to you, [sponsor it on GitHub](https://github.com/sponsors/emirhuseynrmx).
