@@ -30,9 +30,10 @@ execution. Evidence is useful when a pass/fail result must be retained or compar
 later.
 
 A receipt is an Ed25519 signature over evidence. `verify_receipt()` reports
-cryptographic integrity separately from whether an expected public key was supplied
-and matched. A valid signature does not independently establish that the signer was
-authorized; obtain trusted public keys through a separate channel.
+integrity (`intact`) separately from authenticity (`valid`): a receipt is valid only
+when the public key you supplied signed it. Anyone can generate a key and sign, so a
+correct signature alone establishes nothing about who signed; obtain trusted public
+keys through a separate channel.
 
 ## Findings and bounded output
 

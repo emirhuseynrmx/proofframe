@@ -91,14 +91,28 @@ def test_signature_survives_no_payload_tamper_even_rehashed(tmp_path):
     assert bundle["payload"]["decision"]["status"] == "rejected"
     bundle["payload"]["decision"]["status"] = "accepted"
     bundle["sha256"] = _digest(bundle["payload"])
-    assert not pf.verify_acceptance(bundle)["valid"]
+    assert not pf.verify_acceptance(bundle)["intact"]
+
+
+def test_an_unsigned_decision_edited_and_rehashed_is_intact_but_never_valid(tmp_path):
+    # Before 0.7.2 this bundle verified as valid: an unsigned hash is recomputable by
+    # anyone, so it proves the bytes agree with themselves and nothing else.
+    from proofframe.acceptance import _digest
+
+    path = tmp_path / "input.csv"
+    path.write_text("x\n-1\n", encoding="utf8")
+    bundle = pf.accept_file(path, {"columns": {"x": {"min": 0}}})
+    assert bundle["payload"]["decision"]["status"] == "rejected"
+    bundle["payload"]["decision"]["status"] = "accepted"
+    bundle["sha256"] = _digest(bundle["payload"])
+    assert pf.verify_acceptance(bundle) == {"valid": False, "intact": True, "authenticated": False}
 
 
 @signing
 def test_missing_file_is_unknown_and_unsigned_is_not_authenticated(tmp_path):
     bundle = pf.accept_file(tmp_path / "missing.csv", {"columns": {"x": {"min": 0}}})
     assert bundle["payload"]["decision"]["status"] == "unknown"
-    assert pf.verify_acceptance(bundle) == {"valid": True, "authenticated": False}
+    assert pf.verify_acceptance(bundle) == {"valid": False, "intact": True, "authenticated": False}
     assert not pf.verify_acceptance(
         bundle, expected_public_key=pf.generate_keypair()["public_key"]
     )["valid"]
@@ -114,8 +128,14 @@ def test_acceptance_cli(tmp_path, capsys):
     output = tmp_path / "acceptance.json"
     main(["accept", str(path), "--contract", str(contract), "--output", str(output)])
     assert json.loads(capsys.readouterr().out)["payload"]["decision"]["status"] == "accepted"
-    main(["verify-acceptance", str(output)])
-    assert json.loads(capsys.readouterr().out)["valid"]
+    # Unsigned and no key pinned: intact, but not something the CLI will call valid.
+    with pytest.raises(SystemExit) as refused:
+        main(["verify-acceptance", str(output)])
+    assert refused.value.code == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["intact"] and not out["valid"] and "no trusted key" in out["reason"]
+    main(["verify-acceptance", str(output), "--integrity-only"])
+    assert json.loads(capsys.readouterr().out)["intact"]
 
 
 def test_resource_exhaustion_is_unknown(tmp_path):
@@ -172,7 +192,7 @@ def _accepted_bundle(tmp_path):
     path.write_text("amount\n1.0\n2.0\n", encoding="utf8")
     bundle = pf.accept_file(path, {"columns": {"amount": {"min": 0}}}, policy={"max_violations": 0})
     assert bundle["payload"]["decision"]["status"] == "accepted"
-    assert pf.verify_acceptance(bundle)["valid"]
+    assert pf.verify_acceptance(bundle)["intact"]
     return bundle
 
 
@@ -186,24 +206,24 @@ def test_a_payload_missing_required_fields_does_not_verify(tmp_path):
     for field in ("decision", "report", "evidence"):
         bundle["payload"].pop(field)
 
-    assert not pf.verify_acceptance(_rehash(bundle))["valid"]
+    assert not pf.verify_acceptance(_rehash(bundle))["intact"]
 
 
 def test_an_accepted_decision_without_its_scan_does_not_verify(tmp_path):
     bundle = _accepted_bundle(tmp_path)
     bundle["payload"]["evidence"] = None
 
-    assert not pf.verify_acceptance(_rehash(bundle))["valid"]
+    assert not pf.verify_acceptance(_rehash(bundle))["intact"]
 
 
 def test_an_unrecognized_status_or_extra_field_does_not_verify(tmp_path):
     invented = _accepted_bundle(tmp_path)
     invented["payload"]["decision"]["status"] = "provisionally-fine"
-    assert not pf.verify_acceptance(_rehash(invented))["valid"]
+    assert not pf.verify_acceptance(_rehash(invented))["intact"]
 
     extended = _accepted_bundle(tmp_path)
     extended["payload"]["override"] = True
-    assert not pf.verify_acceptance(_rehash(extended))["valid"]
+    assert not pf.verify_acceptance(_rehash(extended))["intact"]
 
 
 def test_an_unknown_decision_may_legitimately_carry_no_scan(tmp_path):
@@ -212,14 +232,14 @@ def test_an_unknown_decision_may_legitimately_carry_no_scan(tmp_path):
     bundle["payload"]["evidence"] = None
     bundle["payload"]["decision"] = {"status": "unknown", "reasons": ["OSError"], "evaluated": {}}
 
-    assert pf.verify_acceptance(_rehash(bundle))["valid"]
+    assert pf.verify_acceptance(_rehash(bundle))["intact"]
 
 
 def test_a_real_unknown_from_a_missing_file_verifies(tmp_path):
     bundle = pf.accept_file(tmp_path / "absent.csv", {"columns": {"amount": {"min": 0}}})
 
     assert bundle["payload"]["decision"]["status"] == "unknown"
-    assert pf.verify_acceptance(bundle)["valid"]
+    assert pf.verify_acceptance(bundle)["intact"]
 
 
 def _violating_bundle(tmp_path):
@@ -230,7 +250,7 @@ def _violating_bundle(tmp_path):
     )
     assert bundle["payload"]["decision"]["status"] == "accepted"
     assert bundle["payload"]["report"]["violation_count"] == 1
-    assert pf.verify_acceptance(bundle)["valid"]
+    assert pf.verify_acceptance(bundle)["intact"]
     return bundle
 
 
@@ -264,7 +284,7 @@ def test_a_report_or_evidence_of_the_wrong_shape_does_not_verify(tmp_path, name,
     bundle = _violating_bundle(tmp_path)
     mutate(bundle["payload"])
 
-    assert not pf.verify_acceptance(_rehash(bundle))["valid"], name
+    assert not pf.verify_acceptance(_rehash(bundle))["intact"], name
 
 
 @signing
@@ -278,5 +298,6 @@ def test_an_untouched_bundle_still_verifies_signed_and_unsigned(tmp_path):
 
     assert pf.verify_acceptance(signed, expected_public_key=keys["public_key"]) == {
         "valid": True,
+        "intact": True,
         "authenticated": True,
     }

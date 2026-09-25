@@ -65,6 +65,7 @@ def _open_reader(path: str | Path, batch_size: int = DEFAULT_BATCH_SIZE) -> pa.R
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if source.suffix.lower() == ".csv":
+        _note_csv_defaults()
         return arrow_csv.open_csv(
             source,
             read_options=arrow_csv.ReadOptions(block_size=max(batch_size, 1_024)),
@@ -74,6 +75,20 @@ def _open_reader(path: str | Path, batch_size: int = DEFAULT_BATCH_SIZE) -> pa.R
         batches = parquet_file.iter_batches(batch_size=batch_size)
         return pa.RecordBatchReader.from_batches(parquet_file.schema_arrow, batches)
     raise ValueError(f"Unsupported input: {source}. Use .csv or .parquet")
+
+
+_CSV_NOTE = (
+    "note: CSV read with inferred types and pyarrow's null tokens, so cells such as "
+    "'NA', 'N/A', 'null' and '' become nulls (a country code 'NA' included). "
+    "`proofframe accept --csv-options` pins the types and null tokens explicitly."
+)
+
+
+def _note_csv_defaults() -> None:
+    """Say, once per run, that a CSV was read with guessed types and null tokens."""
+    if not getattr(_note_csv_defaults, "shown", False):
+        print(_CSV_NOTE, file=sys.stderr)
+        _note_csv_defaults.shown = True  # type: ignore[attr-defined]
 
 
 def _read(path: str) -> pa.RecordBatchReader:
@@ -224,13 +239,26 @@ def _parser() -> argparse.ArgumentParser:
 
     sign_parser = commands.add_parser("sign", help="sign a V2 evidence envelope with Ed25519")
     sign_parser.add_argument("report")
-    sign_parser.add_argument("--private-key", required=True)
+    sign_key = sign_parser.add_mutually_exclusive_group(required=True)
+    sign_key.add_argument(
+        "--private-key-file", help="file holding the URL-safe base64 Ed25519 private key"
+    )
+    sign_key.add_argument(
+        "--private-key",
+        help="deprecated: the key lands in shell history and process listings; "
+        "use --private-key-file",
+    )
     sign_parser.add_argument("--receipt-version", choices=("v1", "v2"), default="v2")
     sign_parser.add_argument("--output")
 
     verify_parser = commands.add_parser("verify", help="verify a signed JSON receipt")
     verify_parser.add_argument("receipt")
     verify_parser.add_argument("--expected-public-key")
+    verify_parser.add_argument(
+        "--integrity-only",
+        action="store_true",
+        help="exit 0 when the receipt is intact, without deciding who signed it",
+    )
 
     profile_parser = commands.add_parser("profile", help="deprecated 0.4 profiling alias")
     profile_parser.add_argument("path")
@@ -273,7 +301,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_accept_parser.add_argument("bundle")
     verify_accept_parser.add_argument("--expected-public-key")
+    verify_accept_parser.add_argument(
+        "--integrity-only",
+        action="store_true",
+        help="exit 0 when the bundle is intact, without deciding who produced it",
+    )
     return parser
+
+
+def _verdict(result: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    """Exit status for a verification: authenticity by default, integrity on request."""
+    if args.integrity_only:
+        result = {**result, "checked": "integrity only; the signer was not verified"}
+        return result, 0 if result["intact"] else 1
+    if args.expected_public_key is None:
+        result = {
+            **result,
+            "reason": "no trusted key: pass --expected-public-key, "
+            "or --integrity-only to check integrity alone",
+        }
+    return result, 0 if result["valid"] else 1
 
 
 def _load_mapping(path: str | Path, label: str) -> dict[str, Any]:
@@ -367,6 +414,8 @@ def _execute_compat(args: argparse.Namespace) -> tuple[dict[str, Any], int] | No
 def _execute_acceptance(args: argparse.Namespace) -> tuple[dict[str, Any], int] | None:
     """Runs the commands this release added, or returns None for an older one."""
     if args.command == "accept":
+        if args.csv_options is None and Path(args.path).suffix.lower() == ".csv":
+            _note_csv_defaults()
         result = accept_file(
             args.path,
             _load_mapping(args.contract, "contract"),
@@ -390,7 +439,7 @@ def _execute_acceptance(args: argparse.Namespace) -> tuple[dict[str, Any], int] 
         result = verify_acceptance(
             _load_mapping(args.bundle, "bundle"), expected_public_key=args.expected_public_key
         )
-        return result, 0 if result["valid"] else 1
+        return _verdict(result, args)
     if args.command == "review":
         result = review(
             _open_reader(args.path, args.batch_size),
@@ -454,9 +503,20 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return result, 0
     if args.command == "sign":
         report = _load_mapping(args.report, "report")
+        if args.private_key is not None:
+            print(
+                "warning: --private-key exposes the key in shell history and process "
+                "listings; use --private-key-file",
+                file=sys.stderr,
+            )
+        private_key = (
+            Path(args.private_key_file).read_text(encoding="utf-8").strip()
+            if args.private_key_file
+            else args.private_key
+        )
         result = sign_receipt(
             report,
-            private_key=args.private_key,
+            private_key=private_key,
             receipt_version=args.receipt_version,
         )
         if args.output:
@@ -465,7 +525,7 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.command == "verify":
         receipt = _load_mapping(args.receipt, "receipt")
         result = verify_receipt(receipt, expected_public_key=args.expected_public_key)
-        return result, 0 if result["valid"] else 1
+        return _verdict(result, args)
     if args.command == "suggest":
         return suggest_contract(
             _open_reader(args.path, args.batch_size),

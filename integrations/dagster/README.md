@@ -41,13 +41,14 @@ Acceptance answers `accepted`, `rejected` or `unknown`. A check result carries
 | --- | --- | --- | --- |
 | `accepted` | true | — | scanned, qualified under this policy |
 | `rejected` | false | `ERROR` | scanned, did not qualify |
-| `unknown` | false | `WARN` | the scan did not complete, so nothing was decided |
+| `unknown` | false | `ERROR` | the scan did not complete, so nothing was decided |
 
 `unknown` is not a failing dataset. It is a missing file, an unreadable block, an
-I/O error — the scan never reached a verdict. Collapsing it into `ERROR` would
-report a decision that was never made, and collapsing it into a pass would report
-one made the other way. Pass `unknown_severity="error"` when a pipeline should
-treat an incomplete scan as hard as a rejection.
+I/O error — the scan never reached a verdict, and the check's description says so.
+It fails at `ERROR` because Dagster stops downstream assets only on `ERROR`, and data
+nobody accepted should not flow on by default. Before 0.7.2 it defaulted to `WARN`,
+which let a blocking check's downstream assets run on an incomplete scan. Pass
+`unknown_severity="warn"` to choose that explicitly.
 
 These are acceptance-layer semantics. A rejection is this contract under this
 policy, not a general judgement about the data.

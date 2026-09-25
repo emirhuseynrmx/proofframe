@@ -108,9 +108,7 @@ def profile(
             stacklevel=2,
         )
     temp_budget = _temp_budget(max_temp, spill)
-    return profile_arrow(
-        _as_reader(data), distinct, _row_count_hint(data), max_memory, temp_budget
-    )
+    return profile_arrow(_as_reader(data), distinct, _row_count_hint(data), max_memory, temp_budget)
 
 
 def suggest_contract(
@@ -331,9 +329,7 @@ def diff(
     before_bytes = _byte_size_hint(before)
     after_bytes = _byte_size_hint(after)
     input_bytes = (
-        before_bytes + after_bytes
-        if before_bytes is not None and after_bytes is not None
-        else None
+        before_bytes + after_bytes if before_bytes is not None and after_bytes is not None else None
     )
     return diff_arrow(
         _as_reader(before),
@@ -438,6 +434,16 @@ def verify_receipt(
     *,
     expected_public_key: str | None = None,
 ) -> dict[str, bool]:
-    """Verify receipt integrity and, when supplied, the expected signer identity."""
+    """Verify a receipt against the signer you trust.
+
+    ``valid`` is true only when the receipt is intact *and* signed by
+    ``expected_public_key``; without a key it is always false, because anyone can
+    sign with a key of their own. ``intact`` reports integrity alone: supported
+    schema, matching hash and a correct signature, whoever made it.
+    """
     payload = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
-    return verify_proof_receipt_any(payload, expected_public_key)
+    result = dict(verify_proof_receipt_any(payload, expected_public_key))
+    result["intact"] = bool(
+        result["schema_supported"] and result["report_hash_matches"] and result["signature_valid"]
+    )
+    return result

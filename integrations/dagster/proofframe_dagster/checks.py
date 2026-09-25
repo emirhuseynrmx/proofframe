@@ -5,11 +5,14 @@ fields, so the mapping is deliberate rather than obvious:
 
     accepted   passed, no severity
     rejected   not passed, ERROR    the data was scanned and did not qualify
-    unknown    not passed, WARN     the scan did not complete, so nothing was
+    unknown    not passed, ERROR    the scan did not complete, so nothing was
                                     decided; an operator has to look
 
-Collapsing `unknown` into a failure would report a decision that was never made,
-and collapsing it into a pass would report one that was made the other way.
+The description still says `unknown`, so nobody reads it as a rejection. The
+severity is ERROR because Dagster only stops downstream assets on an ERROR: data
+nobody accepted must not flow on by default. Before 0.7.2 `unknown` defaulted to
+WARN and a blocking check let downstream assets run on it. Pass
+``unknown_severity="warn"`` to choose that behaviour explicitly.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ def _contract(contract: Mapping[str, Any] | str | Path) -> dict:
 def acceptance_result(
     bundle: dict,
     *,
-    unknown_severity: AssetCheckSeverity = AssetCheckSeverity.WARN,
+    unknown_severity: AssetCheckSeverity = AssetCheckSeverity.ERROR,
     bundle_path: str | Path | None = None,
 ) -> AssetCheckResult:
     """Turns an acceptance bundle into the check result that describes it."""
@@ -91,7 +94,7 @@ def build_acceptance_check(
     csv_options: Mapping[str, Any] | None = None,
     output_path: str | Path | None = None,
     private_key: str | None = None,
-    unknown_severity: str = "warn",
+    unknown_severity: str = "error",
     blocking: bool = True,
 ):
     """Defines a check that scans one file against one contract.
@@ -101,7 +104,8 @@ def build_acceptance_check(
     :param contract: the contract itself, or a path to a JSON file holding one
     :param output_path: where to write the acceptance bundle; nothing is written when omitted
     :param private_key: signs the bundle when given, leaving it hash-bound when not
-    :param unknown_severity: ``warn`` or ``error`` for a scan that could not complete
+    :param unknown_severity: ``error`` (default) stops downstream assets on a scan that
+        could not complete; ``warn`` lets them run
     :param blocking: whether a failed check stops downstream assets
     """
     if unknown_severity not in UNKNOWN_SEVERITIES:

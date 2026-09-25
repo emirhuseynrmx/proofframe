@@ -52,21 +52,23 @@ def test_rejected_is_an_error():
     assert "violation_limit_exceeded" in result.description
 
 
-def test_unknown_warns_by_default():
-    # A scan that did not complete decided nothing. Reporting it at ERROR would
-    # claim the data failed, which is not what happened.
+def test_unknown_stops_downstream_by_default():
+    # A scan that did not complete decided nothing, and data nobody accepted must
+    # not flow on: Dagster blocks downstream assets only on ERROR. The description
+    # still says `unknown`, so it is not read as a rejection.
     result = acceptance_result(bundle("unknown", ["OSError"], report=False))
     assert not result.passed
-    assert result.severity == AssetCheckSeverity.WARN
+    assert result.severity == AssetCheckSeverity.ERROR
+    assert result.description.startswith("unknown:")
     assert "proofframe/rows" not in result.metadata
 
 
-def test_unknown_can_be_escalated():
+def test_unknown_can_be_relaxed_explicitly():
     result = acceptance_result(
         bundle("unknown", ["OSError"], report=False),
-        unknown_severity=AssetCheckSeverity.ERROR,
+        unknown_severity=AssetCheckSeverity.WARN,
     )
-    assert result.severity == AssetCheckSeverity.ERROR
+    assert result.severity == AssetCheckSeverity.WARN
 
 
 def test_signature_presence_is_reported_not_assumed():

@@ -369,14 +369,25 @@ def _scan_matches_decision(payload: dict) -> bool:
 
 
 def verify_acceptance(bundle: dict, *, expected_public_key: str | None = None) -> dict:
-    """Offline integrity/signature check; does not rescan input or prove publisher honesty.
+    """Offline check of an acceptance bundle; rescans nothing and proves no publisher honesty.
 
-    Pin expected_public_key to require authentication. An unsigned hash can be
-    rewritten by anyone and provides no authenticity.
+    Returns three answers:
+
+    ``intact``
+        The payload still binds to every digest, and any signature on it is correct.
+        Anyone can rewrite an unsigned payload and recompute its hash, so an intact
+        bundle can still say whatever its last editor wanted.
+    ``authenticated``
+        ``expected_public_key`` was given and signed this payload.
+    ``valid``
+        Intact and authenticated. Without a pinned key a bundle is never valid:
+        before 0.7.2 an unsigned bundle whose decision was edited from ``rejected``
+        to ``accepted`` and re-hashed verified as valid.
     """
+    refused = {"valid": False, "intact": False, "authenticated": False}
     try:
         payload = bundle["payload"]
-        valid = (
+        intact = (
             _well_formed(payload)
             and payload["version"] == BUNDLE_VERSION
             and bundle["sha256"] == _digest(payload)
@@ -391,18 +402,18 @@ def verify_acceptance(bundle: dict, *, expected_public_key: str | None = None) -
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
             if signature["algorithm"] != "Ed25519":
-                return {"valid": False, "authenticated": False}
+                return refused
             try:
                 Ed25519PublicKey.from_public_bytes(_decode(signature["public_key"])).verify(
                     _decode(signature["value"]), _canonical(payload)
                 )
             except InvalidSignature:
-                return {"valid": False, "authenticated": False}
+                return refused
             authenticated = expected_public_key is not None and _decode(
                 expected_public_key
             ) == _decode(signature["public_key"])
-        if expected_public_key is not None and not authenticated:
-            valid = False
-        return {"valid": valid, "authenticated": bool(valid and authenticated)}
+        intact = bool(intact)
+        authenticated = bool(intact and authenticated)
+        return {"valid": authenticated, "intact": intact, "authenticated": authenticated}
     except (KeyError, ValueError, TypeError):
-        return {"valid": False, "authenticated": False}
+        return refused

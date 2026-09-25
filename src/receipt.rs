@@ -112,6 +112,12 @@ pub struct SignedPartitionReceiptV1 {
     pub signature: String,
 }
 
+/// The outcome of verifying a receipt.
+///
+/// `valid` means *authentic*: intact, signed, and signed by a key the trust policy
+/// accepts. It is never true without a trusted key. [`intact`](Self::intact) answers
+/// the narrower question of whether the bytes are unaltered and correctly signed,
+/// whoever signed them.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReceiptVerification {
     pub valid: bool,
@@ -120,6 +126,16 @@ pub struct ReceiptVerification {
     pub schema_supported: bool,
     pub signer_trusted: bool,
     pub legacy: bool,
+}
+
+impl ReceiptVerification {
+    /// Supported schema, matching hash and a correct signature, by any key.
+    ///
+    /// This is integrity, not authenticity: anyone can sign with a key of their own.
+    #[must_use]
+    pub const fn intact(&self) -> bool {
+        self.schema_supported && self.report_hash_matches && self.signature_valid
+    }
 }
 
 fn canonical(value: &impl Serialize) -> Result<Vec<u8>, ProofFrameError> {
@@ -304,6 +320,9 @@ pub fn verify_partition_manifest_receipt(
 }
 
 /// Verify V2 or legacy V1 JSON with an optional expected signer key.
+///
+/// Without a key no signer is trusted, so the result is never `valid`; check
+/// [`ReceiptVerification::intact`] for integrity alone.
 pub fn verify_json_with_expected_key(
     receipt_json: &str,
     expected_public_key: Option<&str>,
@@ -401,6 +420,9 @@ fn partition_message(unsigned: &UnsignedPartitionReceiptV1) -> Result<Vec<u8>, P
 }
 
 /// Verify a signed receipt's schema, report hash, and Ed25519 signature.
+/// Integrity of a legacy V1 receipt only: `valid` here does not consider who signed it.
+///
+/// Use [`verify_json_with_policy`] to require a trusted signer.
 pub fn verify_json(receipt_json: &str) -> Result<Verification, ProofFrameError> {
     let receipt: SignedReceipt = serde_json::from_str(receipt_json)?;
     validate_i_json(&receipt.unsigned.report)?;

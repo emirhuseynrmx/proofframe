@@ -131,11 +131,30 @@ def test_verify_rejects_an_authentic_unknown(monkeypatch, tmp_path):
     path.write_text(json.dumps(bundle("unknown", ["OSError"], report=False)), encoding="utf-8")
     monkeypatch.setattr(
         "proofframe_airflow.operators.pf.verify_acceptance",
-        lambda *a, **k: {"valid": True, "authenticated": False},
+        lambda *a, **k: {"valid": True, "intact": True, "authenticated": True},
     )
-    task = ProofFrameVerifyOperator(task_id="verify", bundle_path=path)
+    task = ProofFrameVerifyOperator(task_id="verify", bundle_path=path, expected_public_key="k")
     with pytest.raises(AirflowFailException, match="unknown"):
         task.execute({})
 
-    allowed = ProofFrameVerifyOperator(task_id="verify", bundle_path=path, require_accepted=False)
+    allowed = ProofFrameVerifyOperator(
+        task_id="verify", bundle_path=path, expected_public_key="k", require_accepted=False
+    )
     assert allowed.execute({})["status"] == "unknown"
+
+
+def test_verify_without_a_key_fails_unless_integrity_is_all_that_is_asked(monkeypatch, tmp_path):
+    # An unsigned bundle can be edited and re-hashed by anyone, so intact is not valid.
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps(bundle("accepted")), encoding="utf-8")
+    monkeypatch.setattr(
+        "proofframe_airflow.operators.pf.verify_acceptance",
+        lambda *a, **k: {"valid": False, "intact": True, "authenticated": False},
+    )
+    task = ProofFrameVerifyOperator(task_id="verify", bundle_path=path)
+    with pytest.raises(AirflowFailException, match="no expected_public_key"):
+        task.execute({})
+
+    lenient = ProofFrameVerifyOperator(task_id="verify", bundle_path=path, integrity_only=True)
+    result = lenient.execute({})
+    assert result["intact"] and not result["valid"] and result["status"] == "accepted"

@@ -68,8 +68,10 @@ fingerprint and row count, the distinct keys checked, and the distinct keys abse
 - `sign_evidence(evidence, *, private_key) -> dict` creates a V2 Ed25519 receipt.
 - `sign_receipt(evidence, *, private_key, receipt_version="v2") -> dict` signs V2
   evidence by default; `receipt_version="v1"` is an explicit migration path.
-- `verify_receipt(receipt, *, expected_public_key=None) -> dict[str, bool]` verifies
-  receipt integrity and, when supplied, expected signer identity.
+- `verify_receipt(receipt, *, expected_public_key=None) -> dict[str, bool]` returns
+  `valid` (intact and signed by `expected_public_key`; always false without one),
+  `intact` (schema, hash and signature correct, whoever signed), `signer_trusted` and the
+  individual checks.
 - `assemble_evidence_unchecked(data, contract, report) -> dict` builds an envelope
   around a caller-supplied report. Prefer `check_with_evidence`: this escape hatch
   cannot prove the report and input came from one validation pass.

@@ -42,12 +42,16 @@ def main() -> None:
             encoding="utf-8",
         )
 
+        # The receiving side signs what it decided, so a later reader can tell this
+        # bundle from one somebody edited: an unsigned hash anyone can recompute.
+        keys = pf.generate_keypair()
         bundle = pf.accept_file(
             delivery,
             CONTRACT,
             policy=POLICY,
             csv_options=CSV_OPTIONS,
             output=root / "acceptance.json",
+            private_key=keys["private_key"],
         )
         decision = bundle["payload"]["decision"]
         print(json.dumps(decision, indent=2))
@@ -60,7 +64,7 @@ def main() -> None:
         # Verification answers whether the bundle is intact, not what the decision
         # was: the decision is read from the payload it just vouched for.
         saved = json.loads((root / "acceptance.json").read_text(encoding="utf-8"))
-        if not pf.verify_acceptance(saved)["valid"]:
+        if not pf.verify_acceptance(saved, expected_public_key=keys["public_key"])["valid"]:
             raise SystemExit("the saved bundle did not verify")
         if saved["payload"]["decision"]["status"] != "accepted":
             raise SystemExit("the saved bundle carries a different decision")
@@ -71,7 +75,7 @@ def main() -> None:
         # the file was read with.
         tampered = json.loads(json.dumps(saved))
         tampered["payload"]["read_settings"]["csv"]["decimal_point"] = "."
-        if pf.verify_acceptance(tampered)["valid"]:
+        if pf.verify_acceptance(tampered, expected_public_key=keys["public_key"])["valid"]:
             raise SystemExit("an edited read setting still verified")
 
         # A file the policy does not accept says so, and says why.
