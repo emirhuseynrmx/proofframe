@@ -11,6 +11,7 @@
 [![DeepSource](https://app.deepsource.com/gh/emirhuseynrmx/proofframe.svg/?label=active+issues&show_trend=true)](https://app.deepsource.com/gh/emirhuseynrmx/proofframe/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-orange)](https://www.rust-lang.org/)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emirhuseynrmx)
 
 **Compiled Arrow contracts with deterministic, resource-bounded evidence.**
 
@@ -18,11 +19,13 @@ ProofFrame compiles strict, versioned contracts against Arrow schemas and execut
 over `RecordBatchReader` streams. It provides exact validation verdicts, canonical fingerprints,
 bounded findings, keyed diffs, evidence records, and signed proof receipts from one Rust core.
 
-> **Current release — 0.7.2**
+> **Current release — 0.7.2: trust fixes**
 >
-> Eleven more contract rules, a review the crate renders itself, and exact state that no longer
-> needs a filesystem to run. V1 plans and fingerprint protocols remain frozen, and a new rule
-> joins the plan digest only when a contract uses it.
+> A receipt is `valid` only when a key you trust signed it. Before 0.7.2,
+> `TrustPolicy::SignatureOnly` accepted every signer, so a receipt signed with a freshly
+> generated key verified as valid. `SignatureOnly` now trusts no signer, and
+> `ReceiptVerification::intact()` reports integrity alone. Pin the signer with
+> `TrustPolicy::ExpectedKey` or a `TrustStore`. No public item was removed or renamed.
 
 ```bash
 cargo add proofframe@0.7.2
@@ -123,8 +126,31 @@ and that result is reported as incomplete and carries no evidence.
 ## Evidence and trust
 
 Evidence V2 carries separate canonical contract, compiled plan, and Arrow schema digests. Receipt
-V2 uses Ed25519 signatures and should be verified with `TrustPolicy::ExpectedKey` or `TrustStore`
-when signer identity matters.
+V2 uses Ed25519 signatures.
+
+A verification answers two questions. `intact()` says the schema is supported, the hash matches
+and the signature is correct, by whatever key. `valid` says that *and* that the trust policy accepts
+the signer. Anyone can generate a key, so only `valid` is authenticity:
+
+```rust,ignore
+use proofframe::receipt::{verify_v2, TrustPolicy};
+
+let checked = verify_v2(&receipt, &TrustPolicy::ExpectedKey(trusted_key))?;
+assert!(checked.valid);        // intact and signed by trusted_key
+
+let unpinned = verify_v2(&receipt, &TrustPolicy::SignatureOnly)?;
+assert!(!unpinned.valid);      // never valid: no signer is trusted
+let _ = unpinned.intact();     // integrity alone
+```
+
+## 0.7.2
+
+- `TrustPolicy::SignatureOnly` trusts no signer; before, it accepted every key, and it was what
+  `verify_json_with_expected_key(.., None)` used. A receipt is `valid` only under a key the policy
+  accepts. `ReceiptVerification::intact()` is new and reports integrity alone.
+- The Python package applies the same rule to acceptance bundles, the CLI asks for
+  `--expected-public-key` or an explicit `--integrity-only`, and the Dagster check stops
+  downstream assets on `unknown` by default. See the [changelog](CHANGELOG.md#072).
 
 ## 0.7.1
 
@@ -178,5 +204,17 @@ Version 0.7.2 preserves V1 fingerprints and established compatibility entry poin
 should use `ContractDocument`, `CompiledContract::compile_document`, explicit fingerprint versions,
 and Receipt V2 or partition-manifest receipts with a trust policy.
 
+Known limitation: a fingerprint binds physical Arrow types, not logical values, so the same rows as
+`Utf8` and as `LargeUtf8` fingerprint differently. Changing that would invalidate existing receipts;
+a logical fingerprint mode is planned for 0.8. Cast to one schema before fingerprinting when two
+producers must agree.
+
 The MSRV is Rust 1.85. Full API documentation is available on [docs.rs](https://docs.rs/proofframe),
 and release history is recorded in the [changelog](CHANGELOG.md).
+
+## Sponsoring
+
+ProofFrame is built and maintained by one person. If it guards data you depend on, or you want the
+logical fingerprint mode planned for 0.8 sooner, you can support it on GitHub Sponsors.
+
+<a href="https://github.com/sponsors/emirhuseynrmx"><img src="https://img.shields.io/badge/Sponsor_ProofFrame-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor ProofFrame on GitHub Sponsors" /></a>
